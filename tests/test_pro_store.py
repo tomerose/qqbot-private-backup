@@ -174,6 +174,17 @@ class ProStoreTests(unittest.TestCase):
             self.store.resend_verification(application.application_id, REVIEWER, now=1_065)
         self.assertEqual(self.store.verify(APPLICANT, replacement_code, now=1_066), "active")
 
+    def test_only_reviewer_can_read_minimal_audit_events(self):
+        application = self._awaiting_review_application()
+
+        with self.assertRaisesRegex(ProStoreError, "reviewer_required"):
+            self.store.audit_for(application.application_id, "2000000000", now=1_002)
+        events = self.store.audit_for(application.application_id, REVIEWER, now=1_002)
+
+        self.assertEqual(events[0].event_type, "created")
+        self.assertFalse(hasattr(events[0], "qq_id"))
+        self.assertFalse(hasattr(events[0], "verification_code"))
+
 
 if __name__ == "__main__":
     unittest.main()

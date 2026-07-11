@@ -66,6 +66,7 @@ class ProApplication(Star):
         states = {
             "pending_email": "待发送邮件",
             "awaiting_review": "等待人工审核",
+            "approval_pending_confirm": "等待审核人二次确认",
             "awaiting_verify": "等待 QQ 验证",
             "active": "Pro 已开通",
             "denied": "申请未通过",
@@ -86,6 +87,7 @@ class ProApplication(Star):
             "application_state": "当前申请状态不支持此操作。",
             "reviewer_required": "无权执行此审核操作。",
             "duration_invalid": "有效期需在 1 到 365 天之间。",
+            "resend_rate_limited": "刚补发过验证码，请 1 分钟后再试。",
             "verification_invalid": "验证码无效或已失效。",
             "verification_locked": "验证码已锁定，请重新申请。",
             "qq_id_invalid": "QQ 号无效。",
@@ -151,12 +153,37 @@ class ProApplication(Star):
                 if target is None:
                     yield event.plain_result("未找到可审核的申请。")
                     return
-                code = self.store.approve(tokens[1], sender_id, days, now=now)
-                if not await self._send_private_code(event, target.qq_id, code):
+                self.store.request_approval(tokens[1], sender_id, days, now=now)
+                yield event.plain_result(
+                    f"已发起二次确认，请在 5 分钟内回复：/pro confirm {tokens[1].upper()}"
+                )
+                return
+            if action == "confirm" and len(tokens) == 2:
+                target_qq = self.store.delivery_target(
+                    tokens[1], sender_id, "approval_pending_confirm", now=now
+                )
+                code = self.store.confirm_approval(tokens[1], sender_id, now=now)
+                if not await self._send_private_code(event, target_qq, code):
                     self.store.reset_verification(tokens[1], sender_id, now=now)
                     yield event.plain_result("验证码暂未送达，申请尚未开通；请让申请人先私聊小柠后重新审核。")
                     return
-                yield event.plain_result("审核通过，验证码已发送到申请人私聊。")
+                yield event.plain_result("二次确认完成，验证码已发送到申请人私聊。")
+                return
+            if action == "resend" and len(tokens) == 2:
+                target_qq = self.store.delivery_target(tokens[1], sender_id, "awaiting_verify", now=now)
+                code = self.store.resend_verification(tokens[1], sender_id, now=now)
+                if not await self._send_private_code(event, target_qq, code):
+                    yield event.plain_result("验证码暂未送达，申请保持待 QQ 验证；请 1 分钟后补发。")
+                    return
+                yield event.plain_result("新验证码已发送到申请人私聊，旧验证码已失效。")
+                return
+            if action == "audit" and len(tokens) == 2:
+                events = self.store.audit_for(tokens[1], sender_id, now=now)
+                details = "\n".join(
+                    f"{item.event_type} | {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(item.event_at))}"
+                    for item in events
+                )
+                yield event.plain_result(f"审核记录：\n{details or '暂无记录'}")
                 return
             if action == "deny" and len(tokens) == 2:
                 yield event.plain_result("已拒绝申请。" if self.store.deny(tokens[1], sender_id, now=now) else "未找到可拒绝的申请。")

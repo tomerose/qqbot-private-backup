@@ -34,6 +34,12 @@ class Application:
     pro_expires_at: float | None
 
 
+@dataclass(frozen=True)
+class AuditEvent:
+    event_type: str
+    event_at: float
+
+
 class ProStore:
     def __init__(self, path: Path, *, reviewer_id: str):
         self.path = Path(path)
@@ -412,6 +418,51 @@ class ProStore:
                 """
             ).fetchall()
             return tuple(self._row_to_application(row) for row in rows)
+
+    def delivery_target(
+        self, application_id: str, reviewer_id: str, required_state: str, *, now: float
+    ) -> str:
+        if str(reviewer_id or "").strip() != self.reviewer_id:
+            raise ProStoreError("reviewer_required")
+        key = str(application_id or "").strip().upper()
+        with self._transaction() as connection:
+            self._cleanup(connection, now)
+            row = connection.execute(
+                "SELECT qq_id, state FROM applications WHERE application_id = ?", (key,)
+            ).fetchone()
+            if row is None or row["state"] == "expired":
+                raise ProStoreError("application_expired")
+            if row["state"] != required_state:
+                raise ProStoreError("application_state")
+            return str(row["qq_id"])
+
+    def audit_for(
+        self, application_id: str, reviewer_id: str, *, now: float, limit: int = 20
+    ) -> tuple[AuditEvent, ...]:
+        if str(reviewer_id or "").strip() != self.reviewer_id:
+            raise ProStoreError("reviewer_required")
+        key = str(application_id or "").strip().upper()
+        bounded_limit = max(1, min(int(limit), 20))
+        with self._transaction() as connection:
+            self._cleanup(connection, now)
+            exists = connection.execute(
+                "SELECT 1 FROM applications WHERE application_id = ?", (key,)
+            ).fetchone()
+            if exists is None:
+                raise ProStoreError("application_expired")
+            rows = connection.execute(
+                """
+                SELECT event_type, event_at FROM events
+                WHERE application_id = ?
+                ORDER BY event_at ASC, event_id ASC
+                LIMIT ?
+                """,
+                (key, bounded_limit),
+            ).fetchall()
+            return tuple(
+                AuditEvent(event_type=str(row["event_type"]), event_at=float(row["event_at"]))
+                for row in rows
+            )
 
     def deny(self, application_id: str, reviewer_id: str, *, now: float) -> bool:
         if str(reviewer_id or "").strip() != self.reviewer_id:

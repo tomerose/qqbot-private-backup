@@ -94,10 +94,15 @@ class ProApplicationPluginTests(unittest.TestCase):
         self.assertIn("无权", denied[0])
         self.assertEqual(self.context.sent, [])
 
-        approved = asyncio.run(
+        approval_requested = asyncio.run(
             collect(self.plugin.on_message(FakeEvent(f"/pro approve {application_id} 90", REVIEWER)))
         )
-        self.assertIn("验证码已发送", approved[0])
+        self.assertIn("/pro confirm", approval_requested[0])
+        self.assertEqual(self.context.sent, [])
+
+        approved = asyncio.run(
+            collect(self.plugin.on_message(FakeEvent(f"/pro confirm {application_id}", REVIEWER)))
+        )
         self.assertNotRegex(approved[0], r"[A-Za-z0-9_-]{12,}")
         self.assertEqual(self.context.sent[0][0], f"llbot-test:FriendMessage:{APPLICANT}")
         code = re.search(r"/pro verify ([A-Za-z0-9_-]+)", chain_text(self.context.sent[0][1])).group(1)
@@ -131,12 +136,35 @@ class ProApplicationPluginTests(unittest.TestCase):
         )
         self.context.deliver = False
 
-        replies = asyncio.run(
+        asyncio.run(
             collect(self.plugin.on_message(FakeEvent(f"/pro approve {application_id}", REVIEWER)))
+        )
+        replies = asyncio.run(
+            collect(self.plugin.on_message(FakeEvent(f"/pro confirm {application_id}", REVIEWER)))
         )
 
         self.assertIn("未送达", replies[0])
         self.assertEqual(self.plugin.store.status_for(APPLICANT, now=1_001).state, "awaiting_review")
+
+    def test_only_reviewer_can_read_minimal_audit(self):
+        apply_reply = asyncio.run(
+            collect(self.plugin.on_message(FakeEvent("/pro apply", APPLICANT)))
+        )[0]
+        application_id = re.search(r"APP-[A-Z0-9]+", apply_reply).group(0)
+        asyncio.run(
+            collect(self.plugin.on_message(FakeEvent(f"/pro sent {application_id}", APPLICANT)))
+        )
+
+        denied = asyncio.run(
+            collect(self.plugin.on_message(FakeEvent(f"/pro audit {application_id}", "3000000000")))
+        )
+        allowed = asyncio.run(
+            collect(self.plugin.on_message(FakeEvent(f"/pro audit {application_id}", REVIEWER)))
+        )
+
+        self.assertIn("无权", denied[0])
+        self.assertIn("created", allowed[0])
+        self.assertNotIn(APPLICANT, allowed[0])
 
 
 if __name__ == "__main__":
