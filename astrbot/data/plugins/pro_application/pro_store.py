@@ -305,6 +305,76 @@ class ProStore:
             ).fetchone()
             return row is not None
 
+    def status_for(self, qq_id: str, *, now: float) -> Application | None:
+        identity = self._valid_qq_id(qq_id)
+        with self._transaction() as connection:
+            self._cleanup(connection, now)
+            row = connection.execute(
+                """
+                SELECT * FROM applications
+                WHERE qq_id = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (identity,),
+            ).fetchone()
+            return self._row_to_application(row) if row is not None else None
+
+    def pending_for_review(self, reviewer_id: str, *, now: float) -> tuple[Application, ...]:
+        if str(reviewer_id or "").strip() != self.reviewer_id:
+            raise ProStoreError("reviewer_required")
+        with self._transaction() as connection:
+            self._cleanup(connection, now)
+            rows = connection.execute(
+                """
+                SELECT * FROM applications
+                WHERE state = 'awaiting_review'
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+            return tuple(self._row_to_application(row) for row in rows)
+
+    def deny(self, application_id: str, reviewer_id: str, *, now: float) -> bool:
+        if str(reviewer_id or "").strip() != self.reviewer_id:
+            raise ProStoreError("reviewer_required")
+        key = str(application_id or "").strip().upper()
+        with self._transaction() as connection:
+            self._cleanup(connection, now)
+            row = connection.execute(
+                "SELECT state FROM applications WHERE application_id = ?", (key,)
+            ).fetchone()
+            if row is None or row["state"] != "awaiting_review":
+                return False
+            connection.execute(
+                "UPDATE applications SET state = 'denied' WHERE application_id = ?",
+                (key,),
+            )
+            self._event(connection, key, "denied", now)
+            return True
+
+    def reset_verification(self, application_id: str, reviewer_id: str, *, now: float) -> str:
+        if str(reviewer_id or "").strip() != self.reviewer_id:
+            raise ProStoreError("reviewer_required")
+        key = str(application_id or "").strip().upper()
+        with self._transaction() as connection:
+            self._cleanup(connection, now)
+            row = connection.execute(
+                "SELECT qq_id, state FROM applications WHERE application_id = ?", (key,)
+            ).fetchone()
+            if row is None or row["state"] != "awaiting_verify":
+                raise ProStoreError("application_state")
+            connection.execute(
+                """
+                UPDATE applications
+                SET state = 'awaiting_review', verification_code_hash = NULL,
+                    verification_expires_at = NULL, verification_attempts = 0,
+                    approved_days = NULL
+                WHERE application_id = ?
+                """,
+                (key,),
+            )
+            self._event(connection, key, "verification_delivery_failed", now)
+            return str(row["qq_id"])
+
     def revoke(self, qq_id: str, reviewer_id: str, *, now: float) -> bool:
         if str(reviewer_id or "").strip() != self.reviewer_id:
             raise ProStoreError("reviewer_required")

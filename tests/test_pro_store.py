@@ -106,6 +106,40 @@ class ProStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ProStoreError, "duration_invalid"):
             self.store.approve(application.application_id, REVIEWER, 366, now=1_003)
 
+    def test_status_only_returns_the_callers_latest_application(self):
+        application = self.store.create_application(APPLICANT, now=1_000)
+
+        own = self.store.status_for(APPLICANT, now=1_001)
+        other = self.store.status_for("3000000000", now=1_001)
+
+        self.assertEqual(own.application_id, application.application_id)
+        self.assertIsNone(other)
+
+    def test_reviewer_can_list_and_deny_pending_application(self):
+        application = self._awaiting_review_application()
+
+        with self.assertRaisesRegex(ProStoreError, "reviewer_required"):
+            self.store.pending_for_review("2000000000", now=1_002)
+        self.assertEqual(
+            [item.application_id for item in self.store.pending_for_review(REVIEWER, now=1_002)],
+            [application.application_id],
+        )
+        with self.assertRaisesRegex(ProStoreError, "reviewer_required"):
+            self.store.deny(application.application_id, "2000000000", now=1_003)
+        self.assertTrue(self.store.deny(application.application_id, REVIEWER, now=1_003))
+        self.assertEqual(self.store.status_for(APPLICANT, now=1_004).state, "denied")
+
+    def test_reviewer_can_reset_undelivered_verification_without_exposing_code(self):
+        application = self._awaiting_review_application()
+        self.store.approve(application.application_id, REVIEWER, 90, now=1_002)
+
+        with self.assertRaisesRegex(ProStoreError, "reviewer_required"):
+            self.store.reset_verification(application.application_id, "2000000000", now=1_003)
+        target = self.store.reset_verification(application.application_id, REVIEWER, now=1_003)
+
+        self.assertEqual(target, APPLICANT)
+        self.assertEqual(self.store.status_for(APPLICANT, now=1_004).state, "awaiting_review")
+
 
 if __name__ == "__main__":
     unittest.main()
