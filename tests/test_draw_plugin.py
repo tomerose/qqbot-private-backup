@@ -60,6 +60,7 @@ class DrawPluginTests(unittest.TestCase):
         self.assertEqual(parse_draw_command("帮我画一张雨夜城市海报"), "雨夜城市海报")
         self.assertEqual(parse_draw_command("请生成一张猫咪图片"), "猫咪")
         self.assertIsNone(parse_draw_command("帮我生成一份 Word 报告"))
+        self.assertEqual(parse_draw_command("生成图片"), "一张适合分享的高质量图片")
 
     @staticmethod
     def build_plugin(output_root: Path) -> DrawCommand:

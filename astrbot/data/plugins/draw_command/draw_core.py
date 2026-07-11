@@ -48,6 +48,8 @@ def parse_pro_user_ids(value: object) -> tuple[str, ...]:
 def parse_draw_command(text: object) -> str | None:
     raw = str(text or "").strip()
     lowered = raw.lower()
+    if lowered in {"生成图片", "帮我生成图片", "请生成图片", "画图"}:
+        return "一张适合分享的高质量图片"
     prefixes = ("/draw", "/画图")
     prefix = next(
         (candidate for candidate in prefixes if lowered.startswith(candidate)), None
