@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Plain, Record
 from astrbot.api.star import Context, Star
 from astrbot.core.message.message_event_result import MessageChain
 
 from .local_tts_client import LocalTTSClient
+from .audio_merge import merge_wav_files
 from .voice_reply_core import prepare_spoken_chunks, wants_voice_reply
 from .voice_router_core import contains_voice_component
 
@@ -120,10 +123,18 @@ class VoiceModelRouter(Star):
             if path is None:
                 return
             audio_paths.append(path)
+        audio_root = Path(getattr(self, "audio_root", "")).resolve(strict=False)
+        merged_path = audio_root / f"voice-{uuid.uuid4().hex}.wav"
+        try:
+            merge_wav_files(audio_paths, merged_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("[Voice] could not merge local TTS chunks: %s", exc)
+            event.set_extra("_local_tts_audio_paths", [str(path) for path in audio_paths])
+            return
         non_plain = [component for component in components if not isinstance(component, Plain)]
-        result.chain = [Record(file=str(path)) for path in audio_paths] + non_plain
+        result.chain = [Record(file=str(merged_path))] + non_plain
         event.set_extra(
-            "_local_tts_audio_paths", [str(path) for path in audio_paths]
+            "_local_tts_audio_paths", [str(path) for path in audio_paths] + [str(merged_path)]
         )
         event.set_extra("voice_reply_emitted", True)
 

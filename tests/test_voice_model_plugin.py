@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+import wave
 from pathlib import Path
 
 os.environ["ASTRBOT_ROOT"] = r"D:\Claudecoda学习\qqbot\astrbot"
@@ -57,6 +58,14 @@ class FakeTTSClient:
         return self.paths.pop(0) if self.paths else None
 
 
+def write_wav(path: Path, frames: bytes, *, rate: int = 8000) -> None:
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(frames)
+
+
 class VoiceModelPluginTests(unittest.TestCase):
     def test_explicit_text_voice_request_switches_to_gemini(self):
         async def scenario():
@@ -84,19 +93,24 @@ class VoiceModelPluginTests(unittest.TestCase):
                 root = Path(tmp)
                 first = root / "one.wav"
                 second = root / "two.wav"
-                first.write_bytes(b"RIFF1")
-                second.write_bytes(b"RIFF2")
+                write_wav(first, b"\x01\x00" * 4)
+                write_wav(second, b"\x02\x00" * 6)
                 plugin = VoiceModelRouter.__new__(VoiceModelRouter)
                 plugin.tts_client = FakeTTSClient([first, second])
+                plugin.audio_root = root
                 result = FakeResult([Plain("第一句。第二句。"), File(name="answer.txt", file="answer.txt")])
                 event = FakeEvent("请发语音", result=result)
                 event.set_extra("voice_reply_requested", True)
+                result.chain[0] = Plain("甲" * 150 + "。" + "乙" * 150 + "。")
 
                 await plugin.synthesize_voice_reply(event)
 
                 self.assertEqual(sum(isinstance(item, Record) for item in result.chain), 1)
                 self.assertEqual(sum(isinstance(item, Plain) for item in result.chain), 0)
                 self.assertEqual(sum(isinstance(item, File) for item in result.chain), 1)
+                record = next(item for item in result.chain if isinstance(item, Record))
+                with wave.open(str(record.file), "rb") as handle:
+                    self.assertEqual(handle.getnframes(), 10)
 
         asyncio.run(scenario())
 
@@ -119,9 +133,10 @@ class VoiceModelPluginTests(unittest.TestCase):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 audio = Path(tmp) / "voice.wav"
-                audio.write_bytes(b"RIFF")
+                write_wav(audio, b"\x01\x00" * 4)
                 plugin = VoiceModelRouter.__new__(VoiceModelRouter)
                 plugin.tts_client = FakeTTSClient([audio])
+                plugin.audio_root = Path(tmp)
                 result = FakeResult([Plain("好的")])
                 event = FakeEvent("", result=result)
                 event.set_extra("_gemini_stt_transcript", "请用语音回答")
