@@ -46,9 +46,10 @@ class AgentAccessPolicyTests(unittest.TestCase):
             store = ProStore(Path(tmp) / "pro_members.db", reviewer_id="1211000567")
             application = store.create_application("2000000000", now=1_000)
             store.mark_sent(application.application_id, "2000000000", now=1_001)
-            code = store.approve(application.application_id, "1211000567", 90, now=1_002)
-            store.verify("2000000000", code, now=1_003)
-            self.assertTrue(store.is_active_pro("2000000000", now=1_004))
+            store.request_approval(application.application_id, "1211000567", 90, now=1_002)
+            code = store.confirm_approval(application.application_id, "1211000567", now=1_003)
+            store.verify("2000000000", code, now=1_004)
+            self.assertTrue(store.is_active_pro("2000000000", now=1_005))
 
         policy = AccessPolicy(["1211000567", "2000000000"])
         trusted = TrustedPolicy(["1211000567"])

@@ -77,8 +77,9 @@ class DrawPluginTests(unittest.TestCase):
         now = time.time()
         app = store.create_application(qq_id, now=now)
         store.mark_sent(app.application_id, qq_id, now=now + 1)
-        code = store.approve(app.application_id, "1211000567", 90, now=now + 2)
-        store.verify(qq_id, code, now=now + 3)
+        store.request_approval(app.application_id, "1211000567", 90, now=now + 2)
+        code = store.confirm_approval(app.application_id, "1211000567", now=now + 3)
+        store.verify(qq_id, code, now=now + 4)
 
     def test_approved_dynamic_pro_member_can_draw(self):
         async def scenario():

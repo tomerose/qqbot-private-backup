@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -18,8 +19,9 @@ APPLICANT = "2000000000"
 def activate(store: ProStore, qq_id: str, now: float = 1_000):
     app = store.create_application(qq_id, now=now)
     store.mark_sent(app.application_id, qq_id, now=now + 1)
-    code = store.approve(app.application_id, REVIEWER, 90, now=now + 2)
-    store.verify(qq_id, code, now=now + 3)
+    store.request_approval(app.application_id, REVIEWER, 90, now=now + 2)
+    code = store.confirm_approval(app.application_id, REVIEWER, now=now + 3)
+    store.verify(qq_id, code, now=now + 4)
 
 
 class ProAccessTests(unittest.TestCase):
@@ -29,8 +31,25 @@ class ProAccessTests(unittest.TestCase):
             store = ProStore(path, reviewer_id=REVIEWER)
             activate(store, APPLICANT)
 
-            self.assertTrue(is_active_pro(APPLICANT, path, now=1_004))
-            self.assertFalse(is_active_pro(APPLICANT, path, now=1_004 + 91 * 86400))
+            self.assertTrue(is_active_pro(APPLICANT, path, now=1_005))
+            self.assertFalse(is_active_pro(APPLICANT, path, now=1_005 + 91 * 86400))
+
+    def test_invalid_membership_signature_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pro_members.db"
+            store = ProStore(path, reviewer_id=REVIEWER)
+            activate(store, APPLICANT)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE applications SET membership_signature = 'invalid' WHERE qq_id = ?",
+                    (APPLICANT,),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            self.assertFalse(is_active_pro(APPLICANT, path, now=1_005))
 
     def test_missing_or_corrupt_database_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

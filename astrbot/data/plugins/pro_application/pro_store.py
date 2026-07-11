@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import os
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -18,10 +20,43 @@ MAX_CODE_ATTEMPTS = 3
 DEFAULT_PRO_DAYS = 90
 MIN_PRO_DAYS = 1
 MAX_PRO_DAYS = 365
+SIGNING_KEY_ENV = "XIAONING_PRO_SIGNING_KEY"
+MIN_SIGNING_KEY_BYTES = 32
 
 
 class ProStoreError(ValueError):
     """Stable, privacy-safe application state error."""
+
+
+def _load_signing_key(database_path: Path) -> bytes | None:
+    configured = os.environ.get(SIGNING_KEY_ENV)
+    if configured is not None:
+        key = configured.encode("utf-8")
+        return key if len(key) >= MIN_SIGNING_KEY_BYTES else None
+    key_path = Path(database_path).with_suffix(".key")
+    try:
+        key = key_path.read_bytes()
+    except FileNotFoundError:
+        generated = secrets.token_bytes(MIN_SIGNING_KEY_BYTES)
+        try:
+            descriptor = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            try:
+                key = key_path.read_bytes()
+            except OSError:
+                return None
+        except OSError:
+            return None
+        else:
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(generated)
+                key = generated
+            except OSError:
+                return None
+    except OSError:
+        return None
+    return key if len(key) >= MIN_SIGNING_KEY_BYTES else None
 
 
 @dataclass(frozen=True)
@@ -47,6 +82,7 @@ class ProStore:
         if not self.reviewer_id.isdigit():
             raise ValueError("reviewer_id_invalid")
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._signing_key = _load_signing_key(self.path)
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -83,7 +119,8 @@ class ProStore:
                     approved_days INTEGER,
                     pro_expires_at REAL,
                     approval_confirm_expires_at REAL,
-                    last_code_sent_at REAL
+                    last_code_sent_at REAL,
+                    membership_signature TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_applications_qq_state
                     ON applications(qq_id, state);
@@ -102,9 +139,31 @@ class ProStore:
             for name, declaration in (
                 ("approval_confirm_expires_at", "REAL"),
                 ("last_code_sent_at", "REAL"),
+                ("membership_signature", "TEXT"),
             ):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE applications ADD COLUMN {name} {declaration}")
+            if self._signing_key is not None:
+                rows = connection.execute(
+                    """
+                    SELECT application_id, qq_id, state, pro_expires_at FROM applications
+                    WHERE state = 'active' AND pro_expires_at IS NOT NULL
+                      AND membership_signature IS NULL
+                    """
+                ).fetchall()
+                for row in rows:
+                    connection.execute(
+                        "UPDATE applications SET membership_signature = ? WHERE application_id = ?",
+                        (
+                            self._membership_signature(
+                                row["application_id"],
+                                row["qq_id"],
+                                row["state"],
+                                row["pro_expires_at"],
+                            ),
+                            row["application_id"],
+                        ),
+                    )
 
     @staticmethod
     def _application_id() -> str:
@@ -118,6 +177,16 @@ class ProStore:
     @staticmethod
     def _verification_code() -> str:
         return secrets.token_urlsafe(12)
+
+    def _membership_signature(
+        self, application_id: str, qq_id: str, state: str, pro_expires_at: float
+    ) -> str:
+        if self._signing_key is None:
+            raise ProStoreError("signing_key_unavailable")
+        payload = (
+            f"{application_id}|{qq_id}|{state}|{float(pro_expires_at):.6f}".encode("utf-8")
+        )
+        return hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
 
     @staticmethod
     def _valid_qq_id(qq_id: object) -> str:
@@ -177,7 +246,7 @@ class ProStore:
         connection.execute(
             """
             UPDATE applications
-            SET state = 'pro_expired'
+            SET state = 'pro_expired', membership_signature = NULL
             WHERE state = 'active' AND pro_expires_at < ?
             """,
             (float(now),),
@@ -353,7 +422,7 @@ class ProStore:
                 raise ProStoreError("verification_invalid")
             if row["state"] == "verification_locked":
                 raise ProStoreError("verification_locked")
-            if row["verification_code_hash"] != candidate_hash:
+            if not hmac.compare_digest(str(row["verification_code_hash"] or ""), candidate_hash):
                 attempts = int(row["verification_attempts"]) + 1
                 state = "verification_locked" if attempts >= MAX_CODE_ATTEMPTS else "awaiting_verify"
                 connection.execute(
@@ -364,13 +433,17 @@ class ProStore:
                 failure = "verification_invalid"
             else:
                 expires_at = float(now) + int(row["approved_days"]) * 86400
+                signature = self._membership_signature(
+                    row["application_id"], row["qq_id"], "active", expires_at
+                )
                 connection.execute(
                     """
                     UPDATE applications
-                    SET state = 'active', pro_expires_at = ?, verification_expires_at = NULL
+                    SET state = 'active', pro_expires_at = ?, verification_expires_at = NULL,
+                        membership_signature = ?
                     WHERE application_id = ?
                     """,
-                    (expires_at, row["application_id"]),
+                    (expires_at, signature, row["application_id"]),
                 )
                 self._event(connection, row["application_id"], "activated", now)
         if failure is not None:
@@ -383,13 +456,21 @@ class ProStore:
             self._cleanup(connection, now)
             row = connection.execute(
                 """
-                SELECT 1 FROM applications
+                SELECT application_id, qq_id, state, pro_expires_at, membership_signature FROM applications
                 WHERE qq_id = ? AND state = 'active' AND pro_expires_at >= ?
                 LIMIT 1
                 """,
                 (identity, float(now)),
             ).fetchone()
-            return row is not None
+            if row is None:
+                return False
+            try:
+                expected = self._membership_signature(
+                    row["application_id"], row["qq_id"], row["state"], row["pro_expires_at"]
+                )
+            except ProStoreError:
+                return False
+            return hmac.compare_digest(str(row["membership_signature"] or ""), expected)
 
     def status_for(self, qq_id: str, *, now: float) -> Application | None:
         identity = self._valid_qq_id(qq_id)
@@ -523,7 +604,11 @@ class ProStore:
             if row is None:
                 return False
             connection.execute(
-                "UPDATE applications SET state = 'revoked', pro_expires_at = ? WHERE application_id = ?",
+                """
+                UPDATE applications
+                SET state = 'revoked', pro_expires_at = ?, membership_signature = NULL
+                WHERE application_id = ?
+                """,
                 (float(now), row["application_id"]),
             )
             self._event(connection, row["application_id"], "revoked", now)

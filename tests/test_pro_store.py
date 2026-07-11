@@ -185,6 +185,29 @@ class ProStoreTests(unittest.TestCase):
         self.assertFalse(hasattr(events[0], "qq_id"))
         self.assertFalse(hasattr(events[0], "verification_code"))
 
+    def test_active_membership_signature_rejects_tampered_record(self):
+        application = self._awaiting_review_application()
+        self.store.request_approval(application.application_id, REVIEWER, 90, now=1_002)
+        code = self.store.confirm_approval(application.application_id, REVIEWER, now=1_003)
+        self.store.verify(APPLICANT, code, now=1_004)
+
+        connection = sqlite3.connect(self.path)
+        try:
+            signature = connection.execute(
+                "SELECT membership_signature FROM applications WHERE application_id = ?",
+                (application.application_id,),
+            ).fetchone()[0]
+            self.assertTrue(signature)
+            connection.execute(
+                "UPDATE applications SET pro_expires_at = pro_expires_at + 86400 WHERE application_id = ?",
+                (application.application_id,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        self.assertFalse(self.store.is_active_pro(APPLICANT, now=1_005))
+
 
 if __name__ == "__main__":
     unittest.main()
