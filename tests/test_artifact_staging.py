@@ -35,6 +35,9 @@ class ArtifactStagingTests(unittest.TestCase):
             work.mkdir()
 
             self.assertEqual(select_execution_dir("生成一份 Word 报告", work, job), job)
+            self.assertEqual(
+                select_execution_dir("参考 GitHub 项目生成 Word 报告", work, job), job
+            )
             self.assertEqual(select_execution_dir("修改项目代码并生成报告", work, job), work)
 
     def test_collects_only_matching_direct_job_artifacts(self):

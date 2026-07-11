@@ -13,7 +13,7 @@ except ImportError:  # Direct module loading in unit tests.
 
 
 _CODE_OR_PROJECT = re.compile(
-    r"代码|项目|仓库|测试|构建|编译|修复|重构|python|typescript|next\.js", re.I
+    r"代码|测试|构建|编译|修复|重构|python|typescript|next\.js", re.I
 )
 _WORD = re.compile(r"\bdocx\b|\bword\b|Word|文档", re.I)
 _IMAGE = re.compile(r"作图|画图|绘图|图片|海报|插画|封面|logo|图像", re.I)
