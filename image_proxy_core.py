@@ -6,7 +6,7 @@ import base64
 from dataclasses import dataclass
 
 
-IMAGE_MODEL_PRIMARY = "gemini-3.1-flash-image"
+IMAGE_MODEL_PRIMARY = "gemini-2.5-flash-image"
 IMAGE_MODEL_FALLBACK = "gemini-2.5-flash-image"
 IMAGE_MODELS = frozenset({IMAGE_MODEL_PRIMARY, IMAGE_MODEL_FALLBACK})
 MAX_IMAGE_PROMPT_CHARS = 500
@@ -29,6 +29,11 @@ class ImageRequest:
     prompt: str
     model: str
     aspect_ratio: str
+
+
+def image_model_attempts(model: str) -> tuple[str, ...]:
+    """Return each configured model at most once."""
+    return tuple(dict.fromkeys((model, IMAGE_MODEL_FALLBACK)))
 
 
 def normalize_image_request(body: object) -> ImageRequest:

@@ -24,6 +24,7 @@ from image_proxy_core import (
     IMAGE_MODEL_PRIMARY,
     ImageRequestError,
     extract_first_image_bytes,
+    image_model_attempts,
     normalize_image_request,
 )
 
@@ -121,10 +122,7 @@ async def generate_image(request: Request):
             content={"error": {"message": "无效的作图请求。", "type": "invalid_request_error"}},
         )
 
-    models = [payload.model]
-    if payload.model == IMAGE_MODEL_PRIMARY:
-        models.append(IMAGE_MODEL_FALLBACK)
-    for model_id in models:
+    for model_id in image_model_attempts(payload.model):
         try:
             client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
             response = client.models.generate_content(

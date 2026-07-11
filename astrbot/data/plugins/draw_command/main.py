@@ -79,7 +79,7 @@ class DrawCommand(Star):
     def _request_image(self, prompt: str) -> bytes:
         response = requests.post(
             DRAW_PROXY_URL,
-            json={"prompt": prompt, "model": "gemini-3.1-flash-image", "size": "1024x1024"},
+            json={"prompt": prompt, "model": "gemini-2.5-flash-image", "size": "1024x1024"},
             timeout=(10, 95),
         )
         response.raise_for_status()

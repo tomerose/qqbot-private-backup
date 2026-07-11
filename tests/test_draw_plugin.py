@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image as PillowImage
 
@@ -14,6 +15,7 @@ sys.path.insert(0, str(PLUGINS_DIR))
 
 from draw_command.draw_core import DrawRateLimiter, parse_draw_command  # noqa: E402
 from draw_command.main import DrawCommand  # noqa: E402
+from draw_command import main as draw_main  # noqa: E402
 from pro_application.pro_store import ProStore  # noqa: E402
 
 
@@ -56,6 +58,21 @@ async def collect(generator):
 
 
 class DrawPluginTests(unittest.TestCase):
+    def test_proxy_request_uses_current_vertex_image_model(self):
+        plugin = DrawCommand.__new__(DrawCommand)
+
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"data": [{"b64_json": "cG5n"}]}
+
+        with patch.object(draw_main.requests, "post", return_value=Response()) as post:
+            self.assertEqual(plugin._request_image("draw a cat"), b"png")
+
+        self.assertEqual(post.call_args.kwargs["json"]["model"], "gemini-2.5-flash-image")
+
     def test_clear_natural_drawing_request_is_supported(self):
         self.assertEqual(parse_draw_command("帮我画一张雨夜城市海报"), "雨夜城市海报")
         self.assertEqual(parse_draw_command("请生成一张猫咪图片"), "猫咪")

@@ -12,11 +12,16 @@ from image_proxy_core import (  # noqa: E402
     IMAGE_MODEL_PRIMARY,
     ImageRequestError,
     extract_first_image_bytes,
+    image_model_attempts,
     normalize_image_request,
 )
 
 
 class ImageProxyCoreTests(unittest.TestCase):
+    def test_uses_the_current_vertex_image_model(self):
+        self.assertEqual(IMAGE_MODEL_PRIMARY, "gemini-2.5-flash-image")
+        self.assertEqual(image_model_attempts(IMAGE_MODEL_PRIMARY), (IMAGE_MODEL_PRIMARY,))
+
     def test_normalizes_only_allowlisted_image_models_and_aspect_ratios(self):
         normalized = normalize_image_request(
             {"prompt": "draw a cat", "model": "untrusted", "size": "1024x1024"}
