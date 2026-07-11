@@ -32,6 +32,14 @@ from claude_code_agent.access_policy import AccessPolicy  # noqa: E402
 from claude_code_agent.trusted_policy import TrustedPolicy  # noqa: E402
 
 
+class FakeBackendHealth:
+    def __init__(self, available=("claude", "codex", "workbuddy")):
+        self.backends = frozenset(available)
+
+    async def available(self):
+        return self.backends
+
+
 class FakeMessageObject:
     def __init__(self, text, *, self_id="3806573022", components=None):
         self.self_id = self_id
@@ -196,6 +204,7 @@ class AgentIntegrationTests(unittest.TestCase):
         plugin._cancel_requested = False
         plugin._approvals = ApprovalRegistry(ttl_seconds=300)
         plugin._progress_policy = ProgressPolicy()
+        plugin._backend_health = FakeBackendHealth()
         plugin._job_store = JobStore(plugin.workspace / "state" / "jobs.db")
         plugin._payload_store = EncryptedPayloadStore(plugin.workspace / "state" / "private_jobs")
         plugin.executed = []
@@ -217,6 +226,19 @@ class AgentIntegrationTests(unittest.TestCase):
 
         plugin._execute = types.MethodType(fake_execute, plugin)
         return plugin
+
+    def test_unhealthy_preferred_backend_falls_back_before_execution(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                plugin._backend_health = FakeBackendHealth(("codex",))
+
+                await _collect(plugin.on_message(FakeEvent("帮我分析这份报告")))
+
+                self.assertEqual(len(plugin.executed), 1)
+                self.assertEqual(plugin.executed[0][2], "codex")
+
+        asyncio.run(scenario())
 
     def test_pro_membership_alone_does_not_grant_trusted_host_execution(self):
         async def scenario():

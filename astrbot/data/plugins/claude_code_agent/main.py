@@ -54,6 +54,7 @@ from .access_policy import AccessPolicy, Capability
 from .bounded_process_io import capture_bounded_process
 from .action_policy import ActionClass
 from .backend_router import BackendRoute, route_backend
+from .backend_health import BackendHealthCache
 from .isolation_policy import choose_isolation
 from .step_policy import assess_step, step_digest
 from .task_orchestrator import StepExecution, TaskEvent, TaskOrchestrator
@@ -103,6 +104,7 @@ class ClaudeCodeAgent(Star):
         self._cancel_requested = False
         self._approvals = ApprovalRegistry(ttl_seconds=300)
         self._progress_policy = ProgressPolicy()
+        self._backend_health = BackendHealthCache()
         self._payload_store = EncryptedPayloadStore(
             self.workspace / "state" / "private_jobs"
         )
@@ -927,6 +929,7 @@ class ClaudeCodeAgent(Star):
                 )
 
             output_dir = job_dir / "outputs"
+            available_backends = await self._backend_health.available()
 
             def policy(step: TaskStep):
                 decision = assess_step(
@@ -948,7 +951,7 @@ class ClaudeCodeAgent(Star):
                 selected = route_backend(
                     step,
                     plan.preferred_backend,
-                    {"claude", "codex", "workbuddy"},
+                    available_backends,
                     attempted,
                 )
                 approved_backend = approved_steps.get(step_digest(step))
@@ -1031,7 +1034,7 @@ class ClaudeCodeAgent(Star):
                 selected_route = route_backend(
                     step,
                     plan.preferred_backend,
-                    {"claude", "codex", "workbuddy"},
+                    available_backends,
                     set(),
                 )
                 if selected_route.backend is None:
