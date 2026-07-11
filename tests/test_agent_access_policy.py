@@ -11,6 +11,7 @@ sys.path.insert(0, str(PLUGINS_DIR))
 from access_policy import AccessPolicy, AccessTier, Capability  # noqa: E402
 from trusted_policy import TrustedPolicy  # noqa: E402
 from pro_application.pro_store import ProStore  # noqa: E402
+from claude_code_agent.main import ClaudeCodeAgent  # noqa: E402
 
 
 class AgentAccessPolicyTests(unittest.TestCase):
@@ -58,6 +59,23 @@ class AgentAccessPolicyTests(unittest.TestCase):
         self.assertTrue(policy.authorize("2000000000", Capability.LOCAL_AGENT))
         self.assertFalse(trusted.is_trusted("2000000000"))
         self.assertTrue(trusted.is_trusted("1211000567"))
+
+    def test_signed_public_pro_is_admitted_to_the_same_hard_agent_policy(self):
+        agent = ClaudeCodeAgent.__new__(ClaudeCodeAgent)
+        agent._access_policy = AccessPolicy(["1211000567"])
+        agent._trusted_policy = TrustedPolicy(["1211000567"])
+        agent._pro_db_path = Path("missing-pro-members.db")
+
+        class Context:
+            def get_sender_id(self):
+                return "2000000000"
+
+        agent._is_public_pro = lambda _sender: True
+        self.assertTrue(agent._is_owner(Context()))
+        self.assertFalse(agent._can_manage_runtime(Context()))
+
+        owner_context = type("OwnerContext", (), {"get_sender_id": lambda self: "1211000567"})()
+        self.assertTrue(agent._can_manage_runtime(owner_context))
 
 
 if __name__ == "__main__":

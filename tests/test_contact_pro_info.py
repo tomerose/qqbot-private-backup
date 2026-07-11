@@ -16,6 +16,7 @@ from contact_pro_info.main import (  # noqa: E402
     contact_reply_for,
     version_reply_for,
     VERSION_REPLY,
+    PRO_APPLICATION_GUIDE,
 )
 
 
@@ -55,11 +56,15 @@ class ContactProInfoTests(unittest.TestCase):
         for text in (
             "怎么联系作者",
             "老板的联系方式",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(contact_reply_for(text), CONTACT_REPLY)
+        for text in (
             "Pro 怎么获取",
             "我想申请 pro 资格",
         ):
             with self.subTest(text=text):
-                self.assertEqual(contact_reply_for(text), CONTACT_REPLY)
+                self.assertEqual(contact_reply_for(text), PRO_APPLICATION_GUIDE)
 
     def test_unrelated_pro_discussion_does_not_trigger(self):
         for text in ("这个 Pro 模型怎么样", "今天吃什么", "老板键是什么"):
@@ -80,14 +85,16 @@ class ContactProInfoTests(unittest.TestCase):
 
     def test_active_prompts_contain_contact_memory(self):
         config = json.loads(CMD_CONFIG.read_text(encoding="utf-8-sig"))
-        rule = "询问联系作者、老板或获取 Pro 时"
+        rule = "询问联系作者或老板时"
 
         self.assertIn(rule, config["provider_settings"]["prompt_prefix"])
-        self.assertIn("询问普通版和 Pro 版区别", config["provider_settings"]["prompt_prefix"])
+        self.assertIn("Pro 在此基础上支持 AI 作图", config["provider_settings"]["prompt_prefix"])
+        self.assertIn("Agent 任务", config["provider_settings"]["prompt_prefix"])
+        persona_rule = "询问联系作者、老板或获取 Pro 时"
         self.assertTrue(
             any(
                 persona.get("name") == "xiaoning"
-                and rule in persona.get("prompt", "")
+                and persona_rule in persona.get("prompt", "")
                 for persona in config["persona"]
             )
         )

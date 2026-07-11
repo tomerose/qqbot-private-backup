@@ -79,7 +79,13 @@ from .task_verifier import (
     should_run_project_verification,
     verify_step,
 )
-from .trusted_policy import TrustedDisposition, TrustedPolicy, assess_trusted_task
+from .trusted_policy import (
+    TrustedDecision,
+    TrustedDisposition,
+    TrustedPolicy,
+    assess_trusted_task,
+)
+from draw_command.pro_access import is_active_pro
 
 OWNER_ID = "1211000567"
 MAX_REPLY_CHARS = 3500
@@ -94,6 +100,12 @@ class ClaudeCodeAgent(Star):
         )
         self._trusted_policy = TrustedPolicy(
             self.config.get("trusted_pro_user_ids", OWNER_ID)
+        )
+        self._pro_db_path = (
+            Path(__file__).resolve().parents[2]
+            / "plugin_data"
+            / "xiaoning_pro"
+            / "pro_members.db"
         )
         self.workspace = DEFAULT_WORKSPACE.resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -132,12 +144,33 @@ class ClaudeCodeAgent(Star):
             pass
 
     def _is_owner(self, ctx: Context) -> bool:
+        sender_id = ctx.get_sender_id()
+        return self._can_manage_runtime(ctx) or self._is_public_pro(sender_id)
+
+    def _can_manage_runtime(self, ctx: Context) -> bool:
         policy = getattr(self, "_access_policy", AccessPolicy((OWNER_ID,)))
         trusted = getattr(self, "_trusted_policy", TrustedPolicy((OWNER_ID,)))
         sender_id = ctx.get_sender_id()
-        return policy.authorize(
-            sender_id, Capability.LOCAL_AGENT
-        ) and trusted.is_trusted(sender_id)
+        return policy.authorize(sender_id, Capability.LOCAL_AGENT) and trusted.is_trusted(
+            sender_id
+        )
+
+    def _is_public_pro(self, sender_id: object) -> bool:
+        path = getattr(
+            self,
+            "_pro_db_path",
+            Path(__file__).resolve().parents[2] / "plugin_data" / "xiaoning_pro" / "pro_members.db",
+        )
+        return is_active_pro(sender_id, path)
+
+    def _authorize_agent_task(self, sender_id: object, task: str):
+        if self._trusted_policy.is_trusted(sender_id):
+            return self._trusted_policy.authorize_task(
+                sender_id, task, self.work_dir, self.recovery_root
+            )
+        if self._is_public_pro(sender_id):
+            return assess_trusted_task(task, self.work_dir, self.recovery_root)
+        return TrustedDecision(TrustedDisposition.DENY, "not_pro")
 
     @staticmethod
     def _reply(ctx: Context, component):
@@ -881,9 +914,7 @@ class ClaudeCodeAgent(Star):
                     else None
                 ) or self.backend
                 task = validate_task(parts[2])
-                trusted_decision = self._trusted_policy.authorize_task(
-                    sender_id, task, self.work_dir, self.recovery_root
-                )
+                trusted_decision = self._authorize_agent_task(sender_id, task)
                 if trusted_decision.disposition is TrustedDisposition.DENY:
                     yield self._reply(
                         ctx, Plain("这个任务超出本机安全边界，没有执行。")
@@ -1255,6 +1286,9 @@ class ClaudeCodeAgent(Star):
 
         if not self._is_owner(ctx):
             yield self._reply(ctx, Plain("本机 Agent 是 Trusted Pro 能力，当前账号不能使用。"))
+            return
+        if action in {"use", "cwd", "status", "cancel"} and not self._can_manage_runtime(ctx):
+            yield self._reply(ctx, Plain("该管理指令仅限小姚使用；Pro 可直接提交和确认任务。"))
             return
         if action in {"help", "?"}:
             yield self._reply(ctx, Plain(self._help_text()))
