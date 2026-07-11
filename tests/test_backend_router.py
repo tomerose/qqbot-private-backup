@@ -33,6 +33,16 @@ class BackendRouterTests(unittest.TestCase):
         self.assertEqual(first.backend, "codex")
         self.assertEqual(second.backend, "claude")
 
+    def test_github_research_routes_to_codex_first(self):
+        route = route_backend(
+            make_step("参考 GitHub 公开项目生成最近 AI 大事件 Word 报告"),
+            "claude",
+            {"claude", "codex"},
+            set(),
+        )
+
+        self.assertEqual(route.backend, "codex")
+
     def test_desktop_task_prefers_workbuddy(self):
         route = route_backend(
             make_step("查看桌面软件窗口"),

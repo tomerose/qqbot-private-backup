@@ -11,7 +11,7 @@ from PIL import Image as PillowImage
 PLUGINS_DIR = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugins"
 sys.path.insert(0, str(PLUGINS_DIR))
 
-from draw_command.draw_core import DrawRateLimiter  # noqa: E402
+from draw_command.draw_core import DrawRateLimiter, parse_draw_command  # noqa: E402
 from draw_command.main import DrawCommand  # noqa: E402
 
 
@@ -54,6 +54,11 @@ async def collect(generator):
 
 
 class DrawPluginTests(unittest.TestCase):
+    def test_clear_natural_drawing_request_is_supported(self):
+        self.assertEqual(parse_draw_command("帮我画一张雨夜城市海报"), "雨夜城市海报")
+        self.assertEqual(parse_draw_command("请生成一张猫咪图片"), "猫咪")
+        self.assertIsNone(parse_draw_command("帮我生成一份 Word 报告"))
+
     @staticmethod
     def build_plugin(output_root: Path) -> DrawCommand:
         plugin = DrawCommand.__new__(DrawCommand)

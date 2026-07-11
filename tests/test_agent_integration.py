@@ -5,6 +5,7 @@ import sys
 import tempfile
 import types
 import unittest
+import zipfile
 from pathlib import Path
 
 os.environ["ASTRBOT_ROOT"] = r"D:\Claudecoda学习\qqbot\astrbot"
@@ -213,8 +214,15 @@ class AgentIntegrationTests(unittest.TestCase):
             this.executed.append((job_id, task, backend, high_risk_approved, this.work_dir))
             deliverables = []
             if "生成" in task:
-                artifact = job_dir / "outputs" / "result.txt"
-                artifact.write_text("generated result", encoding="utf-8")
+                if ".docx" in task.lower() or "word" in task.lower():
+                    artifact = job_dir / "outputs" / "report.docx"
+                    with zipfile.ZipFile(artifact, "w") as archive:
+                        archive.writestr(
+                            "word/document.xml", "<document>generated result</document>"
+                        )
+                else:
+                    artifact = job_dir / "outputs" / "result.txt"
+                    artifact.write_text("generated result", encoding="utf-8")
                 deliverables.append(Deliverable(artifact, "file"))
             return (
                 f"任务 {job_id} 执行结束（退出码 0）",

@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import unittest
@@ -22,6 +23,7 @@ from agent_core import (  # noqa: E402
     create_job_dir,
     build_process_tree_kill_command,
     discover_deliverables,
+    build_job_agent_env,
     extract_agent_command,
     is_sensitive_deliverable,
     is_inline_media_payload,
@@ -40,6 +42,20 @@ from agent_core import (  # noqa: E402
 
 
 class AgentCoreTests(unittest.TestCase):
+    def test_job_environment_hides_github_write_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = build_job_agent_env(
+                root,
+                {"GH_TOKEN": "secret", "GITHUB_TOKEN": "secret2", "PATH": "safe"},
+            )
+
+            self.assertNotIn("GH_TOKEN", env)
+            self.assertNotIn("GITHUB_TOKEN", env)
+            self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+            self.assertTrue(Path(env["GH_CONFIG_DIR"]).is_dir())
+            self.assertTrue(Path(env["GH_CONFIG_DIR"]).is_relative_to(root.resolve()))
+
     def test_validate_task_trims_and_rejects_empty_or_oversized_input(self):
         self.assertEqual(validate_task("  写一个文件  "), "写一个文件")
         with self.assertRaisesRegex(ValueError, "不能为空"):

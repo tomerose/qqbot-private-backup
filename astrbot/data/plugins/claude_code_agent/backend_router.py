@@ -15,7 +15,7 @@ except ImportError:  # Direct module loading in unit tests.
 
 SUPPORTED_BACKENDS = frozenset({"claude", "codex", "workbuddy"})
 CODE_HINT = re.compile(
-    r"代码|项目|测试|构建|编译|修复|重构|python|typescript|next\.js", re.I
+    r"代码|项目|测试|构建|编译|修复|重构|github|python|typescript|next\.js", re.I
 )
 DESKTOP_HINT = re.compile(r"桌面|窗口|点击|软件|浏览器界面", re.I)
 

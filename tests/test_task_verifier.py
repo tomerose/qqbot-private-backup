@@ -38,6 +38,22 @@ class TaskVerifierTests(unittest.TestCase):
         self.assertFalse(evidence.verified)
         self.assertEqual(evidence.code, "artifact_missing")
 
+    def test_wrong_artifact_type_does_not_complete_word_or_image_task(self):
+        class Item:
+            def __init__(self, name):
+                self.path = Path(name)
+
+        word = TaskStep(
+            "job123", 0, "生成一份 Word 报告", ActionClass.WORKSPACE_WRITE, True
+        )
+        image = TaskStep(
+            "job123", 0, "画一张图片", ActionClass.WORKSPACE_WRITE, True
+        )
+
+        self.assertEqual(verify_step(word, 0, [Item("answer.txt")], None).code, "artifact_type")
+        self.assertEqual(verify_step(image, 0, [Item("answer.docx")], None).code, "artifact_type")
+        self.assertTrue(verify_step(word, 0, [Item("answer.docx")], None).verified)
+
     def test_failed_verification_command_blocks_completion(self):
         step = TaskStep(
             "job123", 0, "检查 Python 测试", ActionClass.READ_ONLY, False

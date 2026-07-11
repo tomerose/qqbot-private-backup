@@ -12,9 +12,11 @@ from pathlib import Path
 from typing import Sequence
 
 try:
+    from .artifact_staging import expected_artifact_suffixes
     from .bounded_process_io import capture_bounded_process
     from .task_planner import TaskStep
 except ImportError:  # Direct module loading in unit tests.
+    from artifact_staging import expected_artifact_suffixes
     from bounded_process_io import capture_bounded_process
     from task_planner import TaskStep
 
@@ -109,6 +111,13 @@ def verify_step(
         return VerificationEvidence(False, "execution_failed")
     if step.expected_artifact and not deliverables:
         return VerificationEvidence(False, "artifact_missing")
+    expected_suffixes = expected_artifact_suffixes(step.instruction)
+    if step.expected_artifact and expected_suffixes:
+        delivered_suffixes = {
+            Path(getattr(item, "path", "")).suffix.lower() for item in deliverables
+        }
+        if not delivered_suffixes.intersection(expected_suffixes):
+            return VerificationEvidence(False, "artifact_type")
     if verification_exit not in {None, 0}:
         return VerificationEvidence(False, "verification_failed")
     return VerificationEvidence(True, "verified")

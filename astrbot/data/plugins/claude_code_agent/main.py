@@ -26,7 +26,7 @@ from .agent_core import (
     MAX_OUTPUT_BYTES,
     Deliverable,
     assess_task_risk,
-    build_agent_env,
+    build_job_agent_env,
     build_backend_command,
     create_job_dir,
     build_process_tree_kill_command,
@@ -55,6 +55,16 @@ from .bounded_process_io import capture_bounded_process
 from .action_policy import ActionClass
 from .backend_router import BackendRoute, route_backend
 from .backend_health import BackendHealthCache
+from .artifact_staging import (
+    collect_staged_artifacts,
+    expected_artifact_suffixes,
+    select_execution_dir,
+)
+from .document_quality import (
+    inspect_docx_quality,
+    render_docx,
+    requires_research_quality,
+)
 from .isolation_policy import choose_isolation
 from .step_policy import assess_step, step_digest
 from .task_orchestrator import StepExecution, TaskEvent, TaskOrchestrator
@@ -335,10 +345,11 @@ class ClaudeCodeAgent(Star):
         boundary = assess_trusted_task(task, self.work_dir, self.recovery_root)
         if boundary.disposition is TrustedDisposition.DENY:
             return "任务被本机安全边界拒绝。", [], "failed", None, boundary.code
+        execution_dir = select_execution_dir(task, self.work_dir, job_dir)
         command = build_backend_command(
             backend,
             task,
-            self.work_dir,
+            execution_dir,
             output_dir,
             self.codex_model,
             high_risk_approved=high_risk_approved,
@@ -351,12 +362,12 @@ class ClaudeCodeAgent(Star):
         try:
             self._active_proc = await asyncio.create_subprocess_exec(
                 *command,
-                cwd=str(self.work_dir),
+                cwd=str(execution_dir),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 creationflags=creationflags,
-                env=build_agent_env(),
+                env=build_job_agent_env(job_dir),
             )
             capture = await capture_bounded_process(
                 self._active_proc,
@@ -396,15 +407,45 @@ class ClaudeCodeAgent(Star):
                 [], "failed", returncode, "nonzero_exit",
             )
 
-        result = parse_backend_result(backend, raw)
-        if not result:
-            logger.error(f"[LocalAgent] backend={backend} job={job_id} empty_result")
-            return f"{backend} 没有返回可读结果。", [], "failed", returncode, "empty_result"
+        collect_staged_artifacts(
+            job_dir,
+            output_dir,
+            expected_artifact_suffixes(task),
+            max_files=self.max_attachment_files,
+            max_file_bytes=self.max_attachment_bytes,
+        )
         deliverables = discover_deliverables(
             output_dir,
             max_files=self.max_attachment_files,
             max_file_bytes=self.max_attachment_bytes,
         )
+        quality_checked: list[Deliverable] = []
+        for item in deliverables:
+            if item.path.suffix.lower() != ".docx":
+                quality_checked.append(item)
+                continue
+            structural = inspect_docx_quality(
+                item.path, research=requires_research_quality(task)
+            )
+            if not structural.allowed:
+                logger.warning(
+                    f"[LocalAgent] job={job_id} word_quality={structural.code}"
+                )
+                continue
+            rendered = await render_docx(item.path, job_dir / "qa")
+            if not rendered.allowed:
+                logger.warning(
+                    f"[LocalAgent] job={job_id} word_quality={rendered.code}"
+                )
+                continue
+            quality_checked.append(item)
+        deliverables = quality_checked
+        result = parse_backend_result(backend, raw)
+        if not result and not deliverables:
+            logger.error(f"[LocalAgent] backend={backend} job={job_id} empty_result")
+            return f"{backend} 没有返回可读结果。", [], "failed", returncode, "empty_result"
+        if not result:
+            result = "文件已生成并通过交付检查。"
         names = "、".join(item.path.name for item in deliverables)
         suffix = f"\n交付文件：{names}" if names else ""
         reply = f"任务 {job_id} 执行结束（退出码 0） · {backend}{suffix}\n\n{result}"

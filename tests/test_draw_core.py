@@ -24,7 +24,7 @@ class DrawCoreTests(unittest.TestCase):
     def test_parses_only_explicit_draw_commands_and_bounds_prompt(self):
         self.assertEqual(parse_draw_command("/draw a moonlit lake"), "a moonlit lake")
         self.assertEqual(parse_draw_command("/画图 一只小猫"), "一只小猫")
-        self.assertIsNone(parse_draw_command("帮我画一只小猫"))
+        self.assertEqual(parse_draw_command("帮我画一只小猫"), "一只小猫")
         with self.assertRaises(DrawRequestError):
             parse_draw_command("/draw " + "x" * 501)
 

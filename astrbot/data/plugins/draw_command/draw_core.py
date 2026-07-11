@@ -10,6 +10,18 @@ from collections.abc import Callable, Iterable
 
 MAX_PROMPT_CHARS = 500
 _QQ_ID = re.compile(r"^[1-9]\d{4,11}$")
+_NATURAL_DRAW = re.compile(
+    r"^(?:小柠[，,\s]*)?(?:帮我|请)?(?:"
+    r"(?:画|绘制|作图)(?:一张|一个)?(?:图片|图|海报|插画|封面)?"
+    r"|生成(?:一张|一个)(?:图片|图|海报|插画|封面))"
+    r"[：:，,\s]*(.+)$",
+    re.I,
+)
+_NATURAL_GENERATE_IMAGE = re.compile(
+    r"^(?:小柠[，,\s]*)?(?:帮我|请)?生成(?:一张|一个)"
+    r"(.+?)(?:图片|海报|插画|封面|图)$",
+    re.I,
+)
 
 
 class DrawRequestError(ValueError):
@@ -41,7 +53,19 @@ def parse_draw_command(text: object) -> str | None:
         (candidate for candidate in prefixes if lowered.startswith(candidate)), None
     )
     if prefix is None:
-        return None
+        natural = _NATURAL_GENERATE_IMAGE.fullmatch(raw)
+        if natural is None:
+            natural = _NATURAL_DRAW.fullmatch(raw)
+        if natural is None:
+            return None
+        prompt = " ".join(natural.group(1).split())
+        if not prompt:
+            raise DrawRequestError("请补充画面描述。")
+        if len(prompt) > MAX_PROMPT_CHARS:
+            raise DrawRequestError(f"画面描述最多 {MAX_PROMPT_CHARS} 个字符。")
+        if any(ord(char) < 32 for char in prompt):
+            raise DrawRequestError("画面描述包含不支持的控制字符。")
+        return prompt
     if len(raw) > len(prefix) and not raw[len(prefix)].isspace():
         return None
     prompt = " ".join(raw[len(prefix) :].split())

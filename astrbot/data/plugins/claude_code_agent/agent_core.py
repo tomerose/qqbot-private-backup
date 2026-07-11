@@ -329,6 +329,21 @@ def build_agent_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     return dict(os.environ if base_env is None else base_env)
 
 
+def build_job_agent_env(job_dir: Path, base_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Keep provider auth, but isolate GitHub credentials from untrusted research."""
+    env = build_agent_env(base_env)
+    env.pop("GH_TOKEN", None)
+    env.pop("GITHUB_TOKEN", None)
+    root = Path(job_dir).resolve(strict=True)
+    gh_config = (root / "private-gh-config").resolve(strict=False)
+    if gh_config.parent != root:
+        raise ValueError("GitHub 隔离目录越界")
+    gh_config.mkdir(exist_ok=True)
+    env["GH_CONFIG_DIR"] = str(gh_config)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
 def normalize_backend(value: str) -> str:
     backend = str(value or "").strip().lower()
     aliases = {"claudecode": BACKEND_CLAUDE, "codebuddy": BACKEND_WORKBUDDY}
@@ -416,6 +431,15 @@ def _execution_prompt(task: str, output_dir: Path, high_risk_approved: bool = Fa
         if high_risk_approved
         else "本任务未授权执行高风险操作：不得删除数据、对外发送、安装软件、修改系统或读取凭据。"
     )
+    artifact_quality = ""
+    if re.search(r"\bdocx\b|\bword\b|Word|文档", task, re.I):
+        artifact_quality += (
+            "Word 成品必须是可打开的 DOCX：使用标题和分级标题，排版清晰，生成后重新打开检查。"
+            "若任务涉及最新信息、调研、GitHub 或事件报告，正文至少 500 字，并在文末提供至少两个可点击的公开来源链接和资料日期。"
+        )
+    artifact_quality += (
+        "允许只读访问、搜索或克隆公开 GitHub 项目；禁止登录 GitHub，禁止 push、创建 Issue/PR/Release 或改动任何远程仓库。"
+    )
     return (
         "你已获得设备所有者授权，可使用完整 Agent 能力直接完成任务。"
         "请实际执行并验证，不要只给操作建议。"
@@ -425,6 +449,8 @@ def _execution_prompt(task: str, output_dir: Path, high_risk_approved: bool = Fa
         "即使任务需要在本机使用这些数据，也不得复制到交付目录、最终回复或日志。"
         "最终回复不得包含本机绝对路径，只能写交付文件名和可核验结果。"
         f"需要通过 QQ 交付的图片、文档、代码压缩包等，请复制到目录：{output_dir}。"
+        "文件型任务必须把最终成品写入上述目录；只在其他目录生成、只返回路径或只口头说明，都会判定为失败。"
+        f"{artifact_quality}"
         "不要把密钥、令牌、浏览器凭据或无关私人文件放入该目录。"
         f"\n\n用户任务：{task}"
     )
