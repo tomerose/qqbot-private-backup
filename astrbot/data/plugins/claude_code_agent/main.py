@@ -85,7 +85,10 @@ from .trusted_policy import (
     TrustedPolicy,
     assess_trusted_task,
 )
-from draw_command.pro_access import is_active_pro
+try:
+    from draw_command.pro_access import is_active_pro
+except ImportError:  # AstrBot package import path.
+    from data.plugins.draw_command.pro_access import is_active_pro
 
 OWNER_ID = "1211000567"
 MAX_REPLY_CHARS = 3500
