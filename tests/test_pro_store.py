@@ -48,14 +48,15 @@ class ProStoreTests(unittest.TestCase):
         application = self._awaiting_review_application()
 
         with self.assertRaisesRegex(ProStoreError, "reviewer_required"):
-            self.store.approve(application.application_id, "2000000000", 90, now=1_002)
+            self.store.request_approval(application.application_id, "2000000000", 90, now=1_002)
 
-        code = self.store.approve(application.application_id, REVIEWER, 90, now=1_002)
+        self.store.request_approval(application.application_id, REVIEWER, 90, now=1_002)
+        code = self.store.confirm_approval(application.application_id, REVIEWER, now=1_003)
         self.assertGreaterEqual(len(code), 12)
-        self.assertEqual(self.store.verify(APPLICANT, code, now=1_003), "active")
-        self.assertTrue(self.store.is_active_pro(APPLICANT, now=1_003))
+        self.assertEqual(self.store.verify(APPLICANT, code, now=1_004), "active")
+        self.assertTrue(self.store.is_active_pro(APPLICANT, now=1_004))
         with self.assertRaisesRegex(ProStoreError, "verification_invalid"):
-            self.store.verify(APPLICANT, code, now=1_004)
+            self.store.verify(APPLICANT, code, now=1_005)
 
         connection = sqlite3.connect(self.path)
         try:
@@ -70,13 +71,14 @@ class ProStoreTests(unittest.TestCase):
 
     def test_codes_expire_and_lock_after_three_wrong_attempts(self):
         application = self._awaiting_review_application()
-        code = self.store.approve(application.application_id, REVIEWER, 90, now=1_002)
+        self.store.request_approval(application.application_id, REVIEWER, 90, now=1_002)
+        code = self.store.confirm_approval(application.application_id, REVIEWER, now=1_003)
 
         for _ in range(3):
             with self.assertRaisesRegex(ProStoreError, "verification_invalid"):
-                self.store.verify(APPLICANT, "wrong-code", now=1_003)
+                self.store.verify(APPLICANT, "wrong-code", now=1_004)
         with self.assertRaisesRegex(ProStoreError, "verification_locked"):
-            self.store.verify(APPLICANT, code, now=1_004)
+            self.store.verify(APPLICANT, code, now=1_005)
 
     def test_application_and_membership_expire_and_revoke(self):
         application = self.store.create_application(APPLICANT, now=1_000)
@@ -85,18 +87,20 @@ class ProStoreTests(unittest.TestCase):
 
         second = self.store.create_application(APPLICANT, now=1_000 + 72 * 3600 + 2)
         self.store.mark_sent(second.application_id, APPLICANT, now=1_000 + 72 * 3600 + 3)
-        code = self.store.approve(second.application_id, REVIEWER, 1, now=1_000 + 72 * 3600 + 4)
-        self.store.verify(APPLICANT, code, now=1_000 + 72 * 3600 + 5)
-        self.assertFalse(self.store.is_active_pro(APPLICANT, now=1_000 + 72 * 3600 + 5 + 86401))
+        self.store.request_approval(second.application_id, REVIEWER, 1, now=1_000 + 72 * 3600 + 4)
+        code = self.store.confirm_approval(second.application_id, REVIEWER, now=1_000 + 72 * 3600 + 5)
+        self.store.verify(APPLICANT, code, now=1_000 + 72 * 3600 + 6)
+        self.assertFalse(self.store.is_active_pro(APPLICANT, now=1_000 + 72 * 3600 + 6 + 86401))
 
         other = "3000000000"
         third = self.store.create_application(other, now=1_000 + 72 * 3600 + 6)
         self.store.mark_sent(third.application_id, other, now=1_000 + 72 * 3600 + 7)
-        other_code = self.store.approve(third.application_id, REVIEWER, 90, now=1_000 + 72 * 3600 + 8)
-        self.store.verify(other, other_code, now=1_000 + 72 * 3600 + 9)
+        self.store.request_approval(third.application_id, REVIEWER, 90, now=1_000 + 72 * 3600 + 8)
+        other_code = self.store.confirm_approval(third.application_id, REVIEWER, now=1_000 + 72 * 3600 + 9)
+        self.store.verify(other, other_code, now=1_000 + 72 * 3600 + 10)
         with self.assertRaisesRegex(ProStoreError, "reviewer_required"):
-            self.store.revoke(other, "2000000000", now=1_000 + 72 * 3600 + 10)
-        self.assertTrue(self.store.revoke(other, REVIEWER, now=1_000 + 72 * 3600 + 10))
+            self.store.revoke(other, "2000000000", now=1_000 + 72 * 3600 + 11)
+        self.assertTrue(self.store.revoke(other, REVIEWER, now=1_000 + 72 * 3600 + 11))
 
     def test_duration_is_bounded_and_pending_application_is_rate_limited(self):
         application = self.store.create_application(APPLICANT, now=1_000)
@@ -104,7 +108,7 @@ class ProStoreTests(unittest.TestCase):
             self.store.create_application(APPLICANT, now=1_001)
         self.store.mark_sent(application.application_id, APPLICANT, now=1_002)
         with self.assertRaisesRegex(ProStoreError, "duration_invalid"):
-            self.store.approve(application.application_id, REVIEWER, 366, now=1_003)
+            self.store.request_approval(application.application_id, REVIEWER, 366, now=1_003)
 
     def test_status_only_returns_the_callers_latest_application(self):
         application = self.store.create_application(APPLICANT, now=1_000)
@@ -131,14 +135,44 @@ class ProStoreTests(unittest.TestCase):
 
     def test_reviewer_can_reset_undelivered_verification_without_exposing_code(self):
         application = self._awaiting_review_application()
-        self.store.approve(application.application_id, REVIEWER, 90, now=1_002)
+        self.store.request_approval(application.application_id, REVIEWER, 90, now=1_002)
+        self.store.confirm_approval(application.application_id, REVIEWER, now=1_003)
 
         with self.assertRaisesRegex(ProStoreError, "reviewer_required"):
-            self.store.reset_verification(application.application_id, "2000000000", now=1_003)
-        target = self.store.reset_verification(application.application_id, REVIEWER, now=1_003)
+            self.store.reset_verification(application.application_id, "2000000000", now=1_004)
+        target = self.store.reset_verification(application.application_id, REVIEWER, now=1_004)
 
         self.assertEqual(target, APPLICANT)
         self.assertEqual(self.store.status_for(APPLICANT, now=1_004).state, "awaiting_review")
+
+    def test_approval_requires_confirm_and_expiry_returns_to_review(self):
+        application = self._awaiting_review_application()
+
+        self.store.request_approval(application.application_id, REVIEWER, 90, now=1_002)
+
+        self.assertEqual(
+            self.store.status_for(APPLICANT, now=1_003).state,
+            "approval_pending_confirm",
+        )
+        self.assertFalse(self.store.is_active_pro(APPLICANT, now=1_003))
+        self.assertEqual(
+            self.store.status_for(APPLICANT, now=1_002 + 301).state,
+            "awaiting_review",
+        )
+
+    def test_resend_replaces_code_and_is_rate_limited(self):
+        application = self._awaiting_review_application()
+        self.store.request_approval(application.application_id, REVIEWER, 90, now=1_002)
+        first_code = self.store.confirm_approval(application.application_id, REVIEWER, now=1_003)
+        replacement_code = self.store.resend_verification(
+            application.application_id, REVIEWER, now=1_064
+        )
+
+        with self.assertRaisesRegex(ProStoreError, "verification_invalid"):
+            self.store.verify(APPLICANT, first_code, now=1_065)
+        with self.assertRaisesRegex(ProStoreError, "resend_rate_limited"):
+            self.store.resend_verification(application.application_id, REVIEWER, now=1_065)
+        self.assertEqual(self.store.verify(APPLICANT, replacement_code, now=1_066), "active")
 
 
 if __name__ == "__main__":

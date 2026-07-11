@@ -12,6 +12,8 @@ from pathlib import Path
 
 APPLICATION_TTL_SECONDS = 72 * 60 * 60
 CODE_TTL_SECONDS = 10 * 60
+APPROVAL_CONFIRM_TTL_SECONDS = 5 * 60
+RESEND_COOLDOWN_SECONDS = 60
 MAX_CODE_ATTEMPTS = 3
 DEFAULT_PRO_DAYS = 90
 MIN_PRO_DAYS = 1
@@ -73,7 +75,9 @@ class ProStore:
                     verification_expires_at REAL,
                     verification_attempts INTEGER NOT NULL DEFAULT 0,
                     approved_days INTEGER,
-                    pro_expires_at REAL
+                    pro_expires_at REAL,
+                    approval_confirm_expires_at REAL,
+                    last_code_sent_at REAL
                 );
                 CREATE INDEX IF NOT EXISTS idx_applications_qq_state
                     ON applications(qq_id, state);
@@ -85,6 +89,16 @@ class ProStore:
                 );
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(applications)").fetchall()
+            }
+            for name, declaration in (
+                ("approval_confirm_expires_at", "REAL"),
+                ("last_code_sent_at", "REAL"),
+            ):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE applications ADD COLUMN {name} {declaration}")
 
     @staticmethod
     def _application_id() -> str:
@@ -132,8 +146,17 @@ class ProStore:
             """
             UPDATE applications
             SET state = 'expired', verification_code_hash = NULL
-            WHERE state IN ('pending_email', 'awaiting_review')
+            WHERE state IN ('pending_email', 'awaiting_review', 'approval_pending_confirm')
               AND application_expires_at < ?
+            """,
+            (float(now),),
+        )
+        connection.execute(
+            """
+            UPDATE applications
+            SET state = 'awaiting_review', approval_confirm_expires_at = NULL,
+                approved_days = NULL
+            WHERE state = 'approval_pending_confirm' AND approval_confirm_expires_at < ?
             """,
             (float(now),),
         )
@@ -161,7 +184,9 @@ class ProStore:
             pending = connection.execute(
                 """
                 SELECT 1 FROM applications
-                WHERE qq_id = ? AND state IN ('pending_email', 'awaiting_review', 'awaiting_verify')
+                WHERE qq_id = ? AND state IN (
+                    'pending_email', 'awaiting_review', 'approval_pending_confirm', 'awaiting_verify'
+                )
                 LIMIT 1
                 """,
                 (identity,),
@@ -214,7 +239,9 @@ class ProStore:
             ).fetchone()
             return self._row_to_application(updated)
 
-    def approve(self, application_id: str, reviewer_id: str, days: int = DEFAULT_PRO_DAYS, *, now: float) -> str:
+    def request_approval(
+        self, application_id: str, reviewer_id: str, days: int = DEFAULT_PRO_DAYS, *, now: float
+    ) -> None:
         if str(reviewer_id or "").strip() != self.reviewer_id:
             raise ProStoreError("reviewer_required")
         duration = int(days)
@@ -230,23 +257,76 @@ class ProStore:
                 raise ProStoreError("application_expired")
             if row["state"] != "awaiting_review":
                 raise ProStoreError("application_state")
-            code = self._verification_code()
             connection.execute(
                 """
                 UPDATE applications
-                SET state = 'awaiting_verify', reviewer_id = ?, verification_code_hash = ?,
-                    verification_expires_at = ?, verification_attempts = 0, approved_days = ?
+                SET state = 'approval_pending_confirm', reviewer_id = ?, approved_days = ?,
+                    approval_confirm_expires_at = ?
                 WHERE application_id = ?
                 """,
                 (
                     self.reviewer_id,
-                    self._code_hash(code),
-                    float(now) + CODE_TTL_SECONDS,
                     duration,
+                    float(now) + APPROVAL_CONFIRM_TTL_SECONDS,
                     key,
                 ),
             )
-            self._event(connection, key, "approved_pending_verification", now)
+            self._event(connection, key, "approval_requested", now)
+
+    def confirm_approval(self, application_id: str, reviewer_id: str, *, now: float) -> str:
+        if str(reviewer_id or "").strip() != self.reviewer_id:
+            raise ProStoreError("reviewer_required")
+        key = str(application_id or "").strip().upper()
+        with self._transaction() as connection:
+            self._cleanup(connection, now)
+            row = connection.execute(
+                "SELECT * FROM applications WHERE application_id = ?", (key,)
+            ).fetchone()
+            if row is None or row["state"] == "expired":
+                raise ProStoreError("application_expired")
+            if row["state"] != "approval_pending_confirm":
+                raise ProStoreError("application_state")
+            code = self._verification_code()
+            connection.execute(
+                """
+                UPDATE applications
+                SET state = 'awaiting_verify', verification_code_hash = ?,
+                    verification_expires_at = ?, verification_attempts = 0,
+                    approval_confirm_expires_at = NULL, last_code_sent_at = ?
+                WHERE application_id = ?
+                """,
+                (self._code_hash(code), float(now) + CODE_TTL_SECONDS, float(now), key),
+            )
+            self._event(connection, key, "approval_confirmed", now)
+            return code
+
+    def resend_verification(self, application_id: str, reviewer_id: str, *, now: float) -> str:
+        if str(reviewer_id or "").strip() != self.reviewer_id:
+            raise ProStoreError("reviewer_required")
+        key = str(application_id or "").strip().upper()
+        with self._transaction() as connection:
+            self._cleanup(connection, now)
+            row = connection.execute(
+                "SELECT * FROM applications WHERE application_id = ?", (key,)
+            ).fetchone()
+            if row is None or row["state"] == "expired":
+                raise ProStoreError("application_expired")
+            if row["state"] != "awaiting_verify":
+                raise ProStoreError("application_state")
+            last_sent = row["last_code_sent_at"]
+            if last_sent is not None and float(now) - float(last_sent) < RESEND_COOLDOWN_SECONDS:
+                raise ProStoreError("resend_rate_limited")
+            code = self._verification_code()
+            connection.execute(
+                """
+                UPDATE applications
+                SET verification_code_hash = ?, verification_expires_at = ?,
+                    verification_attempts = 0, last_code_sent_at = ?
+                WHERE application_id = ?
+                """,
+                (self._code_hash(code), float(now) + CODE_TTL_SECONDS, float(now), key),
+            )
+            self._event(connection, key, "verification_resent", now)
             return code
 
     def verify(self, qq_id: str, code: str, *, now: float) -> str:
