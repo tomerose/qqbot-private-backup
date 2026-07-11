@@ -1,0 +1,13 @@
+{
+  "pro_user_ids": {
+    "description": "Pro QQ 白名单（逗号分隔）",
+    "type": "string",
+    "default": "1211000567"
+  },
+  "cooldown_seconds": {
+    "description": "单用户作图冷却秒数",
+    "type": "int",
+    "slider": {"min": 30, "max": 300, "step": 5},
+    "default": 75
+  }
+}

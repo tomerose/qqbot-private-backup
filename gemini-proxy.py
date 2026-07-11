@@ -2,18 +2,36 @@
 
 import base64
 import json
+import logging
 import os
+import sys
+import time
 import uuid
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from google import genai
 from google.genai import types
+
+ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from image_proxy_core import (
+    IMAGE_MODEL_FALLBACK,
+    IMAGE_MODEL_PRIMARY,
+    ImageRequestError,
+    extract_first_image_bytes,
+    normalize_image_request,
+)
 
 app = FastAPI()
 PROJECT = os.getenv("VERTEX_PROJECT", "solar-modem-496213-f5")
 LOCATION = os.getenv("VERTEX_LOCATION", "global")
 MODEL_IDS = {"gemini-2.5-flash", "gemini-2.5-pro"}
+logger = logging.getLogger("vertex-gemini-proxy")
 
 
 @app.get("/healthz")
@@ -91,6 +109,56 @@ async def chat(request: Request):
         }
     except Exception as exc:
         return {"error": {"message": str(exc), "type": "api_error"}}
+
+
+@app.post("/v1/images/generations")
+async def generate_image(request: Request):
+    try:
+        payload = normalize_image_request(await request.json())
+    except (ImageRequestError, ValueError, json.JSONDecodeError):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "无效的作图请求。", "type": "invalid_request_error"}},
+        )
+
+    models = [payload.model]
+    if payload.model == IMAGE_MODEL_PRIMARY:
+        models.append(IMAGE_MODEL_FALLBACK)
+    for model_id in models:
+        try:
+            client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
+            response = client.models.generate_content(
+                model=model_id,
+                contents=payload.prompt,
+                config=types.GenerateContentConfig(
+                    response_modalities=["TEXT", "IMAGE"],
+                    image_config=types.ImageConfig(
+                        aspect_ratio=payload.aspect_ratio,
+                        image_size="1K",
+                    ),
+                ),
+            )
+            image = extract_first_image_bytes(response)
+            if image is None:
+                logger.warning("image model %s returned no inline image", model_id)
+                continue
+            mime_type, image_bytes = image
+            return {
+                "created": int(time.time()),
+                "data": [
+                    {
+                        "b64_json": base64.b64encode(image_bytes).decode("ascii"),
+                        "mime_type": mime_type,
+                        "model": model_id,
+                    }
+                ],
+            }
+        except Exception:
+            logger.exception("image generation failed for model %s", model_id)
+    return JSONResponse(
+        status_code=502,
+        content={"error": {"message": "作图服务暂时不可用，请稍后再试。", "type": "api_error"}},
+    )
 
 
 if __name__ == "__main__":
