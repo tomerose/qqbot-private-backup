@@ -61,6 +61,17 @@ class DocumentQualityTests(unittest.TestCase):
             write_docx(weak, "内容" * 300, ("https://example.com/a",))
             self.assertEqual(inspect_docx_quality(weak, research=True).code, "docx_sources")
 
+            duplicate = Path(tmp) / "duplicate.docx"
+            write_docx(
+                duplicate,
+                "内容" * 300 + " https://example.com/a",
+                ("https://example.com/a",),
+            )
+            self.assertEqual(
+                inspect_docx_quality(duplicate, research=True).code,
+                "docx_sources",
+            )
+
     def test_recent_github_report_is_research_quality(self):
         self.assertTrue(requires_research_quality("生成最近 AI 大事件的 Word 报告，参考 GitHub"))
         self.assertFalse(requires_research_quality("生成只包含 hello 的 Word"))

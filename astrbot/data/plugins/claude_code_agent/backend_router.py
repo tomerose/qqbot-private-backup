@@ -61,5 +61,5 @@ def can_retry(
     return (
         int(attempts) < 2
         and not started_side_effect
-        and step.action_class is ActionClass.READ_ONLY
+        and step.action_class in {ActionClass.READ_ONLY, ActionClass.WORKSPACE_WRITE}
     )

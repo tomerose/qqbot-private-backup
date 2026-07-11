@@ -13,7 +13,7 @@ from xml.etree import ElementTree
 
 SOFFICE_EXE = Path(r"C:\Program Files\LibreOffice\program\soffice.exe")
 _RESEARCH = re.compile(r"最近|最新|大事件|研究|调研|分析报告|github|来源|引用", re.I)
-_URL = re.compile(r"https?://", re.I)
+_URL = re.compile(r"https?://[^\s<>\"']+", re.I)
 
 
 @dataclass(frozen=True)
@@ -63,10 +63,12 @@ def inspect_docx_quality(path: Path, *, research: bool) -> DocumentQualityDecisi
             ]
         except ElementTree.ParseError:
             return DocumentQualityDecision(False, "docx_invalid")
-    source_count = len(_URL.findall(text)) + sum(
-        1 for target in external_targets if _URL.match(target)
-    )
-    if source_count < 2:
+    sources: set[str] = set()
+    for value in [*_URL.findall(text), *external_targets]:
+        normalized = value.rstrip(".,;:!?，。；：！？）]").lower()
+        if _URL.fullmatch(normalized):
+            sources.add(normalized)
+    if len(sources) < 2:
         return DocumentQualityDecision(False, "docx_sources")
     return DocumentQualityDecision(True, "docx_research_valid")
 

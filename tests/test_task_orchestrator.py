@@ -93,7 +93,7 @@ class TaskOrchestratorTests(unittest.TestCase):
 
     def test_verification_failure_never_reports_completed(self):
         async def execute(_step, _route):
-            return StepExecution(0, (), 1, False)
+            return StepExecution(0, (), 1, True)
 
         async def verify(_step, _execution):
             return VerificationEvidence(False, "verification_failed")
@@ -175,6 +175,38 @@ class TaskOrchestratorTests(unittest.TestCase):
         outcome = asyncio.run(orchestrator.run(make_plan(make_step(0))))
 
         self.assertEqual(calls, ["codex", "claude"])
+        self.assertTrue(outcome.verified)
+
+    def test_isolated_workspace_write_can_switch_backend_before_side_effect(self):
+        calls = []
+
+        async def execute(_step, route):
+            calls.append(route.backend)
+            return StepExecution(1 if len(calls) == 1 else 0, (), None, False)
+
+        async def verify(_step, execution):
+            return VerificationEvidence(
+                execution.exit_code == 0,
+                "verified" if execution.exit_code == 0 else "execution_failed",
+            )
+
+        def router(_step, attempted):
+            return BackendRoute("claude" if not attempted else "codex", "selected")
+
+        step = TaskStep(
+            "job123", 0, "生成 Word", ActionClass.WORKSPACE_WRITE, True
+        )
+        orchestrator = TaskOrchestrator(
+            policy=lambda _step: StepDecision(True, False, "allowed"),
+            router=router,
+            executor=execute,
+            verifier=verify,
+            approval_check=lambda _step: False,
+        )
+
+        outcome = asyncio.run(orchestrator.run(make_plan(step)))
+
+        self.assertEqual(calls, ["claude", "codex"])
         self.assertTrue(outcome.verified)
 
     def test_resume_starts_at_cursor_and_preserves_step_response(self):

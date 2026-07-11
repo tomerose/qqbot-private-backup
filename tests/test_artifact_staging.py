@@ -16,6 +16,7 @@ sys.path.insert(0, str(PLUGIN_DIR))
 from artifact_staging import (  # noqa: E402
     collect_staged_artifacts,
     expected_artifact_suffixes,
+    quarantine_failed_attempt,
     select_execution_dir,
 )
 
@@ -25,6 +26,10 @@ class ArtifactStagingTests(unittest.TestCase):
         self.assertEqual(expected_artifact_suffixes("生成一份 Word 报告"), {".docx"})
         self.assertIn(".png", expected_artifact_suffixes("画一张图片"))
         self.assertEqual(expected_artifact_suffixes("生成 report.pdf"), {".pdf"})
+        self.assertEqual(
+            expected_artifact_suffixes("参考 https://github.com/openai 生成 Word 报告"),
+            {".docx"},
+        )
 
     def test_standalone_artifact_runs_in_private_job_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -56,6 +61,21 @@ class ArtifactStagingTests(unittest.TestCase):
             self.assertEqual([path.name for path in copied], ["report.docx"])
             self.assertTrue((output / "report.docx").is_file())
             self.assertFalse((output / "private.docx").exists())
+
+    def test_failed_isolated_attempt_is_quarantined_before_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job = Path(tmp) / "job"
+            output = job / "outputs"
+            output.mkdir(parents=True)
+            (job / "partial.docx").write_bytes(b"partial")
+            (output / "broken.docx").write_bytes(b"broken")
+
+            quarantine = quarantine_failed_attempt(job, "claude")
+
+            self.assertFalse((job / "partial.docx").exists())
+            self.assertFalse((output / "broken.docx").exists())
+            self.assertTrue((quarantine / "partial.docx").is_file())
+            self.assertTrue((quarantine / "outputs" / "broken.docx").is_file())
 
 
 if __name__ == "__main__":

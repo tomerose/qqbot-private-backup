@@ -68,7 +68,9 @@ class BackendRouterTests(unittest.TestCase):
         self.assertTrue(can_retry(read_step, started_side_effect=False, attempts=1))
         self.assertFalse(can_retry(read_step, started_side_effect=False, attempts=2))
         self.assertFalse(can_retry(read_step, started_side_effect=True, attempts=1))
-        self.assertFalse(can_retry(write_step, started_side_effect=False, attempts=1))
+        self.assertTrue(can_retry(write_step, started_side_effect=False, attempts=1))
+        high = make_step("发送报告", ActionClass.HIGH_IMPACT)
+        self.assertFalse(can_retry(high, started_side_effect=False, attempts=1))
 
 
 if __name__ == "__main__":

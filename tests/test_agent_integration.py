@@ -248,6 +248,54 @@ class AgentIntegrationTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_failed_claude_isolated_artifact_falls_back_once_to_codex(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                backends = []
+                job_ids = []
+
+                async def fail_then_succeed(
+                    this, job_id, job_dir, task, backend, high_risk_approved
+                ):
+                    backends.append(backend)
+                    job_ids.append(job_id)
+                    if backend == "claude":
+                        (job_dir / "partial.txt").write_text(
+                            "partial", encoding="utf-8"
+                        )
+                        return "Claude unavailable", [], "failed", 1, "nonzero_exit"
+                    artifact = job_dir / "outputs" / "result.txt"
+                    artifact.write_text("complete", encoding="utf-8")
+                    return (
+                        "Codex completed",
+                        [Deliverable(artifact, "file")],
+                        "completed",
+                        0,
+                        "",
+                    )
+
+                plugin._execute = types.MethodType(fail_then_succeed, plugin)
+
+                replies = await _collect(
+                    plugin.on_message(FakeEvent("帮我生成 result.txt"))
+                )
+
+                self.assertEqual(backends, ["claude", "codex"])
+                self.assertTrue(
+                    any(text.startswith("已完成") for text in _plain_texts(replies))
+                )
+                job_id = job_ids[0]
+                quarantines = list(
+                    (plugin.workspace / "jobs" / job_id / "failed-attempts").glob(
+                        "claude-*"
+                    )
+                )
+                self.assertEqual(len(quarantines), 1)
+                self.assertTrue((quarantines[0] / "partial.txt").is_file())
+
+        asyncio.run(scenario())
+
     def test_pro_membership_alone_does_not_grant_trusted_host_execution(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
@@ -382,7 +430,7 @@ class AgentIntegrationTests(unittest.TestCase):
                 await _collect(plugin.on_message(FakeEvent("帮我部署代码")))
 
                 pending = next(iter(plugin._approvals._pending.values()))
-                self.assertEqual(pending.backend, "codex")
+                self.assertEqual(pending.backend, "claude")
 
         asyncio.run(scenario())
 

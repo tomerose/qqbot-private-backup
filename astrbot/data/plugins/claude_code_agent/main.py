@@ -58,6 +58,7 @@ from .backend_health import BackendHealthCache
 from .artifact_staging import (
     collect_staged_artifacts,
     expected_artifact_suffixes,
+    quarantine_failed_attempt,
     select_execution_dir,
 )
 from .document_quality import (
@@ -1008,6 +1009,14 @@ class ClaudeCodeAgent(Star):
                     str(route.backend),
                     high_risk_approved=step_digest(step) in approved_steps,
                 )
+                isolated_attempt = (
+                    select_execution_dir(step.instruction, self.work_dir, job_dir)
+                    == job_dir.resolve(strict=True)
+                )
+                started_side_effect = step.action_class is not ActionClass.READ_ONLY
+                if isolated_attempt and not deliverables:
+                    quarantine_failed_attempt(job_dir, str(route.backend))
+                    started_side_effect = False
                 effective_exit = exit_code if state == "completed" else (exit_code or 1)
                 verification_exit = None
                 if state == "completed" and should_run_project_verification(step):
@@ -1027,7 +1036,7 @@ class ClaudeCodeAgent(Star):
                     effective_exit,
                     tuple(deliverables),
                     verification_exit,
-                    step.action_class is not ActionClass.READ_ONLY,
+                    started_side_effect,
                     response=response,
                 )
 

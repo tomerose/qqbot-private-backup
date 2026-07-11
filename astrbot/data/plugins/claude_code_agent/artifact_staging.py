@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import uuid
 from pathlib import Path
 
 try:
@@ -23,11 +24,18 @@ _PDF = re.compile(r"\bpdf\b", re.I)
 _EXPLICIT_SUFFIX = re.compile(r"(?i)(?<![\w.])[^\s/\\]+(\.[a-z0-9]{1,8})\b")
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+SUPPORTED_ARTIFACT_SUFFIXES = IMAGE_SUFFIXES | {
+    ".docx", ".pdf", ".pptx", ".xlsx", ".txt", ".md", ".csv", ".zip"
+}
 
 
 def expected_artifact_suffixes(task: str) -> set[str]:
     text = str(task or "")
-    explicit = {match.group(1).lower() for match in _EXPLICIT_SUFFIX.finditer(text)}
+    explicit = {
+        match.group(1).lower()
+        for match in _EXPLICIT_SUFFIX.finditer(text)
+        if match.group(1).lower() in SUPPORTED_ARTIFACT_SUFFIXES
+    }
     if explicit:
         return explicit
     if _WORD.search(text):
@@ -82,3 +90,30 @@ def collect_staged_artifacts(
         shutil.copy2(candidate, destination)
         copied.append(destination)
     return copied
+
+
+def quarantine_failed_attempt(job_dir: Path, backend: str) -> Path:
+    root = Path(job_dir).resolve(strict=True)
+    name = str(backend or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9_-]{1,32}", name):
+        raise ValueError("后端名称无效")
+    quarantine_root = (root / "failed-attempts").resolve(strict=False)
+    if quarantine_root.parent != root:
+        raise ValueError("失败隔离目录越界")
+    quarantine_root.mkdir(exist_ok=True)
+    target = quarantine_root / f"{name}-{uuid.uuid4().hex[:8]}"
+    target.mkdir()
+
+    output = root / "outputs"
+    quarantined_output = target / "outputs"
+    quarantined_output.mkdir()
+    if output.is_dir() and not output.is_symlink():
+        for child in list(output.iterdir()):
+            shutil.move(str(child), str(quarantined_output / child.name))
+
+    reserved = {"outputs", "failed-attempts", "private-gh-config", "qa"}
+    for child in list(root.iterdir()):
+        if child.name in reserved or child.is_symlink():
+            continue
+        shutil.move(str(child), str(target / child.name))
+    return target
