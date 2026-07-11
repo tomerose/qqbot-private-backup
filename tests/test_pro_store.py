@@ -208,6 +208,15 @@ class ProStoreTests(unittest.TestCase):
 
         self.assertFalse(self.store.is_active_pro(APPLICANT, now=1_005))
 
+    def test_confirmation_timeout_is_audited(self):
+        application = self._awaiting_review_application()
+        self.store.request_approval(application.application_id, REVIEWER, 90, now=1_002)
+
+        events = self.store.audit_for(application.application_id, REVIEWER, now=1_303)
+
+        self.assertEqual(self.store.status_for(APPLICANT, now=1_303).state, "awaiting_review")
+        self.assertIn("approval_confirmation_expired", [event.event_type for event in events])
+
 
 if __name__ == "__main__":
     unittest.main()

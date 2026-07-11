@@ -217,6 +217,13 @@ class ProStore:
         )
 
     def _cleanup(self, connection: sqlite3.Connection, now: float) -> None:
+        expiring_confirmations = connection.execute(
+            """
+            SELECT application_id FROM applications
+            WHERE state = 'approval_pending_confirm' AND approval_confirm_expires_at < ?
+            """,
+            (float(now),),
+        ).fetchall()
         connection.execute(
             """
             UPDATE applications
@@ -226,6 +233,8 @@ class ProStore:
             """,
             (float(now),),
         )
+        for row in expiring_confirmations:
+            self._event(connection, row["application_id"], "approval_confirmation_expired", now)
         connection.execute(
             """
             UPDATE applications
@@ -468,7 +477,7 @@ class ProStore:
                 expected = self._membership_signature(
                     row["application_id"], row["qq_id"], row["state"], row["pro_expires_at"]
                 )
-            except ProStoreError:
+            except (ProStoreError, TypeError, ValueError):
                 return False
             return hmac.compare_digest(str(row["membership_signature"] or ""), expected)
 

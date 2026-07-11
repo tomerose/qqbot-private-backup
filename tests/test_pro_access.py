@@ -49,6 +49,24 @@ class ProAccessTests(unittest.TestCase):
             finally:
                 connection.close()
 
+            self.assertFalse(store.is_active_pro(APPLICANT, now=1_005))
+            self.assertFalse(is_active_pro(APPLICANT, path, now=1_005))
+
+    def test_malformed_membership_record_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pro_members.db"
+            store = ProStore(path, reviewer_id=REVIEWER)
+            activate(store, APPLICANT)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE applications SET pro_expires_at = 'not-a-timestamp' WHERE qq_id = ?",
+                    (APPLICANT,),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
             self.assertFalse(is_active_pro(APPLICANT, path, now=1_005))
 
     def test_missing_or_corrupt_database_fails_closed(self):

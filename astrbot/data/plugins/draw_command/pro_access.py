@@ -78,9 +78,12 @@ def is_active_pro(qq_id: object, db_path: Path, now: float | None = None) -> boo
         ).fetchone()
         if row is None:
             return False
-        expected = _membership_signature(
-            key, row["application_id"], row["qq_id"], row["state"], row["pro_expires_at"]
-        )
+        try:
+            expected = _membership_signature(
+                key, row["application_id"], row["qq_id"], row["state"], row["pro_expires_at"]
+            )
+        except (TypeError, ValueError):
+            return False
         return hmac.compare_digest(str(row["membership_signature"] or ""), expected)
     except sqlite3.Error:
         return False
