@@ -11,7 +11,6 @@ from PIL import Image as PillowImage
 PLUGINS_DIR = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugins"
 sys.path.insert(0, str(PLUGINS_DIR))
 
-from claude_code_agent.access_policy import AccessPolicy  # noqa: E402
 from draw_command.draw_core import DrawRateLimiter  # noqa: E402
 from draw_command.main import DrawCommand  # noqa: E402
 
@@ -58,7 +57,7 @@ class DrawPluginTests(unittest.TestCase):
     @staticmethod
     def build_plugin(output_root: Path) -> DrawCommand:
         plugin = DrawCommand.__new__(DrawCommand)
-        plugin._access_policy = AccessPolicy(["1211000567"])
+        plugin._pro_user_ids = frozenset({"1211000567"})
         plugin._rate_limiter = DrawRateLimiter(cooldown_seconds=60)
         plugin._generation_lock = asyncio.Lock()
         plugin._output_root = output_root

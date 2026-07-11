@@ -6,10 +6,21 @@ from pathlib import Path
 PLUGINS_DIR = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugins"
 sys.path.insert(0, str(PLUGINS_DIR))
 
-from draw_command.draw_core import DrawRateLimiter, DrawRequestError, parse_draw_command  # noqa: E402
+from draw_command.draw_core import (  # noqa: E402
+    DrawRateLimiter,
+    DrawRequestError,
+    parse_draw_command,
+    parse_pro_user_ids,
+)
 
 
 class DrawCoreTests(unittest.TestCase):
+    def test_pro_ids_accept_only_valid_qq_numbers(self):
+        self.assertEqual(
+            parse_pro_user_ids("1211000567, 1211000567;not-pro 01234"),
+            ("1211000567",),
+        )
+
     def test_parses_only_explicit_draw_commands_and_bounds_prompt(self):
         self.assertEqual(parse_draw_command("/draw a moonlit lake"), "a moonlit lake")
         self.assertEqual(parse_draw_command("/画图 一只小猫"), "一只小猫")

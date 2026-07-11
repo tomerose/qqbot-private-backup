@@ -3,15 +3,34 @@
 from __future__ import annotations
 
 import math
+import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 
 MAX_PROMPT_CHARS = 500
+_QQ_ID = re.compile(r"^[1-9]\d{4,11}$")
 
 
 class DrawRequestError(ValueError):
     """A safe, user-facing drawing request validation error."""
+
+
+def parse_pro_user_ids(value: object) -> tuple[str, ...]:
+    """Freeze valid QQ IDs without importing another AstrBot plugin."""
+    if isinstance(value, str):
+        candidates = re.split(r"[\s,;]+", value)
+    elif isinstance(value, Iterable):
+        candidates = [str(item) for item in value]
+    else:
+        candidates = []
+    return tuple(
+        dict.fromkeys(
+            candidate.strip()
+            for candidate in candidates
+            if _QQ_ID.fullmatch(candidate.strip())
+        )
+    )
 
 
 def parse_draw_command(text: object) -> str | None:

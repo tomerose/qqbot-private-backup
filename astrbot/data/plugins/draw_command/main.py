@@ -15,9 +15,12 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star
 
-from claude_code_agent.access_policy import AccessPolicy, AccessTier
-
-from .draw_core import DrawRateLimiter, DrawRequestError, parse_draw_command
+from .draw_core import (
+    DrawRateLimiter,
+    DrawRequestError,
+    parse_draw_command,
+    parse_pro_user_ids,
+)
 
 
 PRO_DRAW_MESSAGE = "作图是 Pro 功能。要开通或了解 Pro，可发邮件说明用途：portelamicheli636@gmail.com"
@@ -30,7 +33,9 @@ class DrawCommand(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config)
         self.config = config or {}
-        self._access_policy = AccessPolicy(self.config.get("pro_user_ids", "1211000567"))
+        self._pro_user_ids = frozenset(
+            parse_pro_user_ids(self.config.get("pro_user_ids", "1211000567"))
+        )
         self._rate_limiter = DrawRateLimiter(
             cooldown_seconds=int(self.config.get("cooldown_seconds", 75))
         )
@@ -101,7 +106,7 @@ class DrawCommand(Star):
 
         event.stop_event()
         sender_id = self._safe_sender_id(event)
-        if self._access_policy.resolve_tier(sender_id) is not AccessTier.PRO:
+        if sender_id not in self._pro_user_ids:
             yield event.plain_result(PRO_DRAW_MESSAGE)
             return
         if self._generation_lock.locked():
