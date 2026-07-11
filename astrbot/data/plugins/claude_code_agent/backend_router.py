@@ -42,7 +42,7 @@ def route_backend(
     if DESKTOP_HINT.search(step.instruction):
         order = ["workbuddy", "codex", "claude"]
     elif CODE_HINT.search(step.instruction):
-        order = ["codex", "claude", "workbuddy"]
+        order = [preferred_name, "claude", "codex", "workbuddy"]
     else:
         order = [preferred_name, "claude", "codex", "workbuddy"]
     backend = next(

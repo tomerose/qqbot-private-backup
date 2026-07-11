@@ -22,18 +22,18 @@ def make_step(instruction, action_class=ActionClass.READ_ONLY):
 
 
 class BackendRouterTests(unittest.TestCase):
-    def test_code_routes_to_codex_then_claude(self):
+    def test_code_honors_claude_preference_then_uses_codex(self):
         step = make_step("检查并解释 Python 测试")
 
         first = route_backend(step, "claude", {"codex", "claude"}, set())
         second = route_backend(
-            step, "claude", {"codex", "claude"}, {"codex"}
+            step, "claude", {"codex", "claude"}, {"claude"}
         )
 
-        self.assertEqual(first.backend, "codex")
-        self.assertEqual(second.backend, "claude")
+        self.assertEqual(first.backend, "claude")
+        self.assertEqual(second.backend, "codex")
 
-    def test_github_research_routes_to_codex_first(self):
+    def test_github_research_honors_claude_preference(self):
         route = route_backend(
             make_step("参考 GitHub 公开项目生成最近 AI 大事件 Word 报告"),
             "claude",
@@ -41,7 +41,7 @@ class BackendRouterTests(unittest.TestCase):
             set(),
         )
 
-        self.assertEqual(route.backend, "codex")
+        self.assertEqual(route.backend, "claude")
 
     def test_desktop_task_prefers_workbuddy(self):
         route = route_backend(

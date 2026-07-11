@@ -103,7 +103,7 @@ class AgentCoreTests(unittest.TestCase):
         codex = build_backend_command(BACKEND_CODEX, "执行任务", cwd, output)
         self.assertIn("exec", codex)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", codex)
-        self.assertEqual(codex[codex.index("-m") + 1], "gpt-5.6-terra")
+        self.assertEqual(codex[codex.index("-m") + 1], "gpt-5.4-mini")
         self.assertEqual(codex[codex.index("-C") + 1], str(cwd))
         self.assertIn("--skip-git-repo-check", codex)
         workbuddy = build_backend_command(BACKEND_WORKBUDDY, "执行任务", cwd, output)
