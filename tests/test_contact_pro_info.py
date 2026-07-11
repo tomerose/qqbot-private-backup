@@ -14,6 +14,8 @@ from contact_pro_info.main import (  # noqa: E402
     CONTACT_REPLY,
     ContactProInfo,
     contact_reply_for,
+    version_reply_for,
+    VERSION_REPLY,
 )
 
 
@@ -37,6 +39,18 @@ async def collect(generator):
 
 
 class ContactProInfoTests(unittest.TestCase):
+    def test_version_questions_return_user_facing_feature_summary(self):
+        for text in (
+            "普通版和Pro有什么区别",
+            "Pro版功能",
+            "小柠能做什么",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(version_reply_for(text), VERSION_REPLY)
+
+    def test_unrelated_pro_model_question_does_not_return_version_summary(self):
+        self.assertIsNone(version_reply_for("这个 Pro 模型怎么样"))
+
     def test_contact_and_pro_acquisition_intents_return_public_email(self):
         for text in (
             "怎么联系作者",
@@ -55,11 +69,11 @@ class ContactProInfoTests(unittest.TestCase):
     def test_handler_returns_native_result_and_stops_matching_event(self):
         async def scenario():
             plugin = ContactProInfo.__new__(ContactProInfo)
-            event = FakeEvent("Pro 怎么开通")
+            event = FakeEvent("普通版和 Pro 有什么区别")
 
             replies = await collect(plugin.on_message(event))
 
-            self.assertEqual(replies, [CONTACT_REPLY])
+            self.assertEqual(replies, [VERSION_REPLY])
             self.assertTrue(event.stopped)
 
         asyncio.run(scenario())
@@ -69,6 +83,7 @@ class ContactProInfoTests(unittest.TestCase):
         rule = "询问联系作者、老板或获取 Pro 时"
 
         self.assertIn(rule, config["provider_settings"]["prompt_prefix"])
+        self.assertIn("询问普通版和 Pro 版区别", config["provider_settings"]["prompt_prefix"])
         self.assertTrue(
             any(
                 persona.get("name") == "xiaoning"
