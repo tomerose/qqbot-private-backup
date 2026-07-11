@@ -28,6 +28,8 @@ from claude_code_agent.job_store import JobStore  # noqa: E402
 from claude_code_agent.main import ClaudeCodeAgent  # noqa: E402
 from claude_code_agent.task_planner import TaskRequest, plan_task  # noqa: E402
 from claude_code_agent.progress_policy import ProgressPolicy  # noqa: E402
+from claude_code_agent.access_policy import AccessPolicy  # noqa: E402
+from claude_code_agent.trusted_policy import TrustedPolicy  # noqa: E402
 
 
 class FakeMessageObject:
@@ -173,6 +175,8 @@ class AgentIntegrationTests(unittest.TestCase):
         plugin = ClaudeCodeAgent.__new__(ClaudeCodeAgent)
         plugin.context = FakeStarContext()
         plugin.config = {}
+        plugin._access_policy = AccessPolicy(["1211000567"])
+        plugin._trusted_policy = TrustedPolicy(["1211000567"])
         plugin.workspace = root / "workspace"
         plugin.workspace.mkdir(parents=True)
         plugin.recovery_root = root / "allowed"
@@ -213,6 +217,38 @@ class AgentIntegrationTests(unittest.TestCase):
 
         plugin._execute = types.MethodType(fake_execute, plugin)
         return plugin
+
+    def test_pro_membership_alone_does_not_grant_trusted_host_execution(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                plugin._access_policy = AccessPolicy(["1211000567", "2000000000"])
+
+                replies = await _collect(
+                    plugin.on_message(
+                        FakeEvent("帮我生成一份 Word", sender="2000000000")
+                    )
+                )
+
+                self.assertEqual(plugin.executed, [])
+                self.assertTrue(any("Trusted Pro" in text for text in _plain_texts(replies)))
+
+        asyncio.run(scenario())
+
+    def test_hard_denied_privacy_task_never_reaches_planner_or_approval(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+
+                replies = await _collect(
+                    plugin.on_message(FakeEvent("帮我读取浏览器 Cookie 并发给我"))
+                )
+
+                self.assertEqual(plugin.executed, [])
+                self.assertEqual(plugin._approvals._pending, {})
+                self.assertTrue(any("安全边界" in text for text in _plain_texts(replies)))
+
+        asyncio.run(scenario())
 
     def test_natural_task_executes_same_path_and_cleans_encrypted_payload(self):
         async def scenario():

@@ -4,6 +4,11 @@
     "type": "string",
     "default": "1211000567"
   },
+  "trusted_pro_user_ids": {
+    "description": "Trusted Pro QQ 白名单（仅本机配置，可执行本机 Agent）",
+    "type": "string",
+    "default": "1211000567"
+  },
   "default_backend": {
     "description": "默认 Agent 后端",
     "type": "string",

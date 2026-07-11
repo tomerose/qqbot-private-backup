@@ -67,6 +67,7 @@ from .task_verifier import (
     should_run_project_verification,
     verify_step,
 )
+from .trusted_policy import TrustedDisposition, TrustedPolicy, assess_trusted_task
 
 OWNER_ID = "1211000567"
 MAX_REPLY_CHARS = 3500
@@ -78,6 +79,9 @@ class ClaudeCodeAgent(Star):
         self.config = config or {}
         self._access_policy = AccessPolicy(
             self.config.get("pro_user_ids", OWNER_ID)
+        )
+        self._trusted_policy = TrustedPolicy(
+            self.config.get("trusted_pro_user_ids", OWNER_ID)
         )
         self.workspace = DEFAULT_WORKSPACE.resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -116,7 +120,11 @@ class ClaudeCodeAgent(Star):
 
     def _is_owner(self, ctx: Context) -> bool:
         policy = getattr(self, "_access_policy", AccessPolicy((OWNER_ID,)))
-        return policy.authorize(ctx.get_sender_id(), Capability.LOCAL_AGENT)
+        trusted = getattr(self, "_trusted_policy", TrustedPolicy((OWNER_ID,)))
+        sender_id = ctx.get_sender_id()
+        return policy.authorize(
+            sender_id, Capability.LOCAL_AGENT
+        ) and trusted.is_trusted(sender_id)
 
     @staticmethod
     def _reply(ctx: Context, component):
@@ -322,6 +330,9 @@ class ClaudeCodeAgent(Star):
         high_risk_approved: bool,
     ) -> tuple[str, list[Deliverable], str, int | None, str]:
         output_dir = job_dir / "outputs"
+        boundary = assess_trusted_task(task, self.work_dir, self.recovery_root)
+        if boundary.disposition is TrustedDisposition.DENY:
+            return "任务被本机安全边界拒绝。", [], "failed", None, boundary.code
         command = build_backend_command(
             backend,
             task,
@@ -826,6 +837,14 @@ class ClaudeCodeAgent(Star):
                     else None
                 ) or self.backend
                 task = validate_task(parts[2])
+                trusted_decision = self._trusted_policy.authorize_task(
+                    sender_id, task, self.work_dir, self.recovery_root
+                )
+                if trusted_decision.disposition is TrustedDisposition.DENY:
+                    yield self._reply(
+                        ctx, Plain("这个任务超出本机安全边界，没有执行。")
+                    )
+                    return
                 job_id = uuid.uuid4().hex[:12]
                 job_dir = create_job_dir(self.workspace, job_id)
                 plan = plan_task(TaskRequest(job_id, task, backend))
@@ -1167,7 +1186,7 @@ class ClaudeCodeAgent(Star):
                 if not self._is_owner(ctx):
                     yield self._reply(
                         ctx,
-                        Plain("本机 Agent 是 Pro 能力，普通用户不能使用。")
+                        Plain("本机 Agent 是 Trusted Pro 能力，当前账号不能使用。")
                     )
                     return
                 if natural_intent.action == "run":
@@ -1182,7 +1201,7 @@ class ClaudeCodeAgent(Star):
         action = parts[1].lower() if len(parts) > 1 else "help"
 
         if not self._is_owner(ctx):
-            yield self._reply(ctx, Plain("本机 Agent 是 Pro 能力，普通用户不能使用。"))
+            yield self._reply(ctx, Plain("本机 Agent 是 Trusted Pro 能力，当前账号不能使用。"))
             return
         if action in {"help", "?"}:
             yield self._reply(ctx, Plain(self._help_text()))
@@ -1203,7 +1222,10 @@ class ClaudeCodeAgent(Star):
                 yield self._reply(ctx, Plain("工作目录已设置；为保护机主隐私，不在聊天中显示绝对路径。"))
                 return
             try:
-                self.work_dir = validate_work_dir(parts[2])
+                candidate = validate_work_dir(parts[2])
+                if not self._directory_within(candidate, self.recovery_root):
+                    raise ValueError("目录不在允许的项目根内")
+                self.work_dir = candidate
             except ValueError as exc:
                 yield self._reply(ctx, Plain(f"目录未切换：{exc}"))
                 return

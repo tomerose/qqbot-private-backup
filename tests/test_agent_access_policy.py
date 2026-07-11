@@ -37,6 +37,12 @@ class AgentAccessPolicyTests(unittest.TestCase):
         self.assertEqual(policy.resolve_tier("领取Pro"), AccessTier.ORDINARY)
         self.assertEqual(policy.resolve_tier(""), AccessTier.ORDINARY)
 
+    def test_future_pro_user_does_not_implicitly_become_trusted_host_operator(self):
+        policy = AccessPolicy(["1211000567", "2000000000"])
+
+        self.assertEqual(policy.resolve_tier("2000000000"), AccessTier.PRO)
+        self.assertTrue(policy.authorize("2000000000", Capability.LOCAL_AGENT))
+
 
 if __name__ == "__main__":
     unittest.main()
