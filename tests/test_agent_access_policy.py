@@ -1,12 +1,16 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 
-PLUGIN_DIR = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugins" / "claude_code_agent"
-sys.path.insert(0, str(PLUGIN_DIR))
+PLUGINS_DIR = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugins"
+sys.path.insert(0, str(PLUGINS_DIR / "claude_code_agent"))
+sys.path.insert(0, str(PLUGINS_DIR))
 
 from access_policy import AccessPolicy, AccessTier, Capability  # noqa: E402
+from trusted_policy import TrustedPolicy  # noqa: E402
+from pro_application.pro_store import ProStore  # noqa: E402
 
 
 class AgentAccessPolicyTests(unittest.TestCase):
@@ -37,11 +41,22 @@ class AgentAccessPolicyTests(unittest.TestCase):
         self.assertEqual(policy.resolve_tier("领取Pro"), AccessTier.ORDINARY)
         self.assertEqual(policy.resolve_tier(""), AccessTier.ORDINARY)
 
-    def test_future_pro_user_does_not_implicitly_become_trusted_host_operator(self):
+    def test_approved_public_pro_cannot_become_trusted_host_operator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ProStore(Path(tmp) / "pro_members.db", reviewer_id="1211000567")
+            application = store.create_application("2000000000", now=1_000)
+            store.mark_sent(application.application_id, "2000000000", now=1_001)
+            code = store.approve(application.application_id, "1211000567", 90, now=1_002)
+            store.verify("2000000000", code, now=1_003)
+            self.assertTrue(store.is_active_pro("2000000000", now=1_004))
+
         policy = AccessPolicy(["1211000567", "2000000000"])
+        trusted = TrustedPolicy(["1211000567"])
 
         self.assertEqual(policy.resolve_tier("2000000000"), AccessTier.PRO)
         self.assertTrue(policy.authorize("2000000000", Capability.LOCAL_AGENT))
+        self.assertFalse(trusted.is_trusted("2000000000"))
+        self.assertTrue(trusted.is_trusted("1211000567"))
 
 
 if __name__ == "__main__":

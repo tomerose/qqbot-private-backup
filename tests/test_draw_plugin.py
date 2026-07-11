@@ -2,6 +2,7 @@ import asyncio
 import io
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -13,6 +14,7 @@ sys.path.insert(0, str(PLUGINS_DIR))
 
 from draw_command.draw_core import DrawRateLimiter, parse_draw_command  # noqa: E402
 from draw_command.main import DrawCommand  # noqa: E402
+from pro_application.pro_store import ProStore  # noqa: E402
 
 
 class FakeEvent:
@@ -66,7 +68,51 @@ class DrawPluginTests(unittest.TestCase):
         plugin._rate_limiter = DrawRateLimiter(cooldown_seconds=60)
         plugin._generation_lock = asyncio.Lock()
         plugin._output_root = output_root
+        plugin._pro_db_path = output_root.parent / "pro_members.db"
         return plugin
+
+    @staticmethod
+    def activate_pro(db_path: Path, qq_id: str):
+        store = ProStore(db_path, reviewer_id="1211000567")
+        now = time.time()
+        app = store.create_application(qq_id, now=now)
+        store.mark_sent(app.application_id, qq_id, now=now + 1)
+        code = store.approve(app.application_id, "1211000567", 90, now=now + 2)
+        store.verify(qq_id, code, now=now + 3)
+
+    def test_approved_dynamic_pro_member_can_draw(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "draws"
+                plugin = self.build_plugin(root)
+                self.activate_pro(plugin._pro_db_path, "2000000000")
+                image = PillowImage.new("RGB", (2, 2), "blue")
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                plugin._request_image = lambda _prompt: buffer.getvalue()
+
+                replies = await collect(plugin.on_message(FakeEvent("/draw a cat", "2000000000")))
+
+                self.assertEqual(replies[0], ("plain", "我开始画了，预计 30–90 秒。"))
+                self.assertEqual(replies[-1][0], "chain")
+
+        asyncio.run(scenario())
+
+    def test_revoked_dynamic_pro_member_cannot_draw(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "draws"
+                plugin = self.build_plugin(root)
+                self.activate_pro(plugin._pro_db_path, "2000000000")
+                store = ProStore(plugin._pro_db_path, reviewer_id="1211000567")
+                self.assertTrue(store.revoke("2000000000", "1211000567", now=time.time()))
+                plugin._request_image = lambda _prompt: self.fail("proxy should not run")
+
+                replies = await collect(plugin.on_message(FakeEvent("/draw a cat", "2000000000")))
+
+                self.assertEqual(replies, [("plain", "作图是 Pro 功能。要开通或了解 Pro，可发邮件说明用途：portelamicheli636@gmail.com")])
+
+        asyncio.run(scenario())
 
     def test_non_pro_draw_request_is_stopped_without_calling_proxy(self):
         async def scenario():

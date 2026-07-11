@@ -21,6 +21,7 @@ from .draw_core import (
     parse_draw_command,
     parse_pro_user_ids,
 )
+from .pro_access import is_active_pro
 
 
 PRO_DRAW_MESSAGE = "作图是 Pro 功能。要开通或了解 Pro，可发邮件说明用途：portelamicheli636@gmail.com"
@@ -42,6 +43,10 @@ class DrawCommand(Star):
         self._generation_lock = asyncio.Lock()
         project_root = Path(__file__).resolve().parents[4]
         self._output_root = project_root / "astrbot" / "data" / "temp" / "pro_draw"
+        self._pro_db_path = project_root / "astrbot" / "data" / "plugin_data" / "xiaoning_pro" / "pro_members.db"
+
+    def _is_pro(self, sender_id: str) -> bool:
+        return sender_id in self._pro_user_ids or is_active_pro(sender_id, self._pro_db_path)
 
     @staticmethod
     def _message_text(event: AstrMessageEvent) -> str:
@@ -106,7 +111,7 @@ class DrawCommand(Star):
 
         event.stop_event()
         sender_id = self._safe_sender_id(event)
-        if sender_id not in self._pro_user_ids:
+        if not self._is_pro(sender_id):
             yield event.plain_result(PRO_DRAW_MESSAGE)
             return
         if self._generation_lock.locked():
