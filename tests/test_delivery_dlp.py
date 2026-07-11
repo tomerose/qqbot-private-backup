@@ -55,6 +55,51 @@ class DeliveryDLPTests(unittest.TestCase):
             self.assertTrue(inspect_deliverable(archive, root).allowed)
             self.assertEqual(inspect_deliverable(binary, root).code, "unsupported_type")
 
+    def test_clean_docx_with_xml_namespace_urls_is_allowed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            document = root / "report.docx"
+            with zipfile.ZipFile(document, "w", zipfile.ZIP_DEFLATED) as handle:
+                handle.writestr(
+                    "[Content_Types].xml",
+                    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" />',
+                )
+                handle.writestr(
+                    "_rels/.rels",
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" />',
+                )
+                handle.writestr(
+                    "word/document.xml",
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                    "<w:body><w:p><w:r><w:t>Safe report</w:t></w:r></w:p></w:body>"
+                    "</w:document>",
+                )
+
+            decision = inspect_deliverable(document, root)
+
+            self.assertTrue(decision.allowed, decision.code)
+
+    def test_docx_with_a_real_local_path_remains_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            document = root / "private.docx"
+            with zipfile.ZipFile(document, "w", zipfile.ZIP_DEFLATED) as handle:
+                handle.writestr(
+                    "[Content_Types].xml",
+                    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" />',
+                )
+                handle.writestr(
+                    "word/document.xml",
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                    "<w:body><w:p><w:r><w:t>C:\\private\\owner\\chat.txt</w:t></w:r></w:p></w:body>"
+                    "</w:document>",
+                )
+
+            decision = inspect_deliverable(document, root)
+
+            self.assertFalse(decision.allowed)
+            self.assertEqual(decision.code, "sensitive_content")
+
     def test_outside_root_and_symlink_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

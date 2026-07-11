@@ -34,7 +34,7 @@ _SENSITIVE_NAME_FRAGMENT = re.compile(
     r"api[_-]?key|token|password|secret|credential|cookie", re.I
 )
 _LOCAL_PATH = re.compile(
-    r"(?i)(?:file:/+)?(?:[a-z]:[\\/]|\\\\)[^\s`\"<>|，。；！？）】},;!]+"
+    r"(?i)(?:file:/+)?(?<![a-z])(?:[a-z]:[\\/]|\\\\)[^\s`\"<>|，。；！？）】},;!]+"
 )
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|password|secret|"
