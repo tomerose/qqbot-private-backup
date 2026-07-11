@@ -1,0 +1,6 @@
+name: voice_model_router
+display_name: 语音模型路由
+short_desc: 文字用 DeepSeek，明确语音请求用 Gemini Flash 和本地 TTS
+desc: 检测 QQ 语音与明确语音回复请求，输入交给 Gemini 2.5 Flash，输出只通过环回本地 TTS 生成。
+version: v2.0.0
+author: lemon

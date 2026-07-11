@@ -1,0 +1,17 @@
+{
+  "voice_output_enabled": {
+    "description": "明确要求语音时启用本地 TTS 输出",
+    "type": "bool",
+    "default": true
+  },
+  "authorized_voice": {
+    "description": "仅在声线已获明确授权时允许启用 GPT-SoVITS",
+    "type": "bool",
+    "default": false
+  },
+  "tts_endpoint": {
+    "description": "本地 TTS 环回地址",
+    "type": "string",
+    "default": "http://127.0.0.1:8766"
+  }
+}

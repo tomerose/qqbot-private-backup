@@ -1,0 +1,102 @@
+name: 🐛 Bug 报告
+description: 报告本 AstrBot 洛克王国世界插件相关 Bug
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本仓库是 **AstrBot 上的洛克王国世界数据查询插件**（命令、渲染、配置、本仓库代码问题等在此反馈）。
+
+        若你判断问题出在 **WeGame 相关接口或服务端、统一前后端行为**（而非本插件里 AstrBot 侧逻辑或展示），请到 [WeGame-plugin](https://github.com/Entropy-Increase-Team/WeGame-plugin/issues) 提交。
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 问题归属
+      description: 选最接近的一项；不确定可先选「本仓库」并描述现象
+      options:
+        - 本仓库：AstrBot 插件内（命令、渲染、配置、本仓库逻辑）
+        - 更偏 WeGame 前后端 / API / 服务端（更建议到 WeGame-plugin）
+        - 其他 / 暂不确定
+    validations:
+      required: true
+
+  - type: dropdown
+    id: bug-type
+    attributes:
+      label: 表现类型
+      options:
+        - 渲染/图片生成异常
+        - 命令无响应、报错
+        - 数据/接口返回异常（若确认是服务端侧请选上方「WeGame-plugin」）
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 请清晰简洁地描述问题
+      placeholder: 描述你遇到的 Bug...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 复现此问题的详细步骤
+      placeholder: |
+        1. 在 AstrBot 中执行/配置 '...'
+        2. ...
+        3. 出现现象 '...'
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图或日志
+      description: 截图、AstrBot 与终端日志
+      placeholder: 拖拽上传或粘贴关键日志
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: 插件 / AstrBot 版本
+      placeholder: "例如: 插件 2.3.0，AstrBot ..."
+    validations:
+      required: false
+
+  - type: input
+    id: environment
+    attributes:
+      label: 运行环境
+      description: Python、系统、Chromium/Playwright 等
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充信息
+    validations:
+      required: false

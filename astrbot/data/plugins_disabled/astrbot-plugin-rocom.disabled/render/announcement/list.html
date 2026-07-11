@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width={{pageWidth}}, initial-scale=1">
+  <title>{{listHeader}}</title>
+  <link rel="stylesheet" href="{{_res_path}}render/announcement/style.css">
+  <style>
+    html,
+    body {
+      width: {{pageWidth}}px;
+      min-width: {{pageWidth}}px;
+      box-sizing: border-box;
+    }
+  </style>
+</head>
+<body>
+  <div class="announcement-list-page">
+    <div class="list-top-bar">
+      <div class="list-header-middle">
+        <h1 class="list-title">{{listHeader}}</h1>
+        <p class="list-helper-text">输入 /洛克公告详情 &lt;ID&gt; 查看具体公告</p>
+        <p class="list-count">{{listSubtitle}}</p>
+      </div>
+    </div>
+
+    <div class="announcement-entries">
+      {% if list and list|length > 0 %}
+      {% for item in list %}
+      <div class="announcement-item">
+        <div class="announcement-item-header">
+          <span class="announcement-num"><em>No.</em>{{item.index}}</span>
+          <div class="announcement-main">
+            <div class="announcement-title-line">
+              <span class="announcement-title">{{item.title}}</span>
+              {% if item.isStick %}<span class="announcement-stick">置顶</span>{% endif %}
+            </div>
+            <div class="announcement-meta">
+              <span>ID {{item.id}}</span>
+              <span>{{item.author}}</span>
+              <span>{{item.timeStr}}</span>
+            </div>
+          </div>
+        </div>
+        {% if item.coverUrl %}
+        <div class="announcement-thumb-wrap">
+          <img src="{{item.coverUrl}}" alt="" class="announcement-thumb">
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+      {% else %}
+      <div class="announcement-empty">暂无公告。</div>
+      {% endif %}
+    </div>
+
+    <footer class="announcement-footer">
+      <div>{{footerLine1}}</div>
+      {% if has_more %}
+      <div>下一页：/洛克公告 {{next_page}}</div>
+      {% endif %}
+    </footer>
+  </div>
+</body>
+</html>

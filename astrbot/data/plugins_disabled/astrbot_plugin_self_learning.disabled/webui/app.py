@@ -1,0 +1,146 @@
+"""
+Quart 应用工厂
+"""
+import os
+import secrets
+from datetime import timedelta
+from quart import Quart, redirect, request
+from astrbot.api import logger
+
+try:
+    from quart_cors import cors as _quart_cors
+except ImportError:
+    _quart_cors = None
+
+from .config import WebUIConfig
+from .middleware.error_handler import register_error_handlers
+from .utils.response import add_no_store_headers
+
+
+def _get_or_create_secret_key(data_dir: str) -> str:
+    """获取或创建持久化的 secret_key。
+
+    首次运行时生成随机密钥并保存到磁盘，后续重启复用同一密钥，
+    确保 session cookie 在服务器重启后仍然有效。
+    """
+    secret_file = os.path.join(data_dir, ".secret_key")
+    try:
+        if os.path.exists(secret_file):
+            with open(secret_file, "r", encoding="utf-8") as f:
+                key = f.read().strip()
+                if key:
+                    return key
+        # 生成新密钥并持久化
+        key = secrets.token_hex(32)
+        os.makedirs(os.path.dirname(secret_file), exist_ok=True)
+        with open(secret_file, "w", encoding="utf-8") as f:
+            f.write(key)
+        logger.info(f" [WebUI] 已生成并保存新的 secret_key: {secret_file}")
+        return key
+    except Exception as e:
+        logger.warning(f" [WebUI] 无法持久化 secret_key ({e})，将使用临时密钥")
+        return secrets.token_hex(32)
+
+
+def _enable_cors(app: Quart) -> None:
+    """启用 CORS；优先使用 quart_cors，缺失时使用内置回退。"""
+    if _quart_cors is not None:
+        _quart_cors(app)
+        return
+
+    @app.after_request
+    async def _add_cors_headers(response):
+        origin = request.headers.get("Origin")
+        if origin:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Vary"] = "Origin"
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers.setdefault(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Authorization, X-Requested-With, X-Self-Learning-Key",
+        )
+        response.headers.setdefault(
+            "Access-Control-Allow-Methods",
+            "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+        )
+        return response
+
+
+def _disable_dynamic_response_cache(app: Quart) -> None:
+    """Avoid CDN/browser caching for WebUI API and auth responses."""
+
+    @app.after_request
+    async def _add_no_store_headers(response):
+        if not request.path.startswith("/static/"):
+            return add_no_store_headers(response)
+        return response
+
+
+def create_app(webui_config: WebUIConfig = None) -> Quart:
+    """
+    创建 Quart 应用
+
+    Args:
+        webui_config: WebUI 配置
+
+    Returns:
+        Quart 应用实例
+    """
+    # 创建应用
+    app = Quart(
+        __name__,
+        static_folder=webui_config.static_dir if webui_config else None,
+        static_url_path="/static",
+        template_folder=webui_config.template_dir if webui_config else None
+    )
+
+    # 配置持久化密钥（跨重启保持 session 有效）
+    if webui_config and webui_config.data_dir:
+        app.secret_key = _get_or_create_secret_key(webui_config.data_dir)
+    else:
+        app.secret_key = secrets.token_hex(32)
+
+    # Session 配置
+    app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+    app.config['SESSION_COOKIE_HTTPONLY'] = True
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+    # 启用 CORS
+    _enable_cors(app)
+    _disable_dynamic_response_cache(app)
+
+    # 存储配置到应用上下文
+    if webui_config:
+        app.config['WEBUI_CONFIG'] = webui_config
+        app.config['ENABLE_WEB_DEP_INSTALL'] = webui_config.enable_web_dependency_install
+        app.config['ALLOWED_DEPENDENCY_PACKAGES'] = webui_config.allowed_dependency_packages
+
+    # 注册错误处理
+    register_error_handlers(app)
+
+    # 根路由重定向到 /api/
+    @app.route("/")
+    async def root_redirect():
+        return redirect("/api/")
+
+    logger.info(" [WebUI] Quart 应用创建成功")
+
+    return app
+
+
+def register_blueprints(app: Quart):
+    """
+    注册所有蓝图
+
+    Args:
+        app: Quart 应用实例
+    """
+    from .blueprints import get_blueprints
+
+    blueprints = get_blueprints()
+
+    for bp in blueprints:
+        app.register_blueprint(bp)
+        logger.info(f" [WebUI] 已注册蓝图: {bp.name}")
+
+    logger.info(f" [WebUI] 共注册 {len(blueprints)} 个蓝图")

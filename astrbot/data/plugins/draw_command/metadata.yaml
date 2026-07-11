@@ -1,0 +1,6 @@
+name: draw_command
+display_name: AI画图
+short_desc: /draw 命令生图
+desc: 使用 pollinations.ai 免费生图
+version: v1.0.0
+author: lemon

@@ -1,0 +1,78 @@
+{
+  "metadata": {
+    "display_name": "Bilibili",
+    "short_desc": "B站视频解析、UP主动态/直播订阅、番剧推荐",
+    "desc": "哔哩哔哩动态推送、视频信息解析、直播间状态推送、QQ小程序解析、基于 LLM 的 Bangumi 番剧推荐。"
+  },
+  "config": {
+    "sessdata": {
+      "description": "B站 SESSDATA",
+      "hint": "Bilibili 的 SESSDATA Cookie，用于获取动态和视频信息。获取方式详见 README。"
+    },
+    "proxy": {
+      "description": "代理地址",
+      "hint": "Bilibili API 请求代理地址。示例: http://127.0.0.1:7890 或 socks5://127.0.0.1:1080，留空则直连。"
+    },
+    "bangumi_token": {
+      "description": "Bangumi 访问令牌",
+      "hint": "可选。Bangumi (bgm.tv) 的 Access Token。调用需要授权的接口时请填写。"
+    },
+    "interval_secs": {
+      "description": "轮询间隔（秒）",
+      "hint": "单个UP主任务的检测周期（秒）。默认 300 秒（5 分钟）。"
+    },
+    "task_gap_secs": {
+      "description": "任务间隔（秒）",
+      "hint": "相邻两个UP主任务的最小间隔秒数，用于控制 API 请求频率。"
+    },
+    "reconnect_silent": {
+      "description": "重连静默",
+      "hint": "启用后，若启动时检测到长时间未成功推送订阅通知，则先静默一段时间以消化积压消息，避免刷屏。"
+    },
+    "rai": {
+      "description": "图片渲染推送",
+      "hint": "启用后以 HTML 卡片渲染图片形式推送动态与直播通知，视觉效果更好。关闭则使用纯文本模式。"
+    },
+    "renderer_template": {
+      "description": "渲染模板",
+      "hint": "选择动态/直播推送卡片的渲染样式。",
+      "labels": ["经典", "Bilibili 粉", "简约"]
+    },
+    "node": {
+      "description": "转发消息模式",
+      "hint": "启用后以转发消息（节点）形式推送动态，适用于 QQ 等支持转发消息的平台。"
+    },
+    "enable_parse_miniapp": {
+      "description": "解析 QQ 小程序",
+      "hint": "启用后自动解析消息中的 Bilibili QQ 小程序卡片，提取直链。"
+    },
+    "enable_parse_BV": {
+      "description": "解析 B 站视频链接",
+      "hint": "启用后自动解析消息中的 BV 号和 b23.tv 短链接，回复视频详情卡片。"
+    },
+    "dynamic_limit": {
+      "description": "单次推送上限",
+      "hint": "每个UP主每次轮询最大推送动态条数，避免一次性推送过多消息。"
+    },
+    "recent_dynamic_cache": {
+      "description": "动态去重缓存大小",
+      "hint": "用于去重的 recent_ids 缓存长度，越大去重范围越广但占用更多内存。"
+    },
+    "plain_push_template": {
+      "description": "纯文本推送模板",
+      "hint": "非图片推送模式下的动态消息模板，留空使用默认格式。可用变量: {name}(UP主名称) {uid}(UID) {action}(动作) {title}(标题) {text}(正文) {url}(链接)。"
+    },
+    "plain_push_forward_template": {
+      "description": "纯文本转发内容模板",
+      "hint": "非图片推送模式下的转发内容模板，留空使用默认格式。可用变量: {name} {uid} {title} {text} {url}（数据来源为被转发的原动态）。"
+    },
+    "enable_ai_summary": {
+      "description": "AI 摘要",
+      "hint": "启用后在动态推送后额外调用 AI（LLM）生成内容摘要。需确保已配置有效的 AI 模型。"
+    },
+    "ai_summary_prompt": {
+      "description": "AI 摘要提示词",
+      "hint": "可选。自定义 AI 摘要的提示词模板。使用 {content} 代表组装后的动态内容。留空则使用内置默认提示词。"
+    }
+  }
+}

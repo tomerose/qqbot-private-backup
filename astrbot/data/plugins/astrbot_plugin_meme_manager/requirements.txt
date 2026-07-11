@@ -1,0 +1,6 @@
+aiohttp
+tqdm
+boto3
+botocore
+pillow
+requests

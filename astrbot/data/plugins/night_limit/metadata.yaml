@@ -1,0 +1,6 @@
+name: night_limit
+display_name: 夜间限频
+short_desc: 21点~12点每人最多20条私聊
+desc: 超了自动拒绝并停止回复
+version: v1.0.0
+author: lemon

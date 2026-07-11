@@ -1,0 +1,86 @@
+# ========================================
+# Python
+# ========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ========================================
+# Environment & Secrets
+# ========================================
+.env
+.env.*
+config/password.json
+
+# ========================================
+# IDE & Editor
+# ========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.claude/
+.VSCodeCounter/
+
+# ========================================
+# OS Files
+# ========================================
+.DS_Store
+Thumbs.db
+
+# ========================================
+# Testing & Coverage
+# ========================================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ========================================
+# Project-specific: Old/Backup Files
+# ========================================
+main.py.old
+webui.py.old
+
+# ========================================
+# Project-specific: Generated Data
+# ========================================
+/export/
+/remote_export/
+export.zip
+
+# ========================================
+# Project-specific: Scripts (not shipped)
+# ========================================
+/moss/
+/scripts/
+test_api.py
+test_api_simple.py
+upload_voice.py
+migrate_database.py
+check_progress.py
+scripts/inspect_old_database.py
+
+# ========================================
+# Project-specific: Draft Docs
+# ========================================
+API_USAGE.md
+DATABASE_AUTO_CREATION.md
+DATABASE_MANAGER_GUIDE.md
+SOCIAL_GRAPH_IMPROVEMENTS.md
+EDGE_WIDTH_LIMIT.md
+SOCIAL_GRAPH_NODE_LIMIT.md
+MESSAGE_LIMIT_CUSTOMIZATION.md
+ENABLED.md
+QUICK_START.md
+tests/README.md
+x x x x - 让聊天机器人像真人一样思考和对话.md
+数字生命 - 构建能思考、会学习、有情感的虚拟人格.md

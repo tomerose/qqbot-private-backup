@@ -1,0 +1,6 @@
+name: claude_code_agent
+display_name: 小柠本机 Agent
+short_desc: 仅小姚可用的 Claude、Codex、WorkBuddy 执行与安全文件回传
+desc: 通过 /agent run 调用本机 Agent；自动隐藏本机路径，并使用 QQ 群文件接口回传交付物。
+version: v1.1.0
+author: lemon

@@ -1,0 +1,1611 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>陪伴面板</title>
+  <link rel="stylesheet" href="./app.css?v=20260708-582-experimental-smooth" />
+  <link rel="stylesheet" href="./css/header-tools.css?v=20260707-font-switch" />
+  <link rel="stylesheet" href="./css/qzone-mobile.css?v=20260707-qzone-mobile" />
+  <script>
+    (function () {
+      try {
+        var theme = localStorage.getItem("pc_theme") || "classic";
+        var font = localStorage.getItem("pc_font") || "original";
+        var allowedThemes = ["classic", "dark", "warm", "forest", "sakura", "ocean", "lavender", "ink", "sunset"];
+        if (allowedThemes.indexOf(theme) === -1) theme = "classic";
+        if (font !== "cheng") font = "original";
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.dataset.pageFont = font;
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <main class="shell">
+    <section class="folio">
+      <div class="folio-plate" aria-hidden="true">
+        <div class="plate-cv-grid"></div>
+        <img id="dailyOutfitLogo" class="daily-outfit-logo" alt="今日穿搭照片" />
+        <svg class="vitruvian" viewBox="0 0 200 200" role="img" aria-label="维特鲁威人手稿">
+          <g class="vitruvian-geometry" fill="none">
+            <circle cx="100" cy="100" r="92"/>
+            <circle cx="100" cy="100" r="69"/>
+            <rect x="16" y="16" width="168" height="168"/>
+            <rect x="40" y="40" width="120" height="120"/>
+            <path d="M24 118 C52 58 91 33 146 48"/>
+            <path d="M52 170 C78 134 121 132 148 170"/>
+            <path d="M100 22 V190"/>
+            <path d="M28 150 H172"/>
+          </g>
+          <g class="vitruvian-measure" fill="none">
+            <path d="M52 30 C88 12 122 12 158 30"/>
+            <path d="M48 178 C80 194 120 194 152 178"/>
+            <path d="M18 92 C36 72 54 58 76 50"/>
+          </g>
+          <g class="vitruvian-body" stroke="#0f2a4a" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="100" cy="62" r="8.5" fill="#f6e1df" stroke="#0f2a4a"/>
+            <line x1="100" y1="70.5" x2="100" y2="116"/>
+            <line x1="100" y1="82" x2="64" y2="98"/>
+            <line x1="100" y1="82" x2="136" y2="98"/>
+            <line x1="100" y1="116" x2="72" y2="156"/>
+            <line x1="100" y1="116" x2="128" y2="156"/>
+            <line x1="100" y1="116" x2="80" y2="160"/>
+            <line x1="100" y1="116" x2="120" y2="160"/>
+          </g>
+          <g class="vitruvian-leads" stroke="#c8362f" stroke-width="0.7" opacity="0.75" fill="#c8362f">
+            <line x1="64" y1="98" x2="28" y2="150"/>
+            <line x1="136" y1="98" x2="172" y2="150"/>
+            <line x1="72" y1="156" x2="44" y2="190"/>
+            <line x1="128" y1="156" x2="156" y2="190"/>
+            <line x1="100" y1="62" x2="100" y2="22"/>
+            <line x1="100" y1="116" x2="100" y2="190"/>
+            <circle cx="28" cy="150" r="1.6"/>
+            <circle cx="172" cy="150" r="1.6"/>
+            <circle cx="44" cy="190" r="1.6"/>
+            <circle cx="156" cy="190" r="1.6"/>
+            <circle cx="100" cy="22" r="1.6"/>
+            <circle cx="100" cy="190" r="1.6"/>
+          </g>
+          <g class="vitruvian-notes" fill="#1a4b8c" font-family="Consolas, monospace" font-size="6" font-weight="700">
+            <text x="30" y="146">a</text>
+            <text x="166" y="146">b</text>
+            <text x="46" y="186">c</text>
+            <text x="150" y="186">d</text>
+            <text x="104" y="20">e</text>
+            <text x="26" y="36">ratio 1:1</text>
+            <text x="128" y="64">axis</text>
+            <text x="24" y="174">field note</text>
+          </g>
+        </svg>
+        <div class="plate-block plate-block--red"></div>
+        <div class="plate-block plate-block--blue"></div>
+        <div class="plate-diagonal"></div>
+        <div class="plate-stamp">FOLIO&nbsp;·&nbsp;I</div>
+        <div class="plate-caption">VITRUVIAN STUDY<br><span>人 · 比例 · 陪伴</span></div>
+      </div>
+
+      <div class="folio-meta">
+        <div class="folio-eyebrow"><b>●</b> COMPANION · 人本仪表 / HUMAN-CENTERED INSTRUMENT</div>
+        <h1 class="folio-title">陪伴<br><i>面板</i></h1>
+        <p id="subtitle">读取运行态中...</p>
+        <div class="folio-rule"></div>
+        <div class="folio-stats" id="stats"></div>
+      </div>
+
+      <div class="folio-tools">
+        <button id="refreshBtn" class="seal" title="刷新" aria-label="刷新">
+          <span class="seal-mark">↻</span>
+          <small>REFRESH</small>
+        </button>
+        <button id="setupGuideStartBtn" class="setup-guide-entry" type="button" data-setup-guide-open>配置引导</button>
+      </div>
+    </section>
+
+    <section class="layout">
+      <nav class="annotations" aria-label="视图">
+        <div class="annot-axis" aria-hidden="true"></div>
+        <button class="tab is-active" data-tab="dashboard"><i>01</i><span>总览</span></button>
+        <button class="tab" data-tab="roleplay"><i>02</i><span>世界知识</span></button>
+        <button class="tab" data-tab="private"><i>03</i><span>私聊</span></button>
+        <button class="tab" data-tab="group"><i>04</i><span>群聊</span></button>
+        <button class="tab" data-tab="worldbook"><i>05</i><span>关系网</span></button>
+        <button class="tab" data-tab="memory"><i>06</i><span>观察</span></button>
+        <button class="tab" data-tab="proactive"><i>07</i><span>主动</span></button>
+        <button class="tab" data-tab="bookshelf"><i>08</i><span>书柜</span></button>
+        <button class="tab" data-tab="qzone"><i>09</i><span>QQ空间</span></button>
+        <button class="tab" data-tab="tokens"><i>10</i><span>Token</span></button>
+        <button class="tab" data-tab="troubleshooting"><i>11</i><span>排障</span></button>
+        <button class="tab" data-tab="modules"><i>12</i><span>模块</span></button>
+        <button class="tab" data-tab="config"><i>13</i><span>配置</span></button>
+        <button class="tab" data-tab="models"><i>14</i><span>模型</span></button>
+        <button class="tab" data-tab="experimental"><i>15</i><span>实验</span></button>
+      </nav>
+
+      <section class="panel is-active" id="panel-dashboard">
+        <div class="section-head">
+          <h2>运行总览</h2>
+          <div class="actions compact">
+            <button id="exportSnapshotBtn" type="button">导出快照</button>
+          </div>
+        </div>
+        <div id="dashboardPulse" class="dashboard-pulse"></div>
+        <div id="dashboardShortcuts" class="dashboard-shortcuts"></div>
+        <div class="dashboard-grid">
+          <article>
+            <h2>私聊策略</h2>
+            <div id="privateConfig"></div>
+          </article>
+          <article>
+            <h2>群聊策略</h2>
+            <div id="groupConfig"></div>
+          </article>
+          <article class="wide">
+            <h2>长线主动</h2>
+            <div id="longTermConfig"></div>
+          </article>
+          <article class="wide" id="setupProgressArticle">
+            <div class="section-head">
+              <h2>配置进度</h2>
+              <button type="button" class="setup-progress-toggle" data-setup-progress-toggle hidden>展开全部</button>
+            </div>
+            <div id="setupProgressBar" class="setup-progress-bar-container"></div>
+            <div id="setupProgressList" class="setup-progress-list"></div>
+          </article>
+          <article class="wide">
+            <h2>拓展页自检</h2>
+            <div id="uxReviewPanel" class="ux-review-list"></div>
+          </article>
+          <article>
+            <h2>私聊关系分布</h2>
+            <div id="relationshipChart" class="chart-box"></div>
+          </article>
+          <article>
+            <h2>群聊观测分布</h2>
+            <div id="groupBubbleChart" class="chart-box"></div>
+          </article>
+          <article>
+            <h2>主动额度</h2>
+            <div id="quotaChart" class="chart-box"></div>
+          </article>
+          <article>
+            <h2>能力状态</h2>
+            <div id="featureMatrix" class="feature-matrix"></div>
+          </article>
+          <article class="wide">
+            <h2>今日新闻见闻</h2>
+            <div id="newsInsightPanel" class="insight-panel"></div>
+          </article>
+          <article class="wide">
+            <h2>主动搜索记录</h2>
+            <div id="webExplorationPanel" class="insight-panel"></div>
+          </article>
+          <article class="wide">
+            <h2>最近活跃热力</h2>
+            <div id="activityHeatmap" class="heatmap"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-roleplay">
+        <div class="section-head">
+          <div>
+            <h2>世界知识</h2>
+            <span class="muted">维护陪伴插件使用的背景资料；真正决定聊天人格的是 AstrBot 主回复人格。</span>
+          </div>
+        </div>
+        <div class="world-knowledge-brief" aria-label="人格与世界知识区别">
+          <section>
+            <b>主回复人格</b>
+            <span>AstrBot 当前人格或插件指定人格，决定 Bot 在私聊和群聊里“是谁、怎么说话”。</span>
+          </section>
+          <section>
+            <b>世界知识</b>
+            <span>本页资料只作为日程、状态、主动动机、日记、识图、生图和世界观转写的背景补充。</span>
+          </section>
+          <section>
+            <b>群聊边界</b>
+            <span>这里不会直接覆盖群聊人格；只有相关功能注入背景时才会被当作线索参考。</span>
+          </section>
+        </div>
+        <article class="module-card persona-source-card">
+          <div class="module-card-head">
+            <div>
+              <h2>主回复人格来源</h2>
+              <span class="section-desc">这里用于查看聊天人格来源，不是编辑入口；需要修改时请到 AstrBot 人格或插件配置里调整。</span>
+            </div>
+            <span class="module-badge">只读</span>
+          </div>
+          <div class="module-form">
+            <label>当前聊天人格
+              <input id="currentPersonaDisplay" readonly value="读取中..." />
+            </label>
+            <p class="section-desc">主回复人格会影响被动回复、群聊人格、关系评估和主动消息口吻；本页下方的资料只是背景知识，不应拿来当完整人格覆盖它。</p>
+            <p class="section-desc">如需指定人格，请到 AstrBot 插件配置页，打开“我会永远陪着你”的配置项，在“插件指定人格 ID”里使用人格选择器选择；留空即继承 AstrBot 当前默认人格。</p>
+            <div class="persona-draft-actions">
+              <div class="persona-draft-scope" aria-label="草稿生成范围">
+                <label><input type="checkbox" data-roleplay-draft-scope="persona" checked /> 角色资料</label>
+                <label><input type="checkbox" data-roleplay-draft-scope="world" /> 世界观资料</label>
+                <label><input type="checkbox" data-roleplay-draft-scope="user" /> 用户与关系</label>
+              </div>
+              <button type="button" id="generateRoleplayDraftBtn">提取为世界知识草稿</button>
+              <span>只抽取主回复人格里明确写出的信息；生成后先预览，不会自动保存，也不会修改人格。</span>
+            </div>
+            <div id="roleplayPersonaDraftPanel" class="persona-draft-panel" hidden></div>
+          </div>
+        </article>
+        <article class="roleplay-studio module-card" data-roleplay-mode="standard">
+          <div class="module-card-head">
+            <div>
+              <h2>世界知识工作台</h2>
+              <span class="section-desc">把角色资料、世界观和用户关系整理成插件可引用的背景材料；不会覆盖 AstrBot 主人格。</span>
+            </div>
+            <span class="module-badge">知识</span>
+          </div>
+          <div class="roleplay-mode-switch" role="group" aria-label="设定填写模式">
+            <button type="button" data-roleplay-mode="freeform">旧版文案</button>
+            <button type="button" class="is-active" data-roleplay-mode="standard">标准化填写</button>
+          </div>
+          <form id="roleplayProfileForm" class="roleplay-form">
+            <section class="persona-card">
+              <div class="persona-card-head">
+                <span class="persona-avatar" aria-hidden="true">设</span>
+                <div>
+                  <h3>角色资料</h3>
+                  <p>外观、身份、日常习惯和关键细节；供日程、状态、识图、生图和主动行为参考，不是聊天人格全文。</p>
+                </div>
+                <button type="button" class="roleplay-example-btn" data-roleplay-example="persona">填入示例</button>
+              </div>
+              <input name="bot_name" type="hidden" />
+              <input name="default_style" type="hidden" />
+              <input name="roleplay_knowledge_source_ids" type="hidden" />
+              <label class="roleplay-textarea roleplay-freeform">角色资料补充
+                <textarea name="schedule_persona_prompt" rows="10" placeholder="姓名：
+种族：
+生日：
+性别：
+识别点：
+发型发色：
+瞳色：
+服饰风格：
+职业/身份：
+性格描述：
+核心欲望/目标：
+爱好：
+禁忌：
+关键设定：
+其他补充信息："></textarea>
+              </label>
+              <div class="roleplay-standard persona-standard-grid">
+                <label>姓名 <textarea data-roleplay-persona-part="name" rows="2"></textarea></label>
+                <label>种族 <textarea data-roleplay-persona-part="species" rows="2"></textarea></label>
+                <label>生日 <textarea data-roleplay-persona-part="age" rows="2"></textarea></label>
+                <label>性别 <textarea data-roleplay-persona-part="gender" rows="2"></textarea></label>
+                <div class="roleplay-appearance-group">
+                  <h4>外貌信息</h4>
+                  <label>识别点 <textarea data-roleplay-persona-part="appearance" rows="2"></textarea></label>
+                  <label>发型发色 <textarea data-roleplay-persona-part="hair" rows="2"></textarea></label>
+                  <label>瞳色 <textarea data-roleplay-persona-part="eyes" rows="2"></textarea></label>
+                  <label>服饰风格 <textarea data-roleplay-persona-part="clothing" rows="2"></textarea></label>
+                </div>
+                <label>职业/身份 <textarea data-roleplay-persona-part="identity" rows="2"></textarea></label>
+                <label>性格描述 <textarea data-roleplay-persona-part="personality" rows="2"></textarea></label>
+                <label>核心欲望/目标 <textarea data-roleplay-persona-part="desire" rows="2"></textarea></label>
+                <label>爱好 <textarea data-roleplay-persona-part="hobbies" rows="2"></textarea></label>
+                <label>禁忌 <textarea data-roleplay-persona-part="taboo" rows="2"></textarea></label>
+                <label>关键设定 <textarea data-roleplay-persona-part="key_lore" rows="2"></textarea></label>
+                <label class="wide-field">其他补充信息 <textarea data-roleplay-persona-part="extra" rows="2"></textarea></label>
+              </div>
+              <label class="roleplay-textarea">图片自我识别线索
+                <textarea name="private_image_self_recognition_hint" rows="4" placeholder="只写当前角色自己的外观、头像、表情包、聊天截图昵称或二创形象线索。
+例如：常见头像、发色/瞳色、服装、代表物、表情包文字风格。
+不要写用户性别、用户职业、与用户关系。"></textarea>
+              </label>
+            </section>
+
+            <section class="world-blueprint">
+              <div class="blueprint-head">
+                <div>
+                  <span>世界蓝图</span>
+                  <h3>世界观蓝图</h3>
+                </div>
+                <button type="button" class="roleplay-example-btn" data-roleplay-example="world">填入示例</button>
+                <label>适配模式
+                  <select name="worldview_adaptation_mode">
+                    <option value="auto">自动</option>
+                    <option value="modern">现代日常</option>
+                    <option value="fantasy">幻想世界</option>
+                    <option value="sci_fi">科幻世界</option>
+                    <option value="custom">自定义</option>
+                    <option value="off">关闭</option>
+                  </select>
+                </label>
+              </div>
+              <div class="blueprint-grid">
+                <label class="roleplay-textarea roleplay-freeform">世界观/生活背景
+                  <textarea name="schedule_worldview_prompt" rows="8" placeholder="所处世界：
+时代背景：
+基本法则/基调：
+特殊规则：
+主要活动场景：
+世界观关系网：
+其他补充信息："></textarea>
+                </label>
+                <label class="roleplay-textarea roleplay-freeform">世界观翻译提示
+                  <textarea name="worldview_adaptation_prompt" rows="8" placeholder="可选。只有需要把现实平台换成世界观称呼时再填，例如：
+群聊 = 公会闲谈
+识屏 = 水晶映像
+B站 = 影像记录
+QQ空间 = 公开札记
+书柜 = 行囊书匣"></textarea>
+                </label>
+                <div class="roleplay-standard blueprint-standard-grid">
+                  <label>所处世界 <textarea data-roleplay-world-part="world" rows="2"></textarea></label>
+                  <label>时代背景 <textarea data-roleplay-world-part="era" rows="2"></textarea></label>
+                  <label>基本法则/基调 <textarea data-roleplay-world-part="tone" rows="2"></textarea></label>
+                  <label>特殊规则 <textarea data-roleplay-world-part="rules" rows="2"></textarea></label>
+                  <label>主要活动场景 <textarea data-roleplay-world-part="scenes" rows="2"></textarea></label>
+                  <label>世界观关系网 <textarea data-roleplay-world-part="network" rows="2"></textarea></label>
+                  <label class="wide-field">其他补充信息 <textarea data-roleplay-world-part="extra" rows="2"></textarea></label>
+                </div>
+                <details class="roleplay-standard translation-collapsible">
+                  <summary class="translation-summary">
+                    <div class="translation-summary-text">
+                      <b>平台称呼转写（可选）</b>
+                      <span>只有角色世界观需要把"群聊、识屏、B站、QQ空间、书柜"换成设定内说法时再填；普通现代日常可以全部留空。</span>
+                    </div>
+                  </summary>
+                  <div class="roleplay-standard translation-standard-grid">
+                    <label>群聊（可选） <input data-roleplay-translation-part="群聊" placeholder="可留空，例如 公会闲谈" /></label>
+                    <label>识屏（可选） <input data-roleplay-translation-part="识屏" placeholder="可留空，例如 水晶映像" /></label>
+                    <label>B站（可选） <input data-roleplay-translation-part="B站" placeholder="可留空，例如 影像记录" /></label>
+                    <label>QQ空间（可选） <input data-roleplay-translation-part="QQ空间" placeholder="可留空，例如 公开札记" /></label>
+                    <label>书柜（可选） <input data-roleplay-translation-part="书柜" placeholder="可留空，例如 行囊书匣" /></label>
+                  </div>
+                </details>
+              </div>
+              <div class="roleplay-knowledge-panel">
+                <div class="roleplay-knowledge-head">
+                  <div>
+                    <h4>AstrBot 知识库参考</h4>
+                    <p>选择已有知识库或文档，给日程模拟和世界观适配提供背景。</p>
+                  </div>
+                  <span id="roleplayKnowledgeCount" class="module-badge">0</span>
+                </div>
+                <div id="roleplayKnowledgeSources" class="roleplay-knowledge-list"></div>
+              </div>
+            </section>
+
+            <section class="roleplay-user-card">
+              <div>
+                <h3>用户与关系资料</h3>
+                <p>稳定称呼、关系和相处方式；用于理解这位用户，不会覆盖群聊里其他人的身份。</p>
+              </div>
+              <button type="button" class="roleplay-example-btn" data-roleplay-example="user">填入示例</button>
+              <div class="roleplay-user-fields">
+                <label>对用户的称呼 <input name="default_nickname" /></label>
+              </div>
+              <label class="roleplay-textarea roleplay-freeform">用户与关系补充
+                <textarea name="roleplay_user_profile_prompt" rows="5" placeholder="对用户的称呼：
+用户性别：
+用户生日：
+用户职业：
+是角色的XX：
+与角色的相处方式：
+其他补充信息："></textarea>
+              </label>
+              <div class="roleplay-standard user-standard-grid">
+                <label>性别 <textarea data-roleplay-user-part="user_gender" rows="2"></textarea></label>
+                <label>生日 <textarea data-roleplay-user-part="user_age" rows="2"></textarea></label>
+                <label>职业 <textarea data-roleplay-user-part="user_occupation" rows="2"></textarea></label>
+                <label>是角色的XX <textarea data-roleplay-user-part="role_relation" rows="2"></textarea></label>
+                <label>与角色的相处方式 <textarea data-roleplay-user-part="interaction" rows="2"></textarea></label>
+                <label class="wide-field">其他补充信息 <textarea data-roleplay-user-part="extra" rows="2"></textarea></label>
+              </div>
+            </section>
+
+            <button type="submit">保存世界知识</button>
+          </form>
+        </article>
+      </section>
+
+      <section class="panel" id="panel-private">
+        <div class="section-head">
+          <h2>私聊对象</h2>
+          <input id="userFilter" type="search" placeholder="筛选 QQ / 昵称" />
+        </div>
+        <form id="addUserForm" class="inline-form manage-form">
+          <label>QQ 号 <input name="user_id" placeholder="例如 123456789" required /></label>
+          <label>称呼 <input name="nickname" placeholder="可选" /></label>
+          <button type="submit">新增对象</button>
+        </form>
+        <form id="privateAliasForm" class="inline-form manage-form">
+          <label>身份别名归并 <textarea name="private_user_aliases" rows="3" placeholder="临时ID=主QQ&#10;机器人侧ID=主QQ"></textarea></label>
+          <button type="submit">保存归并规则</button>
+        </form>
+        <div class="table-wrap">
+          <table class="private-user-table">
+            <thead>
+              <tr>
+                <th>用户</th>
+                <th>关系</th>
+                <th>互动</th>
+                <th>主动</th>
+                <th>最近</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="userRows"></tbody>
+          </table>
+        </div>
+        <article class="detail" id="userDetail"></article>
+      </section>
+
+      <section class="panel" id="panel-group">
+        <div class="group-page-head">
+          <div>
+            <h2>群聊观测</h2>
+            <span class="muted">管理群聊观察、名单状态、话题线和插话反馈</span>
+          </div>
+          <input id="groupFilter" type="search" placeholder="筛选群号 / 群名" />
+        </div>
+        <div class="group-add-card">
+          <form id="addGroupForm" class="inline-form manage-form">
+            <label>群号 <input name="group_id" placeholder="例如 987654321" required /></label>
+            <label>名单 <select name="list_mode"><option value="none">只创建观测</option><option value="whitelist">加入白名单</option><option value="blacklist">加入黑名单</option></select></label>
+            <button type="submit">新增群聊</button>
+          </form>
+        </div>
+        <div class="group-workbench">
+          <aside class="group-list-panel">
+            <div class="group-list-head">
+              <b>群列表</b>
+              <span id="groupListCount" class="muted"></span>
+            </div>
+            <div id="groupRows" class="group-card-list"></div>
+          </aside>
+          <article class="detail group-detail-panel" id="groupDetail"></article>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-worldbook">
+        <div class="section-head">
+          <div>
+            <h2>群聊关系网</h2>
+          </div>
+          <div class="actions compact">
+            <button id="worldbookImportBtn" type="button">刷新关系网</button>
+            <button id="worldbookClearPendingBtn" type="button" class="danger-outline">清理待确认观察</button>
+          </div>
+        </div>
+        <div id="worldbookSummary" class="worldbook-summary"></div>
+        <div class="worldbook-toolbar">
+          <input id="worldbookMemberFilter" type="search" placeholder="筛选 QQ / B站 / 名字 / 别名" />
+          <span id="worldbookSourceFiles" class="muted"></span>
+        </div>
+        <div class="worldbook-layout">
+          <article class="wide">
+            <div class="section-head compact-head">
+              <h2>关系节点</h2>
+              <span id="worldbookMemberCount" class="muted"></span>
+            </div>
+            <form id="worldbookAddMemberForm" class="inline-form manage-form">
+              <label>身份键 <input name="user_id" placeholder="QQ 号或 bili:UID" required /></label>
+              <label>名称 <input name="name" placeholder="成员显示名" /></label>
+              <label>优先级 <input name="priority" type="number" value="120" /></label>
+              <button type="submit">新增节点</button>
+            </form>
+            <div id="worldbookMembers" class="worldbook-members"></div>
+          </article>
+          <article>
+            <h2>群资料</h2>
+            <form id="worldbookAddGroupForm" class="stack-form compact-manage-form">
+              <label>群号 <input name="group_id" placeholder="例如 987654321" required /></label>
+              <label>名称 <input name="name" placeholder="群资料名称" /></label>
+              <button type="submit">新增群资料</button>
+            </form>
+            <div id="worldbookGroups" class="worldbook-groups"></div>
+          </article>
+          <article>
+            <h2>导入状态</h2>
+            <dl id="worldbookImportState"></dl>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-memory">
+        <div class="section-head">
+          <h2>生活观察</h2>
+          <span class="muted">状态、梦境、日记碎片与当天生活线索</span>
+        </div>
+        <div class="life-hero">
+          <article class="life-card energy">
+            <span>心理能量</span>
+            <b id="lifeEnergy">--</b>
+            <div class="meter"><i id="lifeEnergyBar"></i></div>
+          </article>
+          <article class="life-card">
+            <span>情绪</span>
+            <b id="lifeMood">--</b>
+            <small id="lifeNote">--</small>
+          </article>
+          <article class="life-card">
+            <span>位置与天气</span>
+            <b id="lifeLocation">--</b>
+            <small id="lifeWeather">--</small>
+          </article>
+        </div>
+        <div class="current-life-strip">
+          <span>当前片段</span>
+          <b id="lifeCurrentActivity">--</b>
+          <small id="lifeCurrentSeed">--</small>
+        </div>
+        <div class="observation-grid">
+          <article class="dream-card wide">
+            <div class="dream-card-head">
+              <div>
+                <h2>梦境</h2>
+                <span id="dreamMeta" class="muted">暂无梦境记录</span>
+              </div>
+              <b id="dreamAfterglow">--</b>
+            </div>
+            <p id="dreamContent">加载中...</p>
+            <div id="dreamFactors" class="fragment-cloud"></div>
+          </article>
+          <article>
+            <h2>当前扮演状态</h2>
+            <div id="statePillBoard" class="state-pill-board"></div>
+          </article>
+          <article>
+            <h2>今日状态原始值</h2>
+            <dl id="dailyState"></dl>
+          </article>
+          <article class="wide">
+            <h2>日记碎片</h2>
+            <div id="diaryCards" class="diary-grid"></div>
+          </article>
+          <article class="wide">
+            <h2>梦境碎片池</h2>
+            <div id="dreamFragments" class="fragment-cloud"></div>
+          </article>
+          <article class="wide">
+            <h2>日内状态变化</h2>
+            <div id="dailyTimeline" class="timeline-list"></div>
+          </article>
+          <article class="wide skill-growth-shell">
+            <details class="skill-growth-drawer">
+              <summary>
+                <span>技能成长</span>
+                <small>默认收起，展开后查看等级、训练记录和管理项</small>
+              </summary>
+              <details class="skill-manage-drawer">
+                <summary>管理技能</summary>
+                <form id="skillAddForm" class="inline-form manage-form skill-add-form">
+                  <label>技能 <input name="name" maxlength="32" required /></label>
+                  <label>分类 <input name="category" maxlength="20" placeholder="能力" /></label>
+                  <label>等级
+                    <select name="level">
+                      <option value="1">还不太熟</option>
+                      <option value="2">能慢慢试</option>
+                      <option value="3">能自己做</option>
+                      <option value="4">已经顺手</option>
+                      <option value="5">很拿手</option>
+                      <option value="6">有自己的办法</option>
+                    </select>
+                  </label>
+                  <label>关键词 <input name="keywords" maxlength="160" placeholder="逗号分隔" /></label>
+                  <label>别名 <input name="aliases" maxlength="160" placeholder="同义叫法，逗号分隔" /></label>
+                  <button type="submit">新增技能</button>
+                </form>
+              </details>
+              <div id="skillGrowthPanel" class="skill-growth-panel"></div>
+            </details>
+          </article>
+          <article class="wide">
+            <h2>用户交互影响</h2>
+            <div id="interactionImpact" class="impact-list"></div>
+          </article>
+          <article>
+            <h2>私聊记忆构成</h2>
+            <div id="memoryComposition" class="chart-box"></div>
+          </article>
+          <article>
+            <h2>群聊黑话词云</h2>
+            <div id="slangCloud" class="word-cloud"></div>
+          </article>
+          <article class="wide memory-raw">
+            <h2>记忆插件协同</h2>
+            <pre id="livingMemoryBox">加载中...</pre>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-proactive">
+        <div class="section-head">
+          <h2>今日主动候选</h2>
+          <span class="muted">统一候选池、去重、配额与调度结果</span>
+        </div>
+        <div id="proactiveSummary" class="proactive-summary"></div>
+        <div class="proactive-layout">
+          <article>
+            <h2>来源分布</h2>
+            <div id="proactiveSourceChart" class="chart-box"></div>
+          </article>
+          <article>
+            <h2>状态分布</h2>
+            <div id="proactiveStatusChart" class="chart-box"></div>
+          </article>
+          <article class="wide">
+            <h2>主动任务记录</h2>
+            <div id="proactiveTaskList" class="proactive-tasks"></div>
+          </article>
+          <article class="wide proactive-records-card">
+            <h2>候选记录</h2>
+            <div id="proactiveCandidateFilters" class="proactive-filters"></div>
+            <div id="proactiveCandidateList" class="proactive-candidates"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-bookshelf">
+        <div class="section-head">
+          <h2>书柜</h2>
+          <span class="muted">创作作品 · 私密日记 · 夹层阅读 — 管理可见性与内容</span>
+        </div>
+        <div id="bookcaseHome" class="bookcase-home">
+          <div class="bookcase-hero">
+            <article>
+              <span>书架作品</span>
+              <b id="bookshelfPublicCount">0</b>
+              <small>Bot 自主推进的创作</small>
+            </article>
+            <article>
+              <span>抽屉夹层</span>
+              <b id="bookshelfSecretCount">0</b>
+              <small>密码保护的私密内容</small>
+            </article>
+            <article>
+              <span>日记本</span>
+              <b id="bookshelfDiaryCount">0</b>
+              <small>按日期归档的内心独白</small>
+            </article>
+            <article>
+              <span>阅读</span>
+              <b id="bookshelfJmCount">0</b>
+              <small>夹层阅读记录</small>
+            </article>
+          </div>
+          <div class="bookcase-layout">
+            <article class="bookcase-shell">
+              <div class="bookcase-top">
+                <div>
+                  <h2>上层书架</h2>
+                  <p id="bookshelfIntro" class="section-desc"></p>
+                </div>
+                <div id="creativeSettings" class="creative-status-bar"></div>
+              </div>
+              <div id="bookshelfPublicBooks" class="book-category-list"></div>
+            </article>
+            <article class="drawer-cabinet">
+              <div class="drawer-head">
+                <div>
+                  <h2>抽屉夹层</h2>
+                  <p class="section-desc">日记与私密阅读 · 需要密码解锁</p>
+                </div>
+                <span id="bookshelfLockState" class="module-badge">未解锁</span>
+              </div>
+              <form id="bookshelfUnlockForm" class="drawer-unlock">
+                <input id="bookshelfPassword" type="password" placeholder="输入夹层密码" autocomplete="off" />
+                <span id="bookshelfPasswordHint" class="drawer-password-hint"></span>
+                <button type="submit">打开抽屉</button>
+                <span id="bookshelfUnlockMessage" class="drawer-unlock-message" aria-live="polite"></span>
+              </form>
+              <div id="bookshelfSecretBooks" class="drawer-books"></div>
+            </article>
+          </div>
+        </div>
+        <div id="bookDetailPanel" class="book-detail-panel" hidden></div>
+      </section>
+
+      <section class="panel" id="panel-tokens">
+        <div class="section-head">
+          <h2>Token 消耗监控</h2>
+          <div class="actions compact">
+            <button id="resetTokenStatsBtn" class="danger-outline" type="button">清空统计</button>
+          </div>
+        </div>
+        <div class="token-toolbar">
+          <div class="token-source-switch" role="group" aria-label="Token 来源">
+            <button type="button" data-token-source="companion" class="is-active">陪伴插件</button>
+            <button type="button" data-token-source="memory">记忆插件</button>
+            <button type="button" data-token-source="main">LLM 主链</button>
+          </div>
+          <div class="token-view-switch" role="group" aria-label="Token 统计视图">
+            <button type="button" data-token-view="today" class="is-active">今日</button>
+            <button type="button" data-token-view="total">总计</button>
+            <button type="button" data-token-view="date">按日期</button>
+          </div>
+          <label class="token-date-filter">
+            <span>日期</span>
+            <select id="tokenDateSelect"></select>
+          </label>
+        </div>
+        <div class="token-summary" id="tokenSummary"></div>
+        <div class="dashboard-grid token-grid">
+          <article>
+            <h2 id="tokenProviderChartTitle">Provider 消耗排行</h2>
+            <div id="tokenProviderChart" class="chart-box"></div>
+          </article>
+          <article>
+            <h2 id="tokenTaskChartTitle">任务消耗排行</h2>
+            <div id="tokenTaskChart" class="chart-box"></div>
+          </article>
+          <article class="wide" id="tokenHourlyPanel">
+            <h2>近 48 小时趋势</h2>
+            <div id="tokenHourlyChart" class="token-bars"></div>
+          </article>
+          <article class="wide">
+            <h2 id="tokenDailyChartTitle">每日统计</h2>
+            <div id="tokenDailyChart" class="token-bars"></div>
+          </article>
+          <article class="wide">
+            <h2 id="tokenDailyTableTitle">每日明细</h2>
+            <div id="tokenDailyTable" class="table-wrap compact-table"></div>
+          </article>
+          <article class="wide" id="tokenProviderTableCard">
+            <h2 id="tokenProviderTableTitle">Provider 明细</h2>
+            <div id="tokenProviderTable" class="table-wrap compact-table"></div>
+          </article>
+          <article class="wide" id="tokenTaskTableCard">
+            <h2 id="tokenTaskTableTitle">任务明细</h2>
+            <div id="tokenTaskTable" class="table-wrap compact-table"></div>
+          </article>
+          <article class="wide" id="tokenRecentTableCard">
+            <h2 id="tokenRecentTableTitle">最近调用</h2>
+            <div id="tokenRecentTable" class="table-wrap compact-table"></div>
+          </article>
+          <article class="wide" id="tokenExternalSessionCard">
+            <h2>AstrBot 主链会话</h2>
+            <div id="tokenExternalSessionTable" class="table-wrap compact-table"></div>
+          </article>
+          <article class="wide" id="tokenExternalRecentCard">
+            <h2>AstrBot 主链最近对话</h2>
+            <div id="tokenExternalRecentTable" class="table-wrap compact-table"></div>
+          </article>
+          <article class="wide token-memory-plugin-card" id="tokenMemoryPluginSummaryCard">
+            <h2>记忆插件消耗</h2>
+            <div id="tokenMemoryPluginSummary" class="token-plugin-panel"></div>
+          </article>
+          <article class="wide" id="tokenMemoryPluginDetailCard">
+            <h2>记忆插件任务 / Provider</h2>
+            <div class="token-plugin-split">
+              <div id="tokenMemoryPluginTaskTable" class="table-wrap compact-table"></div>
+              <div id="tokenMemoryPluginProviderTable" class="table-wrap compact-table"></div>
+            </div>
+          </article>
+          <article class="wide" id="tokenMemoryPluginRecentCard">
+            <h2>记忆插件最近调用</h2>
+            <div id="tokenMemoryPluginRecentTable" class="table-wrap compact-table"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-troubleshooting">
+        <div class="subpage troubleshooting-page">
+          <div class="section-head">
+            <div>
+              <h2>排障中心</h2>
+              <span class="muted">集中查看最近异常、主动链路、模型调用、数据库并发和常见问题检查</span>
+            </div>
+            <div class="actions compact">
+              <button id="refreshTroubleshootingBtn" type="button">重新检查</button>
+            </div>
+          </div>
+          <div id="troubleshootingSummary" class="troubleshooting-summary"></div>
+          <article class="troubleshooting-chain-panel">
+            <div>
+              <h2>链路测试</h2>
+              <span class="muted">点按钮后会实际调用对应后端，确认能否生成真实文件</span>
+            </div>
+            <div id="troubleshootingChainTests" class="troubleshooting-chain-tests"></div>
+          </article>
+          <article class="troubleshooting-injection-panel">
+            <div>
+              <h2>最近注入内容</h2>
+                <span class="muted">最近 5 条主链与请求级提示词实际注入内容，用于排查污染、错时、TTS 规则和上下文串线</span>
+            </div>
+            <div id="troubleshootingPromptInjections" class="troubleshooting-prompt-injections"></div>
+          </article>
+          <article class="troubleshooting-debounce-panel">
+            <div>
+              <h2>消息收口追踪</h2>
+              <span class="muted">查看文本、图片、转发补话为什么等待或放行，方便定位防抖和收口策略问题</span>
+            </div>
+            <div id="troubleshootingDebounceTrace" class="troubleshooting-debounce-trace"></div>
+          </article>
+          <div class="troubleshooting-toolbar">
+            <div class="troubleshooting-filter" role="group" aria-label="问题筛选">
+              <button type="button" data-troubleshooting-filter="all" class="is-active">全部</button>
+              <button type="button" data-troubleshooting-filter="error">错误</button>
+              <button type="button" data-troubleshooting-filter="warn">警告</button>
+              <button type="button" data-troubleshooting-filter="info">信息</button>
+            </div>
+          </div>
+          <div class="troubleshooting-grid">
+            <article class="wide">
+              <h2>常见问题检查</h2>
+              <div id="troubleshootingChecks" class="troubleshooting-checks"></div>
+            </article>
+            <article>
+              <h2>最近问题</h2>
+              <div id="troubleshootingEvents" class="troubleshooting-events"></div>
+            </article>
+            <article>
+              <h2>SQLite 并发</h2>
+              <div id="troubleshootingSqlite" class="troubleshooting-sqlite"></div>
+            </article>
+          </div>
+          <article class="troubleshooting-faq-panel">
+            <div>
+              <h2>常见问题</h2>
+              <span class="muted">把最常见的排查路径放在这里；如果上方自动检查没报错，可以从这些入口继续定位</span>
+            </div>
+            <div id="troubleshootingFaq" class="troubleshooting-faq"></div>
+          </article>
+          <article class="troubleshooting-diagnostics-panel">
+            <div>
+              <h2>运行诊断</h2>
+              <span class="muted">从配置、目标用户、群聊开关和运行态中整理出的诊断项</span>
+            </div>
+            <div id="diagnosticPanel" class="diagnostic-list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-modules">
+        <div class="section-head">
+          <h2>模块工作台</h2>
+          <span class="muted">常用管理 · 模块状态 · 便捷工具</span>
+        </div>
+        <div id="moduleWorkbench" class="module-workbench"></div>
+        <div id="moduleSummary" class="module-summary"></div>
+        <nav class="module-nav" aria-label="模块工作台分组">
+          <a href="#moduleWorkbench">工作台</a>
+          <a href="#module-tool-quick">快速启动</a>
+          <a href="#module-tool-presets">预设</a>
+          <a href="#module-tool-segmented">分段实验室</a>
+          <a href="#module-tool-news">新闻源</a>
+          <a href="#module-tool-media">媒体缓存</a>
+          <a href="#module-tool-external">外部能力</a>
+        </nav>
+        <section class="module-tuning-note">
+          <div>
+            <b>常用模块集中在这里。</b>
+            <span>日常查看、整理和快速操作都可以从这里开始；需要细调参数时再进入配置或模型页。</span>
+          </div>
+          <button type="button" data-jump-tab="config">打开配置页</button>
+        </section>
+        <div class="module-tool-grid">
+          <article class="module-tool-card wide" id="module-tool-quick">
+            <header>
+              <div>
+                <span>Admin Setup</span>
+                <h3>快速启动</h3>
+                <p>设定运行平台、服务对象与权限边界。以下配置项变更后立即生效。</p>
+              </div>
+              <button type="button" data-setup-guide-open>配置引导</button>
+            </header>
+            <div id="quickStartStatus" class="quick-start-status"></div>
+            <form id="quickModuleForm" class="module-form">
+              <div class="module-subgroup">
+                <h3>部署与目标</h3>
+                <label class="wide-field">运行平台
+                  <input name="target_platform" placeholder="如 aiocqhttp" />
+                </label>
+                <label class="wide-field">私聊服务对象 QQ
+                  <textarea name="target_user_ids" rows="3" placeholder="一行一个 QQ 号，或用逗号分隔"></textarea>
+                </label>
+                <label class="wide-field">大号→小号转发映射
+                  <textarea name="private_user_delivery_aliases" rows="2" placeholder="格式：大号QQ=小号QQ，一行一组"></textarea>
+                </label>
+              </div>
+              <div class="module-subgroup">
+                <h3>运行策略与权限</h3>
+                <label>免打扰时段 <input name="quiet_hours" placeholder="如 23:00-08:30" /></label>
+                <label class="toggle-row"><input name="require_private_opt_in" type="checkbox" /> <span>管理命令仅限私聊执行（群聊中不响应状态修改指令）</span></label>
+              </div>
+              <button type="submit">保存配置</button>
+            </form>
+          </article>
+          <article class="module-tool-card wide" id="module-tool-presets">
+            <header>
+              <div>
+                <span>Presets</span>
+                <h3>配置预设</h3>
+                <p>按想要的陪伴节奏选择一整套取向，适合初始化、低打扰、日常陪伴或群聊观察。</p>
+              </div>
+              <button type="button" data-jump-tab="config">查看功能开关</button>
+            </header>
+            <div id="presetCards" class="preset-grid"></div>
+          </article>
+          <article class="module-tool-card" id="module-tool-segmented">
+            <header>
+              <div>
+                <span>Lab</span>
+                <h3>分段效果实验室</h3>
+                <p>用当前分段规则预览主动消息会被拆成几段，适合先试效果再微调。</p>
+              </div>
+              <button type="button" data-jump-tab="config">调整分段配置</button>
+            </header>
+            <section class="segmented-preview-panel" data-segmented-preview-panel>
+              <header>
+                <div>
+                  <h4>分段预览</h4>
+                </div>
+                <div class="segmented-preview-actions">
+                  <button type="button" data-segmented-example="simple">简单示例</button>
+                  <button type="button" data-segmented-example="complex">复杂示例</button>
+                </div>
+              </header>
+              <textarea data-segmented-preview-input rows="4"></textarea>
+              <div data-segmented-preview-output class="segmented-preview-output"></div>
+            </section>
+          </article>
+          <article class="module-tool-card wide" id="module-tool-news">
+            <header>
+              <div>
+                <span>Sources</span>
+                <h3>新闻源管理</h3>
+                <p>管理 RSS、B 站 UP 或单条视频来源，方便调整 Bot 平时会读到的信息入口。</p>
+              </div>
+              <button type="button" data-save-news-sources>保存新闻源</button>
+            </header>
+            <textarea name="news_sources" id="newsSourcesRaw" hidden></textarea>
+            <div class="news-source-manager" id="newsSourceManager"></div>
+          </article>
+          <article class="module-tool-card" id="module-tool-media">
+            <header>
+              <div>
+                <span>Media</span>
+                <h3>媒体缓存与转述</h3>
+                <p>图片/表情包缓存、识图摘要和重复图命中更适合在模块页管理。</p>
+              </div>
+              <button type="button" data-jump-tab="image-cache">管理图片缓存</button>
+            </header>
+            <div class="module-tool-metrics">
+              <span>重复图缓存会显著减少视觉模型调用</span>
+              <span>误识别可在缓存页直接修正或删除</span>
+            </div>
+          </article>
+          <article class="module-tool-card wide" id="module-tool-external">
+            <header>
+              <div>
+                <span>Extensions</span>
+                <h3>外部主动能力</h3>
+                <p>第三方插件注册的主动能力在这里管理；它们不是普通配置项，而是可加入候选池的能力卡。</p>
+              </div>
+              <button type="button" data-jump-tab="models">查看相关模型</button>
+            </header>
+            <div id="externalAbilityList" class="external-ability-grid"></div>
+          </article>
+        </div>
+        <div class="module-grid legacy-module-config-grid" hidden aria-hidden="true">
+          <article class="wide module-card" id="module-presets">
+            <div class="module-card-head">
+              <div>
+                <h2>配置预设</h2>
+              </div>
+              <span class="module-badge">预设</span>
+            </div>
+            <div id="legacyPresetCards" class="preset-grid"></div>
+          </article>
+          <article class="module-card" id="module-quick" hidden aria-hidden="true">
+            <div class="module-card-head">
+              <div>
+                <h2>快速启动（旧）</h2>
+              </div>
+              <span class="module-badge">基础</span>
+            </div>
+          </article>
+          <article class="module-card" id="module-environment">
+            <div class="module-card-head">
+              <div>
+                <h2>环境感知</h2>
+              </div>
+              <span class="module-badge">语境</span>
+            </div>
+            <form id="environmentModuleForm" class="module-form">
+              <label>环境时区 <input name="environment_perception_timezone" placeholder="Asia/Shanghai" /></label>
+              <label>节假日地区 <input name="holiday_country" placeholder="CN" /></label>
+              <label class="toggle-row"><input name="enable_environment_perception" type="checkbox" /> <span>启用环境感知</span></label>
+              <label class="toggle-row"><input name="enable_holiday_perception" type="checkbox" /> <span>节假日/工作日</span></label>
+              <label class="toggle-row"><input name="enable_platform_perception" type="checkbox" /> <span>平台与消息类型</span></label>
+              <label class="toggle-row"><input name="enable_model_perception" type="checkbox" /> <span>当前模型配置</span></label>
+              <label class="toggle-row"><input name="enable_worldview_perception" type="checkbox" /> <span>世界观适配</span></label>
+              <label class="toggle-row"><input name="enable_lunar_perception" type="checkbox" /> <span>农历</span></label>
+              <label class="toggle-row"><input name="enable_solar_term_perception" type="checkbox" /> <span>节气</span></label>
+              <label class="toggle-row"><input name="enable_almanac_perception" type="checkbox" /> <span>轻量黄历</span></label>
+              <button type="submit">保存环境感知</button>
+            </form>
+          </article>
+          <article class="module-card" id="module-private">
+            <div class="module-card-head">
+              <div>
+                <h2>私聊频率</h2>
+              </div>
+              <span class="module-badge">节奏</span>
+            </div>
+            <form id="privateModuleForm" class="module-form">
+              <label>每日主动上限 <input name="max_daily_messages" type="number" min="0" max="12" /></label>
+              <label>空闲门槛分钟 <input name="idle_minutes" type="number" min="0" /></label>
+              <label>最小主动间隔分钟 <input name="min_interval_minutes" type="number" min="0" /></label>
+              <label>后台检查间隔秒 <input name="check_interval_seconds" type="number" min="30" /></label>
+              <label>重复上报去重秒数 <input name="inbound_message_debounce_seconds" type="number" min="0" max="30" step="0.5" /></label>
+              <label class="toggle-row"><input name="enable_message_debounce" type="checkbox" /> <span>启用消息收口防抖</span></label>
+              <label data-fixed-text-debounce-field>文本补话等待秒数 <input name="text_message_debounce_seconds" type="number" min="0" max="15" step="0.1" /></label>
+              <label>图片补话等待秒数 <input name="image_message_debounce_seconds" type="number" min="0" max="15" step="0.1" /></label>
+              <label>转发补话等待秒数 <input name="forward_message_debounce_seconds" type="number" min="0" max="15" step="0.1" /></label>
+              <label class="toggle-row"><input name="enable_unanswered_screen_peek_followup" type="checkbox" /> <span>主动后沉默时可窥屏</span></label>
+              <label>沉默多久后窥屏 <input name="unanswered_screen_peek_after_minutes" type="number" min="10" max="240" /></label>
+              <label>沉默窥屏冷却分钟 <input name="unanswered_screen_peek_cooldown_minutes" type="number" min="30" max="1440" /></label>
+              <div class="module-subgroup wide-field image-cache-entry">
+                <h3>图片/表情包缓存</h3>
+                <p class="section-desc">管理已缓存的图片视觉摘要，修正误识别表情包或删除旧缓存后可让下次重新识图。</p>
+                <button type="button" data-jump-tab="image-cache">管理图片缓存</button>
+              </div>
+              <div class="module-subgroup wide-field">
+                <h3>主动分段</h3>
+                <label class="toggle-row"><input name="enable_segmented_proactive_reply" type="checkbox" /> <span>启用主动分段发送</span></label>
+                <label>分段作用范围
+                  <select name="segmented_proactive_scope">
+                    <option value="proactive_only">仅插件主动</option>
+                    <option value="all_llm">全部 LLM 纯文本回复</option>
+                  </select>
+                </label>
+                <label>不分段字数阈值 <input name="segmented_proactive_threshold" type="number" min="20" max="500" /></label>
+                <label>短片段合并阈值 <input name="segmented_proactive_min_segment_chars" type="number" min="1" max="40" /></label>
+                <label>最多分段数 <input name="segmented_proactive_max_segments" type="number" min="1" max="8" /></label>
+                <label class="toggle-row"><input name="segmented_proactive_send_as_forward" type="checkbox" /> <span>分段后合并发送</span></label>
+                <label>分段模式
+                  <select name="segmented_proactive_split_mode">
+                    <option value="regex">正则</option>
+                    <option value="words">分段词列表</option>
+                  </select>
+                </label>
+                <label class="wide-field">分段正则 <textarea name="segmented_proactive_regex" rows="2" placeholder="仅 regex 模式使用"></textarea></label>
+                <label class="wide-field">分段词列表 <textarea name="segmented_proactive_split_words" rows="3" placeholder="仅 words 模式使用；一行一个或逗号分隔"></textarea></label>
+                <label class="toggle-row"><input name="enable_segmented_proactive_content_cleanup" type="checkbox" /> <span>启用分段内容清理</span></label>
+                <label>清理范围
+                  <select name="segmented_proactive_content_cleanup_scope">
+                    <option value="all">全段清理</option>
+                    <option value="trailing">仅句尾清理</option>
+                  </select>
+                </label>
+                <label class="wide-field">清理正则 <textarea name="segmented_proactive_content_cleanup_rule" rows="2" placeholder="仅 regex 模式使用"></textarea></label>
+                <label class="wide-field">清理词列表 <textarea name="segmented_proactive_content_cleanup_words" rows="3" placeholder="仅 words 模式使用；例如句尾句号、省略号或换行"></textarea></label>
+                <label>分段间隔方式
+                  <select name="segmented_proactive_interval_method">
+                    <option value="log">按字数对数</option>
+                    <option value="random">随机</option>
+                  </select>
+                </label>
+                <label>最小间隔秒数 <input name="segmented_proactive_interval_min" type="number" min="0.1" step="0.1" /></label>
+                <label>最大间隔秒数 <input name="segmented_proactive_interval_max" type="number" min="0.1" step="0.1" /></label>
+                <label>对数间隔底数 <input name="segmented_proactive_log_base" type="number" min="1.1" step="0.1" /></label>
+                <section class="segmented-preview-panel wide-field">
+                  <header>
+                    <div>
+                      <h4>分段效果预览</h4>
+                    </div>
+                    <div class="segmented-preview-actions">
+                      <button type="button" data-segmented-example="simple">简单示例</button>
+                      <button type="button" data-segmented-example="complex">复杂示例</button>
+                    </div>
+                  </header>
+                  <textarea id="legacySegmentedPreviewInput" rows="4"></textarea>
+                  <div id="legacySegmentedPreviewOutput" class="segmented-preview-output"></div>
+                </section>
+              </div>
+              <button type="submit">保存私聊频率</button>
+            </form>
+          </article>
+          <article class="module-card" id="module-group">
+            <div class="module-card-head">
+              <div>
+                <h2>群聊观察</h2>
+              </div>
+              <span class="module-badge">群聊</span>
+            </div>
+            <form id="groupModuleForm" class="module-form">
+              <label>插话最小间隔分钟 <input name="group_interject_min_interval_minutes" type="number" min="0" /></label>
+              <label>每群每日插话上限 <input name="group_interject_max_daily" type="number" min="0" /></label>
+              <label>复读触发阈值 <input name="group_repeat_trigger_threshold" type="number" min="3" max="20" step="1" /></label>
+              <label>跟读初始概率（%） <input name="group_repeat_follow_probability" type="number" min="0" max="100" /></label>
+              <label>打断初始概率（%） <input name="group_repeat_interrupt_probability" type="number" min="0" max="100" /></label>
+              <label>概率共同递增（%） <input name="group_repeat_interrupt_probability_step" type="number" min="0" max="50" /></label>
+              <label>打断文本 <input name="group_repeat_interrupt_text" placeholder="禁止复读" /></label>
+              <label class="wide-field">打断表情包路径 <input name="group_repeat_interrupt_image_path" placeholder="C:\\path\\to\\meme.png" /></label>
+              <label class="toggle-row"><input name="enable_group_repeat_follow" type="checkbox" /> <span>启用复读跟读</span></label>
+              <label class="toggle-row"><input name="enable_proactive_quote_trigger_message" type="checkbox" /> <span>群回复/主动引用触发消息</span></label>
+              <label class="toggle-row"><input name="enable_group_conversation_followup" type="checkbox" /> <span>启用连续对话保持</span></label>
+              <label>连续对话判断秒数 <input name="group_conversation_followup_seconds" type="number" min="0" max="600" /></label>
+              <label>连续续接上限 <input name="group_conversation_followup_max_turns" type="number" min="0" max="10" /></label>
+              <label>场景感知最近消息数 <input name="group_scene_recent_limit" type="number" min="2" max="12" /></label>
+              <label class="toggle-row"><input name="enable_group_high_intensity_mode" type="checkbox" /> <span>群聊高强度收口</span></label>
+              <label>高强度窗口秒数 <input name="group_high_intensity_wakeup_window_seconds" type="number" min="15" max="600" /></label>
+              <label>高强度唤醒阈值 <input name="group_high_intensity_wakeup_threshold" type="number" min="2" max="20" /></label>
+              <label>收口持续秒数 <input name="group_high_intensity_cooldown_seconds" type="number" min="30" max="1800" /></label>
+              <label>合并等待秒数 <input name="group_high_intensity_merge_seconds" type="number" min="1" max="30" /></label>
+              <label class="toggle-row"><input name="enable_group_persona_denoise" type="checkbox" /> <span>群聊人格降噪</span></label>
+              <label class="toggle-row"><input name="enable_forward_message_adaptation" type="checkbox" /> <span>启用合并消息阅读</span></label>
+              <label>合并消息适配方式
+                <select name="forward_message_mode">
+                  <option value="inject">注入</option>
+                  <option value="transcribe">转述</option>
+                </select>
+              </label>
+              <label>合并消息最多读取条数 <input name="forward_message_max_messages" type="number" min="5" max="300" /></label>
+              <label>合并消息注入字数上限 <input name="forward_message_max_chars" type="number" min="800" max="20000" /></label>
+              <label>合并消息视觉图片上限 <input name="forward_message_image_limit" type="number" min="0" max="12" /></label>
+              <label class="toggle-row"><input name="forward_message_parse_nested" type="checkbox" /> <span>展开嵌套合并消息</span></label>
+              <label class="toggle-row"><input name="forward_message_image_vision" type="checkbox" /> <span>合并消息图片交给视觉模型</span></label>
+              <label>最近消息保留数 <input name="max_group_recent_messages" type="number" min="20" /></label>
+              <label>黑话保留数 <input name="max_group_slang_terms" type="number" min="8" /></label>
+              <button type="submit">保存群聊观察</button>
+            </form>
+          </article>
+          <article class="module-card" id="module-worldbook">
+            <div class="module-card-head">
+              <div>
+                <h2>群聊关系网</h2>
+              </div>
+              <span class="module-badge">识别</span>
+            </div>
+            <form id="worldbookModuleForm" class="module-form">
+              <label class="toggle-row"><input name="enable_worldbook_member_recognition" type="checkbox" /> <span>启用群聊关系网</span></label>
+              <label class="toggle-row"><input name="worldbook_auto_import" type="checkbox" /> <span>启动时自动刷新关系网</span></label>
+              <label class="toggle-row"><input name="worldbook_member_match_aliases" type="checkbox" /> <span>允许称呼辅助匹配</span></label>
+              <label class="toggle-row"><input name="worldbook_self_registration" type="checkbox" /> <span>允许群聊自登记节点</span></label>
+              <label class="toggle-row"><input name="enable_atrelay_tools" type="checkbox" /> <span>启用跨群转述与 @ 群友</span></label>
+              <label class="toggle-row"><input name="atrelay_require_worldbook_first" type="checkbox" /> <span>@ 对象优先按关系网解析</span></label>
+              <label>单次最多注入节点数 <input name="worldbook_member_inject_limit" type="number" min="1" max="20" /></label>
+              <label>群成员缓存分钟 <input name="atrelay_member_cache_minutes" type="number" min="1" max="1440" /></label>
+              <label class="wide-field">关系网配置路径 <textarea name="worldbook_config_paths" rows="3" placeholder="留空自动查找；也可一行一个 JSON 配置路径"></textarea></label>
+              <button type="submit">保存关系网</button>
+            </form>
+          </article>
+          <article class="module-card" id="module-memory">
+            <div class="module-card-head">
+              <div>
+                <h2>记忆学习</h2>
+              </div>
+              <span class="module-badge">成本</span>
+            </div>
+            <form id="memoryModuleForm" class="module-form">
+              <label>每日插件 Token 限额 <input name="daily_token_limit" type="number" min="0" step="10000" /></label>
+              <label class="toggle-row"><input name="enable_daily_token_soft_limit" type="checkbox" /> <span>启用每日 Token 软限额</span></label>
+              <label>每日 Token 软限额 <input name="daily_token_soft_limit" type="number" min="0" step="10000" /></label>
+              <label>长期画像整理间隔分钟 <input name="memory_refresh_interval_minutes" type="number" min="30" /></label>
+              <label>片段整理消息阈值 <input name="episode_memory_refresh_messages" type="number" min="1" /></label>
+              <label>片段整理时间阈值分钟 <input name="episode_memory_refresh_minutes" type="number" min="1" /></label>
+              <label>原始记忆上限 <input name="max_companion_memory_items" type="number" min="1" /></label>
+              <label>表达样本上限 <input name="max_learned_expression_items" type="number" min="1" /></label>
+              <label>私聊片段上限 <input name="max_dialogue_episodes" type="number" min="1" /></label>
+              <label class="toggle-row"><input name="enable_skill_growth_simulation" type="checkbox" /> <span>启用技能成长模拟</span></label>
+              <label>技能成长倍率 <input name="skill_growth_rate" type="number" min="0.1" max="3" step="0.1" /></label>
+              <label class="toggle-row"><input name="enable_skill_growth_passive_injection" type="checkbox" /> <span>被动回复技能认知</span></label>
+              <label class="toggle-row"><input name="enable_skill_growth_schedule_influence" type="checkbox" /> <span>能力状态影响日程</span></label>
+              <label>日程影响强度（%） <input name="skill_growth_schedule_influence_strength" type="number" min="0" max="100" step="1" /></label>
+              <button type="submit">保存记忆学习</button>
+            </form>
+          </article>
+          <article class="wide module-card" id="module-longterm">
+            <div class="module-card-head">
+              <div>
+                <h2>长线主动与联动</h2>
+              </div>
+              <span class="module-badge">高级</span>
+            </div>
+            <form id="longTermModuleForm" class="module-form">
+              <div class="module-subgroup image-api-swap-panel">
+                <h3>在线生图 API 快速切换</h3>
+                <p id="imageApiSwapSummary" class="section-desc">可将备选在线图片 API 提升为主用，并把旧主用保留为备选。</p>
+                <button type="button" data-swap-image-api>交换主/备在线生图 API</button>
+              </div>
+              <div class="module-subgroup">
+                <h3>B站 AI Bot 联动</h3>
+                <label class="toggle-row"><input name="enable_bilibili_integration" type="checkbox" /> <span>启用 B站 AI Bot 协同</span></label>
+                <label class="toggle-row"><input name="enable_bilibili_boredom_watch" type="checkbox" /> <span>无聊时触发刷 B 站</span></label>
+                <label>B 站触发最小间隔小时 <input name="bilibili_boredom_min_interval_hours" type="number" min="2" max="72" /></label>
+                <label>视频分享概率（%） <input name="bilibili_share_probability" type="number" min="0" max="100" step="1" /></label>
+                <label>视频分享最低评分 <input name="bilibili_share_min_score" type="number" min="0" max="10" /></label>
+              </div>
+              <div class="module-subgroup">
+                <h3>QQ 空间动态</h3>
+                <label class="toggle-row"><input name="enable_qzone_integration" type="checkbox" /> <span>启用 QQ 空间动态层</span></label>
+                <label class="toggle-row"><input name="enable_qzone_life_publish" type="checkbox" /> <span>低频发布生活说说</span></label>
+                <label>生活说说最小间隔小时 <input name="qzone_life_publish_min_interval_hours" type="number" min="4" max="168" /></label>
+                <label>生活说说触发概率（%） <input name="qzone_life_publish_probability" type="number" min="0" max="100" step="1" /></label>
+              </div>
+              <div class="module-subgroup">
+                <h3>新闻阅读</h3>
+                <label class="toggle-row"><input name="enable_news_integration" type="checkbox" /> <span>启用新闻阅读</span></label>
+                <label class="toggle-row"><input name="enable_news_daily_hot_read" type="checkbox" /> <span>每日获取热点</span></label>
+                <label class="toggle-row"><input name="enable_news_boredom_read" type="checkbox" /> <span>无聊时看新闻</span></label>
+                <label>新闻读取间隔小时 <input name="news_min_interval_hours" type="number" min="1" max="72" /></label>
+                <label>新闻分享概率（%） <input name="news_share_probability" type="number" min="0" max="100" step="1" /></label>
+                <label>单源读取条数 <input name="news_max_items_per_source" type="number" min="1" max="30" /></label>
+                <label>热点来源 <input name="news_hot_sources" type="text" maxlength="120" /></label>
+                <label>热点候选数量 <input name="news_hot_max_items" type="number" min="1" max="50" /></label>
+                <textarea name="news_sources" id="legacyNewsSourcesRaw" hidden></textarea>
+                <div class="wide-field news-source-manager" id="legacyNewsSourceManager"></div>
+              </div>
+              <div class="module-subgroup" id="privateReadingModuleGroup">
+                <h3>夹层阅读素材</h3>
+                <label class="toggle-row"><input name="enable_private_reading_integration" type="checkbox" /> <span>启用夹层阅读素材</span></label>
+                <label class="toggle-row"><input name="enable_private_reading_boredom_read" type="checkbox" /> <span>空闲时私下阅读</span></label>
+                <label class="toggle-row"><input name="enable_private_reading_ask_recommendation" type="checkbox" /> <span>向用户征求推荐</span></label>
+                <label>阅读最小间隔小时 <input name="private_reading_min_interval_hours" type="number" min="4" max="168" /></label>
+                <label>页数上限 <input name="private_reading_max_photo_count" type="number" min="8" max="120" /></label>
+                <label>主动提起概率（%） <input name="private_reading_share_probability" type="number" min="0" max="100" step="1" /></label>
+                <label>征求推荐概率（%） <input name="private_reading_ask_probability" type="number" min="0" max="100" step="1" /></label>
+                <label>默认搜索关键词 <input name="private_reading_default_keywords" type="text" maxlength="120" /></label>
+                <label>过滤标签 <input name="private_reading_blocked_tags" type="text" maxlength="120" /></label>
+              </div>
+              <div class="module-subgroup">
+                <h3>私下创作</h3>
+                <label class="toggle-row"><input name="enable_creative_writing" type="checkbox" /> <span>启用私下创作行为</span></label>
+                <label class="toggle-row"><input name="creative_hidden_mode" type="checkbox" /> <span>创作默认低调进行</span></label>
+                <label>创作灵感触发概率（%） <input name="creative_inspiration_probability" type="number" min="0" max="100" step="1" /></label>
+                <label>创作节点透露概率（%） <input name="creative_share_probability" type="number" min="0" max="100" step="1" /></label>
+                <label>基础写作速度（字/小时） <input name="creative_base_chars_per_hour" type="number" min="60" max="1200" /></label>
+                <label>最多同时创作项目 <input name="creative_max_active_projects" type="number" min="1" max="5" /></label>
+              </div>
+              <button type="submit">保存长线主动</button>
+            </form>
+          </article>
+          <article class="wide module-card" id="module-external-abilities">
+            <div class="module-card-head">
+              <div>
+                <h2>外部主动能力</h2>
+              </div>
+              <span class="module-badge">扩展</span>
+            </div>
+            <div id="legacyExternalAbilityList" class="external-ability-grid"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-image-cache">
+        <div class="subpage image-cache-page">
+          <div class="section-head">
+            <div>
+              <h2>图片/表情包缓存</h2>
+              <span class="muted">编辑重复图片视觉摘要，删除后下次遇到同图会重新识别</span>
+            </div>
+            <div class="actions compact">
+              <button type="button" data-jump-tab="modules">返回模块工作台</button>
+              <button id="refreshImageCacheBtn" type="button">刷新缓存</button>
+            </div>
+          </div>
+          <div id="imageCacheSummary" class="image-cache-summary"></div>
+          <div class="image-cache-toolbar">
+            <input id="imageCacheFilter" type="search" placeholder="筛选摘要 / hash / provider / 类型" />
+            <select id="imageCacheScope" aria-label="缓存范围">
+              <option value="all">全部范围</option>
+            </select>
+          </div>
+          <div class="image-cache-layout">
+            <div id="imageCacheList" class="image-cache-list"></div>
+            <div id="imageCacheDetail" class="image-cache-detail"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-config">
+        <div class="config-grid">
+          <details class="config-card wide migration-card migration-collapsible">
+            <summary class="migration-head migration-summary">
+              <div>
+                <h2>配置迁移</h2>
+                <p>导出或导入可迁移配置与关系、群聊、候选菜单等资料；也兼容旧版快照文件。缓存、Token、最近消息和运行日志不会写入备份。</p>
+              </div>
+            </summary>
+            <div class="migration-body">
+              <div class="migration-actions">
+                <button id="exportConfigBtn" type="button">导出配置备份</button>
+                <label class="file-pick">
+                  <input id="importConfigFile" type="file" accept="application/json,.json" />
+                  选择备份文件
+                </label>
+              </div>
+              <div class="migration-options" aria-label="导出内容">
+                <span>导出内容</span>
+                <label><input type="checkbox" data-export-section="basic" checked /> 基础配置</label>
+                <label><input type="checkbox" data-export-section="relations" checked /> 关系/群资料</label>
+                <label><input type="checkbox" data-export-section="food_skills" checked /> 候选菜单/技能</label>
+                <label><input type="checkbox" data-export-section="providers" /> 模型配置</label>
+                <label><input type="checkbox" data-export-section="sensitive" /> 敏感配置</label>
+              </div>
+              <div class="migration-flow">
+                <label>
+                  导入方式
+                  <select id="configImportMode">
+                    <option value="merge">合并导入，保留现有资料</option>
+                    <option value="replace">覆盖可迁移资料</option>
+                  </select>
+                </label>
+                <label>
+                  字段冲突
+                  <select id="configImportConflict">
+                    <option value="use_backup">使用备份内容</option>
+                    <option value="keep_current">保留当前内容</option>
+                    <option value="fill_empty">只补当前空字段</option>
+                  </select>
+                </label>
+                <label class="migration-risk-option">
+                  <input id="configAllowChecksumMismatch" type="checkbox" />
+                  校验失败仍继续预览/导入
+                </label>
+                <button id="previewConfigImportBtn" type="button" disabled>预览导入</button>
+                <button id="applyConfigImportBtn" type="button" disabled>确认导入</button>
+              </div>
+              <div id="configMigrationPreview" class="migration-preview">
+                还没有选择备份或快照文件。
+              </div>
+              <div class="migration-aftercare">
+                <div>
+                  <h3>最近自动备份</h3>
+                  <div id="configBackupList" class="migration-backup-list">暂无自动备份。</div>
+                </div>
+                <div>
+                  <h3>导入后检查</h3>
+                  <div id="configImportChecks" class="migration-check-list">导入后会在这里显示轻量检查结果。</div>
+                </div>
+              </div>
+            </div>
+          </details>
+          <details class="config-card storage-collapsible">
+            <summary class="storage-summary">
+              <div>
+                <h2>存储方式</h2>
+                <p>控制陪伴插件主数据的保存后端（json / sqlite）。默认收起，展开后可切换后端与路径。</p>
+              </div>
+            </summary>
+            <div class="storage-body">
+              <form id="storageConfigForm" class="storage-config-form">
+                <div class="form-grid">
+                  <label>
+                    主数据保存方式
+                    <select id="storageBackendSelect" name="storage_backend">
+                      <option value="json">json</option>
+                      <option value="sqlite">sqlite</option>
+                    </select>
+                  </label>
+                  <label id="storageSqlitePathWrap">
+                    SQLite 数据文件路径
+                    <input id="storageSqlitePathInput" name="storage_sqlite_path" type="text" placeholder="留空时自动使用插件数据目录下 companions.db" />
+                  </label>
+                </div>
+                <div id="storageConfigSummary" class="storage-config-summary"></div>
+                <p class="storage-config-note">这里控制陪伴插件主数据的保存后端。配置备份导入/导出不会携带这一项，避免换机器时误改本机存储路径。</p>
+                <div class="actions">
+                  <button id="saveStorageConfigBtn" type="submit">保存存储方式</button>
+                </div>
+              </form>
+            </div>
+          </details>
+          <details class="config-card wide appearance-collapsible">
+            <summary class="appearance-summary">
+              <div>
+                <h2>拓展页设置</h2>
+                <p>切换拓展页面的字体与配色主题，即时预览。默认收起，展开后可调整外观偏好。</p>
+              </div>
+            </summary>
+            <div class="appearance-body">
+              <div class="appearance-form">
+                <label class="appearance-field">
+                  <span>页面字体</span>
+                  <select id="appearanceFontSelect" data-page-font-select>
+                    <option value="original">原始字体</option>
+                    <option value="cheng">13.woff2</option>
+                  </select>
+                </label>
+                <div class="appearance-field appearance-theme-field">
+                  <span>配色主题</span>
+                  <div class="appearance-theme-grid" id="appearanceThemeGrid" role="radiogroup" aria-label="配色主题"></div>
+                </div>
+                <div class="appearance-preview" id="appearancePreview" aria-hidden="true">
+                  <div class="appearance-preview-card">
+                    <h3>预览</h3>
+                    <p class="appearance-preview-text">这里是一段示例文字，用来展示当前主题的配色与字体效果。</p>
+                    <div class="appearance-preview-actions">
+                      <button type="button" disabled>示例按钮</button>
+                      <span class="appearance-preview-tag">标签</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </details>
+          <article class="config-card wide">
+            <h2>群聊名单覆盖</h2>
+            <div id="listCoverage" class="coverage-grid"></div>
+          </article>
+          <details class="config-card wide access-collapsible">
+            <summary class="access-card-summary">
+              <div>
+                <h2>群聊名单</h2>
+                <p>管理白名单 / 黑名单模式与目标群号。默认收起，展开后可切换模式、快捷勾选或批量编辑群号。</p>
+              </div>
+            </summary>
+            <div class="access-body">
+              <form id="accessForm" class="access-manager">
+              <div class="access-mode-row">
+                <select id="groupAccessMode" aria-label="群聊名单模式">
+                  <option value="whitelist">白名单模式</option>
+                  <option value="blacklist">黑名单模式</option>
+                </select>
+                <div class="access-mode-switch" role="group" aria-label="群聊名单模式">
+                  <label><input type="radio" name="groupAccessModeChoice" value="whitelist"> <span>白名单</span></label>
+                  <label><input type="radio" name="groupAccessModeChoice" value="blacklist"> <span>黑名单</span></label>
+                </div>
+              </div>
+              <div id="accessSummary" class="access-summary"></div>
+              <div id="accessQuickGroups" class="access-quick-groups"></div>
+              <details class="access-advanced">
+                <summary>批量编辑群号</summary>
+                <div class="form-grid">
+                  <label>
+                    白名单群号
+                    <textarea id="groupWhitelist" rows="4" placeholder="一行一个或逗号分隔"></textarea>
+                  </label>
+                  <label>
+                    黑名单群号
+                    <textarea id="groupBlacklist" rows="4" placeholder="一行一个或逗号分隔"></textarea>
+                  </label>
+                </div>
+              </details>
+              <div class="actions">
+                <button type="submit">保存名单</button>
+              </div>
+            </form>
+            </div>
+          </details>
+          <article class="wide">
+            <h2>功能开关</h2>
+            <div id="proactiveOnlyModeCard"></div>
+            <div id="featureSwitchSummary" class="feature-switch-summary"></div>
+            <div class="feature-switch-toolbar">
+              <input id="featureFilter" type="search" placeholder="筛选功能名 / 配置键" />
+              <button id="enableSafeFeaturesBtn" type="button">启用基础安全项</button>
+            </div>
+            <div class="feature-switch-board" id="featureFlags"></div>
+            <div class="actions">
+              <button id="saveFeaturesBtn" type="button">保存功能开关</button>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-models">
+        <div class="section-head">
+          <h2>分项能力模型</h2>
+          <span class="muted">模型分流</span>
+        </div>
+        <div id="providerSummary" class="provider-summary"></div>
+        <div id="providerFlow" class="provider-flow"></div>
+        <div class="provider-config-mode-card">
+          <div>
+            <b>模型配置模式</b>
+            <span id="providerConfigModeHint">快速配置和精准配置互斥，保存时只写入当前模式下可见的模型。</span>
+          </div>
+          <div class="provider-config-mode" aria-label="模型配置模式">
+            <button type="button" data-provider-config-mode="quick" class="active">快速配置</button>
+            <button type="button" data-provider-config-mode="precision">精准配置</button>
+          </div>
+        </div>
+        <div class="provider-toolbar">
+          <input id="providerFilter" type="search" placeholder="筛选模型名称 / 配置键 / 用途 / 低延迟 / 效果" />
+          <div class="provider-mode-switch" aria-label="模型配置筛选">
+            <button type="button" data-provider-mode="all" class="active">全部</button>
+            <button type="button" data-provider-mode="configured">已配置</button>
+            <button type="button" data-provider-mode="inherited">自动回退</button>
+            <button type="button" data-provider-mode="speed">低延迟优先</button>
+            <button type="button" data-provider-mode="quality">效果优先</button>
+            <button type="button" data-provider-mode="vision">视觉/外部</button>
+          </div>
+          <div class="provider-toolbar-actions">
+            <button id="testAllProvidersBtn" type="button">测试全部模型</button>
+            <button id="saveProvidersBtn" type="button">保存并覆盖两套模型配置</button>
+          </div>
+        </div>
+        <form id="providerForm" class="provider-groups"></form>
+      </section>
+
+      <section class="panel" id="panel-qzone">
+        <div class="section-head">
+          <div>
+            <h2>QQ 空间</h2>
+            <span class="muted">整合查看、点赞、评论和发布说说入口，布局沿用陪伴面板风格。</span>
+          </div>
+          <div class="actions compact">
+            <button id="qzoneRefreshCookiesBtn" type="button">刷新 Cookies</button>
+            <button id="qzoneRefreshBtn" type="button">刷新动态</button>
+          </div>
+        </div>
+        <div class="qzone-shell">
+          <aside class="qzone-rail">
+            <article class="qzone-card qzone-account-card">
+              <div>
+                <h3 id="qzoneAccountName">QQ 空间</h3>
+                <p id="qzoneAccountMeta" class="muted">等待加载</p>
+              </div>
+              <div id="qzoneQuickSummary" class="qzone-mini-summary"></div>
+            </article>
+
+            <article class="qzone-card qzone-filter-card">
+              <div class="qzone-scope-switch">
+                <button type="button" class="active" data-qzone-scope="friends">好友动态</button>
+                <button type="button" data-qzone-scope="self">我的空间</button>
+                <button type="button" data-qzone-scope="profile">指定 QQ</button>
+              </div>
+              <form id="qzoneTargetForm" class="inline-form compact-form">
+                <input id="qzoneTargetUin" inputmode="numeric" placeholder="输入 QQ 号后查看" />
+                <button type="submit">查看</button>
+              </form>
+            </article>
+
+            <article class="qzone-card qzone-compose-card">
+              <h3>发布说说</h3>
+              <form id="qzonePublishForm" class="stack-form">
+                <textarea id="qzonePublishContent" rows="5" placeholder="写点公开发到 QQ 空间的话"></textarea>
+                <button type="submit">发布到空间</button>
+              </form>
+            </article>
+          </aside>
+
+          <div class="qzone-main">
+            <div id="qzoneNotice" class="qzone-notice" hidden></div>
+            <div class="qzone-feed-head">
+              <div>
+                <h3>空间动态</h3>
+                <span id="qzoneFeedMeta" class="muted">准备加载</span>
+              </div>
+            </div>
+            <div id="qzoneFeed" class="qzone-feed-list"></div>
+          </div>
+
+          <aside class="qzone-detail-pane">
+            <div id="qzoneDetailEmpty" class="qzone-empty detail-empty">
+              <b>选择一条说说</b>
+              <span>这里会显示完整内容和评论。</span>
+            </div>
+            <div id="qzoneDetailContent" hidden></div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-experimental">
+        <div id="experimentalRoot" class="experimental-root"></div>
+      </section>
+    </section>
+  </main>
+
+  <div id="setupGuideOverlayRoot"></div>
+
+  <div id="dailyOutfitPreview" class="daily-outfit-preview" aria-hidden="true">
+    <div class="daily-outfit-preview__dialog" role="dialog" aria-modal="true" aria-label="今日穿搭预览">
+      <button id="dailyOutfitPreviewClose" type="button" class="daily-outfit-preview__close" data-preview-dismiss="1" aria-label="关闭预览">×</button>
+      <img id="dailyOutfitPreviewImage" class="daily-outfit-preview__image" alt="今日穿搭预览" />
+      <div id="dailyOutfitPreviewMeta" class="daily-outfit-preview__meta"></div>
+    </div>
+  </div>
+
+  <script src="./js/features/daily-outfit.js?v=20260702-outfit-preview"></script>
+  <script src="./js/ui/appearance.js?v=20260707-font-switch"></script>
+  <script src="./js/panels/provider-tree.js?v=20260709-provider-tree-static"></script>
+  <script src="./js/panels/qzone-panel.js?v=20260709-qzone-static"></script>
+  <script src="./app.js?v=20260709-page-load-stable"></script>
+</body>
+</html>

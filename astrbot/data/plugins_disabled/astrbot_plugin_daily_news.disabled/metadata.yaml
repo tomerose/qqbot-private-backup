@@ -1,0 +1,6 @@
+name: astrbot_plugin_daily_news
+desc: anka - 每日新闻推送插件 - 请先设置推送目标并且设置推送时间
+help: anka - 每日新闻推送插件 - 请先设置推送目标并且设置推送时间
+version: v2.1.0
+author: anka
+repo: https://github.com/anka-afk/astrbot_plugin_daily_news

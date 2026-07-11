@@ -1,0 +1,207 @@
+{
+  "enable": {
+    "description": "启用上下文场景感知",
+    "type": "bool",
+    "default": true
+  },
+  "bot_names": {
+    "description": "Bot的各种称呼（用于检测被提及，不填则不检测）",
+    "type": "list",
+    "default": [],
+    "hint": "例如填写: 小助手, 机器人, bot"
+  },
+  "max_history": {
+    "description": "每个群保留的最大历史消息数",
+    "type": "int",
+    "default": 50
+  },
+  "max_groups": {
+    "description": "最大缓存群数量（LRU淘汰策略，防止内存溢出）",
+    "type": "int",
+    "default": 100
+  },
+  "dialogue_window": {
+    "description": "注入LLM的对话流窗口大小（最近N条消息）",
+    "type": "int",
+    "default": 8
+  },
+  "enable_dialogue_flow": {
+    "description": "启用对话流分析（谁在和谁说话）",
+    "type": "bool",
+    "default": true
+  },
+  "only_group_chat": {
+    "description": "仅对群聊生效（私聊场景无需复杂分析）",
+    "type": "bool",
+    "default": true
+  },
+  "warn_builtin_ltm": {
+    "description": "检测到内置群聊上下文感知时输出警告",
+    "type": "bool",
+    "default": true,
+    "hint": "建议关闭 AstrBot 内置群聊上下文感知，避免和本插件重复注入群聊历史"
+  },
+  "show_recent_images": {
+    "description": "在场景提示中单独列出最近图片消息",
+    "type": "bool",
+    "default": true,
+    "hint": "让未触发对话的图片也以 <recent_images> 形式显式进入后续 LLM 请求；启用图像转述后会显示图片描述"
+  },
+  "show_recent_images_allow_gif": {
+    "description": "允许将GIF图片消息加入最近图片上下文",
+    "type": "bool",
+    "default": false,
+    "hint": "仅当后续模型支持image/gif或你确认需要GIF上下文时开启；关闭时GIF不会进入<recent_images>，也不会触发图像转述",
+    "condition": {
+      "show_recent_images": true
+    }
+  },
+  "image_context_window": {
+    "description": "图片上下文扫描窗口",
+    "type": "int",
+    "default": 20,
+    "min": 1,
+    "max": 200,
+    "hint": "从最近 N 条消息中提取图片消息并单独注入，避免图片上下文被普通对话窗口截掉"
+  },
+  "voice_context_window": {
+    "description": "语音转写上下文扫描窗口",
+    "type": "int",
+    "default": 50,
+    "min": 0,
+    "max": 500,
+    "hint": "从最近 N 条消息中单独提取 Gemini_STT 的语音转写并注入；0 表示关闭"
+  },
+  "debug_inference": {
+    "description": "启用推断规则调试日志",
+    "type": "bool",
+    "default": false,
+    "hint": "启用后会在日志中输出每条消息的对话对象推断过程"
+  },
+  "reply_starters": {
+    "description": "回复特征词（用于判断用户是否在回复Bot）",
+    "type": "list",
+    "default": [],
+    "hint": "留空使用默认词库。例如: 好的, 谢谢, 明白了"
+  },
+  "image_caption": {
+    "description": "启用图像转述（将群友发的图片转为文字描述）",
+    "type": "bool",
+    "default": false,
+    "hint": "启用后每张图片会调用一次LLM，会产生额外费用和延迟"
+  },
+  "image_caption_provider_id": {
+    "description": "图像转述使用的提供商",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "留空则使用默认提供商，需支持图像识别能力",
+    "condition": {
+      "image_caption": true
+    }
+  },
+  "image_caption_prompt": {
+    "description": "图像转述提示词",
+    "type": "string",
+    "default": "请用中文简洁描述这张图片的内容，不超过50字。",
+    "condition": {
+      "image_caption": true
+    }
+  },
+  "image_caption_timeout": {
+    "description": "图像转述超时时间（秒）",
+    "type": "int",
+    "default": 60,
+    "min": 10,
+    "max": 600,
+    "hint": "本地模型或慢速API建议设置更长时间（如120-300秒）",
+    "condition": {
+      "image_caption": true
+    }
+  },
+  "history_compress_strategy": {
+    "description": "群聊历史压缩策略（可选）",
+    "type": "string",
+    "default": "off",
+    "options": ["off", "llm_summary"],
+    "labels": ["关闭", "LLM 摘要压缩"],
+    "hint": "开启后会额外调用一次 LLM 来生成摘要，用于降低上下文膨胀与误判风险。"
+  },
+  "history_compress_trigger_count": {
+    "description": "触发压缩的消息数阈值",
+    "type": "int",
+    "default": 48,
+    "min": 20,
+    "max": 500,
+    "condition": {
+      "history_compress_strategy": "llm_summary"
+    }
+  },
+  "history_compress_keep_recent": {
+    "description": "压缩时保留最近消息数",
+    "type": "int",
+    "default": 16,
+    "min": 5,
+    "max": 200,
+    "condition": {
+      "history_compress_strategy": "llm_summary"
+    }
+  },
+  "history_compress_min_interval_sec": {
+    "description": "两次压缩的最小间隔（秒）",
+    "type": "int",
+    "default": 300,
+    "min": 30,
+    "max": 86400,
+    "condition": {
+      "history_compress_strategy": "llm_summary"
+    }
+  },
+  "history_compress_provider_id": {
+    "description": "用于历史压缩的模型提供商 ID（留空则使用当前会话默认模型）",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "condition": {
+      "history_compress_strategy": "llm_summary"
+    }
+  },
+  "history_compress_instruction": {
+    "description": "历史压缩提示词（留空使用内置默认）",
+    "type": "text",
+    "default": "",
+    "condition": {
+      "history_compress_strategy": "llm_summary"
+    }
+  },
+  "history_compress_timeout": {
+    "description": "历史压缩超时时间（秒）",
+    "type": "int",
+    "default": 60,
+    "min": 10,
+    "max": 600,
+    "condition": {
+      "history_compress_strategy": "llm_summary"
+    }
+  },
+  "history_compress_max_input_chars": {
+    "description": "压缩输入最大字符数（超出时从末尾截取）",
+    "type": "int",
+    "default": 5000,
+    "min": 1000,
+    "max": 50000,
+    "condition": {
+      "history_compress_strategy": "llm_summary"
+    }
+  },
+  "history_compress_max_summary_chars": {
+    "description": "摘要最大字符数（超出截断）",
+    "type": "int",
+    "default": 800,
+    "min": 200,
+    "max": 5000,
+    "condition": {
+      "history_compress_strategy": "llm_summary"
+    }
+  }
+}

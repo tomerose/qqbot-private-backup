@@ -1,0 +1,55 @@
+# Python and local tooling
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+
+# Logs, locks, and generated artifacts
+*.log
+*.log.*
+*.lock
+*.zip
+*.tar
+*.gz
+*.tmp
+*.bak
+*.db
+*.db-shm
+*.db-wal
+
+# Credentials and local environment
+.env
+.env.*
+!.env.example
+*.token
+*.pem
+*.key
+*.pfx
+*.p12
+astrbot/data/cmd_config.json
+astrbot/data/vertex-key.json
+data/cmd_config.json
+# This live plugin contains a hard-coded provider key.  A runnable,
+# environment-variable-based restoration template is tracked instead.
+astrbot/data/plugins/emotional_chat/main.py
+
+# AstrBot private runtime data
+astrbot/astrbot.log
+astrbot/data/attachments/
+astrbot/data/config/
+astrbot/data/knowledge_base/
+astrbot/data/logs/
+astrbot/data/plugin_data/
+astrbot/data/temp/
+astrbot/data/webchat/
+
+# QQ / NapCat login sessions and runtime
+napcat/config/
+napcat-runtime/
+
+# Local agent task records and delivery artifacts
+claude_workspace/state/
+claude_workspace/jobs/
+claude_workspace/**/*.log
+services/local_tts/tts_audio/

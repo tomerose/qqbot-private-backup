@@ -1,0 +1,6 @@
+name: deep_camp_helper
+display_name: DEEP营任务助手
+short_desc: DEEP营任务查询/DDL提醒
+desc: 仅在DEEP营2班群(820762428)生效，提供/tasks /deadline /status等命令
+version: v1.0.0
+author: lemon
