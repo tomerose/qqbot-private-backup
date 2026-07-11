@@ -100,11 +100,14 @@ class FakeStarContext:
 
 
 class FakeOneBot:
-    def __init__(self):
+    def __init__(self, *, fail_upload=False):
         self.actions = []
+        self.fail_upload = fail_upload
 
     async def call_action(self, action, **kwargs):
         self.actions.append((action, kwargs))
+        if self.fail_upload:
+            raise RuntimeError("upload unavailable")
 
 
 class FakePlatform:
@@ -223,6 +226,20 @@ class AgentIntegrationTests(unittest.TestCase):
                 job_id = plugin.executed[0][0]
                 self.assertEqual(plugin._job_store.get(job_id)["state"], "completed")
                 self.assertFalse(plugin._payload_store.exists(job_id))
+
+        asyncio.run(scenario())
+
+    def test_task_start_reply_includes_a_conservative_eta(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+
+                replies = await _collect(
+                    plugin.on_message(FakeEvent("帮我生成 report.docx"))
+                )
+
+                texts = _plain_texts(replies)
+                self.assertTrue(any("预计约" in text for text in texts), texts)
 
         asyncio.run(scenario())
 
@@ -617,6 +634,26 @@ class AgentIntegrationTests(unittest.TestCase):
                 self.assertEqual(record["stage"], "completed")
                 self.assertRegex(record["delivery_digest"], r"^[0-9a-f]{64}$")
                 self.assertFalse(plugin._payload_store.exists(job_id))
+
+        asyncio.run(scenario())
+
+    def test_group_file_delivery_failure_never_reports_completed(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                event = FakeEvent(
+                    "帮我生成 report.docx", group_id="945598390", at_self=True
+                )
+                event.bot = FakeOneBot(fail_upload=True)
+
+                replies = await _collect(plugin.on_message(event))
+                texts = _plain_texts(replies)
+                job_id = plugin.executed[0][0]
+
+                self.assertFalse(any(text.startswith("已完成") for text in texts), texts)
+                self.assertTrue(any("文件未成功交付" in text for text in texts), texts)
+                self.assertEqual(plugin._job_store.get(job_id)["state"], "delivering")
+                self.assertTrue(plugin._payload_store.exists(job_id))
 
         asyncio.run(scenario())
 

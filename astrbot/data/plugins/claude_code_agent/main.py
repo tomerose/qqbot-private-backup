@@ -60,6 +60,7 @@ from .task_orchestrator import StepExecution, TaskEvent, TaskOrchestrator
 from .task_planner import ExecutionPlan, TaskRequest, TaskStep, plan_task
 from .progress_policy import ProgressPolicy
 from .response_style import format_task_reply
+from .eta_policy import estimate_eta
 from .task_verifier import (
     run_verification_command,
     select_verification_command,
@@ -857,6 +858,8 @@ class ClaudeCodeAgent(Star):
             return
 
         will_queue = self._execution_lock.locked()
+        queue_ahead = self._queued_handlers + (1 if will_queue else 0)
+        eta = estimate_eta(plan, queue_ahead=queue_ahead)
         if will_queue and self._queued_handlers >= self.max_queued_jobs:
             yield self._reply(ctx, Plain("任务队列已满，请稍后再试。"))
             return
@@ -868,7 +871,10 @@ class ClaudeCodeAgent(Star):
             current = self._job_store.get(job_id)
             if current and current["state"] in {"planned", "awaiting_approval"}:
                 self._job_store.transition(job_id, "queued", "queued")
-            yield self._reply(ctx, Plain(f"任务 {job_id} 已排队。"))
+            yield self._reply(
+                ctx,
+                Plain(f"任务 {job_id} 已排队，{eta.text}。完成后会直接交付已验证文件。"),
+            )
         try:
             await self._execution_lock.acquire()
             lock_acquired = True
@@ -893,7 +899,12 @@ class ClaudeCodeAgent(Star):
             if self._progress_policy.should_emit(started_event, time.monotonic()):
                 yield self._reply(
                     ctx,
-                    Plain(format_task_reply("started", "任务已进入执行队列。")),
+                    Plain(
+                        format_task_reply(
+                            "started",
+                            f"任务已进入执行队列，{eta.text}。完成后会直接交付已验证文件。",
+                        )
+                    ),
                 )
 
             output_dir = job_dir / "outputs"
@@ -1070,14 +1081,6 @@ class ClaudeCodeAgent(Star):
             )
             self._job_store.transition(job_id, "delivering", "delivering")
             response = outcome.responses[-1] if outcome.responses else "验证已通过。"
-            completed_event = TaskEvent(
-                "completed", job_id, len(plan.steps) - 1, "completed"
-            )
-            if self._progress_policy.should_emit(completed_event, time.monotonic()):
-                yield self._reply(
-                    ctx,
-                    Plain(format_task_reply("completed", detail=response)),
-                )
             delivered_digests: set[str] = set(payload.delivery_cursor)
             all_delivered = True
             for item in deliverables:
@@ -1103,6 +1106,28 @@ class ClaudeCodeAgent(Star):
                     deliverable_count=len(deliverables),
                 )
                 self._delete_payload(job_id)
+                completed_event = TaskEvent(
+                    "completed", job_id, len(plan.steps) - 1, "completed"
+                )
+                if self._progress_policy.should_emit(completed_event, time.monotonic()):
+                    yield self._reply(
+                        ctx,
+                        Plain(format_task_reply("completed", detail=response)),
+                    )
+            else:
+                delivery_event = TaskEvent(
+                    "failed", job_id, len(plan.steps) - 1, "delivery_pending"
+                )
+                if self._progress_policy.should_emit(delivery_event, time.monotonic()):
+                    yield self._reply(
+                        ctx,
+                        Plain(
+                            format_task_reply(
+                                "failed",
+                                "文件未成功交付，已保留恢复记录；服务恢复后只会重试交付，不会重复执行任务。",
+                            )
+                        ),
+                    )
         except Exception as exc:
             try:
                 self._job_store.finish(
