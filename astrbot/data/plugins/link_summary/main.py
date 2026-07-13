@@ -11,9 +11,9 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star
 try:
-    from xiaoning_runtime import defer_stop_event
+    from xiaoning_runtime import chat_response_content, defer_stop_event
 except ImportError:
-    from data.plugins.xiaoning_runtime import defer_stop_event
+    from data.plugins.xiaoning_runtime import chat_response_content, defer_stop_event
 
 try:
     from draw_command.pro_access import is_active_pro_group
@@ -83,10 +83,9 @@ class LinkSummary(Star):
                 },
                 timeout=30,
             )
-            resp.raise_for_status()
-            result = resp.json()["choices"][0]["message"]["content"].strip()
+            result = chat_response_content(resp)
         except Exception as exc:
-            yield event.plain_result(f"摘要失败：{type(exc).__name__}")
+            yield event.plain_result(f"摘要服务暂时不可用：{str(exc) or type(exc).__name__}")
             return
 
         yield event.plain_result(f"📄 {result}\n\n🔗 {url}")

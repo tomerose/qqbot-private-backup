@@ -2,6 +2,9 @@ import importlib.util
 import asyncio
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "gemini-proxy.py"
@@ -33,6 +36,15 @@ class GeminiAudioTests(unittest.TestCase):
     def test_model_capabilities_include_audio(self):
         payload = asyncio.run(MODULE.list_models())
         self.assertTrue(all(item["capabilities"].get("audio") for item in payload["data"]))
+
+    def test_chat_failure_uses_an_http_error_response(self):
+        with patch.object(MODULE.genai, "Client", side_effect=RuntimeError("upstream busy")):
+            response = TestClient(MODULE.app).post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hello"}]},
+            )
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["error"]["message"], "upstream busy")
 
 
 if __name__ == "__main__":

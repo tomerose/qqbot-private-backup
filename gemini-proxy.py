@@ -151,7 +151,11 @@ async def chat(request: Request):
                 }
         return result
     except Exception as exc:
-        return {"error": {"message": str(exc), "type": "api_error"}}
+        logger.exception("chat completion failed")
+        return JSONResponse(
+            status_code=502,
+            content={"error": {"message": str(exc), "type": "api_error"}},
+        )
 
 
 @app.post("/v1/images/generations")
