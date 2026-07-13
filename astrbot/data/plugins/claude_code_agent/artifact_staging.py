@@ -23,8 +23,10 @@ _SHEET = re.compile(r"\bxlsx?\b|电子表格|工作簿", re.I)
 _PDF = re.compile(r"\bpdf\b", re.I)
 _EXPLICIT_SUFFIX = re.compile(r"(?i)(?<![\w.])[^\s/\\]+(\.[a-z0-9]{1,8})\b")
 
+_VIDEO = re.compile(r"\u89c6\u9891|\u77ed\u7247|\u52a8\u753b|video|vid", re.I)
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
-SUPPORTED_ARTIFACT_SUFFIXES = IMAGE_SUFFIXES | {
+VIDEO_SUFFIXES = {".mp4", ".webm", ".mkv", ".mov", ".m4v"}
+SUPPORTED_ARTIFACT_SUFFIXES = IMAGE_SUFFIXES | VIDEO_SUFFIXES | {
     ".docx", ".pdf", ".pptx", ".xlsx", ".txt", ".md", ".csv", ".zip"
 }
 
@@ -42,6 +44,8 @@ def expected_artifact_suffixes(task: str) -> set[str]:
         return {".docx"}
     if _IMAGE.search(text):
         return set(IMAGE_SUFFIXES)
+    if _VIDEO.search(text):
+        return set(VIDEO_SUFFIXES)
     if _PRESENTATION.search(text):
         return {".pptx"}
     if _SHEET.search(text):

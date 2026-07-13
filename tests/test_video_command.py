@@ -35,11 +35,13 @@ class VideoCommandTests(unittest.TestCase):
         cls.proxy = _load_proxy()
 
     def test_natural_video_prompt_has_a_real_capture_group(self):
-        self.assertEqual(_parse_video_command("帮我生成视频 一只猫 4秒"), "一只猫4秒")
+        self.assertEqual(_parse_video_command("帮我生成视频 一只猫 4秒"), "一只猫 4秒")
         self.assertEqual(_parse_video_command("帮我生成一个视频"), "")
         self.assertEqual(_parse_video_command("帮我生成一只猫的视频"), "一只猫的")
         self.assertIsNone(_parse_video_command("你能做视频吗"))
         self.assertIsNone(_parse_video_command("小柠支持生成视频吗"))
+        self.assertIsNone(_parse_video_command("生成视频很难"))
+        self.assertIsNone(_parse_video_command("我觉得做视频不太靠谱"))
 
     def test_duration_parsing_keeps_generation_boundary_explicit(self):
         self.assertEqual(_parse_duration("一只猫 4s"), 4)
@@ -52,7 +54,8 @@ class VideoCommandTests(unittest.TestCase):
         self.assertFalse(_is_search_mode("/video 小猫找妈妈", "小猫找妈妈"))
         self.assertTrue(_is_search_mode("/video 一只猫 8s", "一只猫 8s"))
         self.assertTrue(_is_search_mode("/findvideo 一只猫", "一只猫"))
-        self.assertEqual(_parse_video_command("帮我找猫咪视频"), "猫咪视频")
+        self.assertEqual(_parse_video_command("帮我找猫咪视频"), "猫咪")
+        self.assertEqual(_parse_video_command("帮我找一个姆巴佩的视频"), "姆巴佩")
 
     def test_search_progress_does_not_stop_before_result(self):
         class Event:
@@ -114,7 +117,7 @@ class VideoCommandTests(unittest.TestCase):
         self.assertIn("姆巴佩 集锦", text)
         self.assertEqual(urls, ["https://www.bilibili.com/video/BV1test"])
 
-    def test_search_page_urls_are_returned_without_waiting_for_downloads(self):
+    def test_search_page_url_is_resolved_and_video_is_delivered(self):
         class Event:
             is_at_or_wake_command = False
 
@@ -130,19 +133,33 @@ class VideoCommandTests(unittest.TestCase):
             def plain_result(self, text):
                 return text
 
+            def set_extra(self, key, value):
+                self.extra = (key, value)
+
             def stop_event(self):
                 self.stopped = True
 
         async def scenario():
             plugin = VideoCommand.__new__(VideoCommand)
-            plugin._search_videos = lambda query: ("姆巴佩集锦 - https://www.bilibili.com/video/BV1test", ["https://www.bilibili.com/video/BV1test"])
-            plugin._try_download_video = lambda url: self.fail("video page should not be downloaded")
+            plugin._search_videos = lambda query: (
+                "姆巴佩集锦 - https://www.bilibili.com/video/BV1test",
+                [
+                    "https://www.bilibili.com/video/BV1test",
+                    "https://www.bilibili.com/video/BV2test",
+                ],
+            )
+            attempted = []
+            plugin._try_download_video = lambda url: attempted.append(url) or (b"video", "video/mp4")
+            plugin._save_video = lambda payload, ext: Path("mbappe.mp4")
+            plugin._deliver_video = AsyncMock(return_value="视频文件")
             event = Event()
             event.stopped = False
             with patch("data.plugins.video_command.main.get_tier", return_value=Tier.PRO):
                 replies = [reply async for reply in plugin.on_message(event)]
-            self.assertEqual(len(replies), 2)
-            self.assertIn("https://www.bilibili.com/video/BV1test", replies[1])
+            self.assertEqual(attempted, ["https://www.bilibili.com/video/BV1test"])
+            self.assertEqual(replies[1], "视频文件")
+            self.assertIn("更多相关视频", replies[2])
+            self.assertTrue(event.stopped)
 
         asyncio.run(scenario())
 
@@ -160,6 +177,66 @@ class VideoCommandTests(unittest.TestCase):
         ):
             self.assertTrue(self.proxy._is_safe_video_url("https://example.com/video.mp4"))
         self.assertFalse(self.proxy._is_safe_video_url("file:///etc/passwd"))
+
+    def test_bilibili_api_fallback_resolves_page_to_media(self):
+        class Response:
+            def __init__(self, body):
+                self.body = body
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.body
+
+        responses = [
+            Response({"data": [{"cid": 12345}]}),
+            Response({"data": {"durl": [{"url": "https://media.example/video.mp4", "size": 1024}]}}),
+        ]
+        with (
+            patch.object(self.proxy.requests, "get", side_effect=responses),
+            patch.object(
+                self.proxy,
+                "_try_direct_download",
+                return_value=(b"video", "video/mp4"),
+            ) as direct,
+        ):
+            result = self.proxy._try_bilibili_api_download(
+                "https://www.bilibili.com/video/BV1EHNx6QEri"
+            )
+        self.assertEqual(result, (b"video", "video/mp4"))
+        direct.assert_called_once_with(
+            "https://media.example/video.mp4",
+            {"Referer": "https://www.bilibili.com/video/BV1EHNx6QEri"},
+        )
+
+    def test_group_video_delivery_uses_native_group_file_upload(self):
+        class Bot:
+            def __init__(self):
+                self.calls = []
+
+            async def call_action(self, action, **kwargs):
+                self.calls.append((action, kwargs))
+
+        class Event:
+            def __init__(self):
+                self.bot = Bot()
+
+            def get_group_id(self):
+                return "945598390"
+
+            def plain_result(self, text):
+                return text
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "video.mp4"
+            path.write_bytes(b"video")
+            event = Event()
+            plugin = VideoCommand.__new__(VideoCommand)
+            reply = asyncio.run(plugin._deliver_video(event, path))
+            self.assertIn("视频已上传到群文件", reply)
+            self.assertEqual(event.bot.calls[0][0], "upload_group_file")
+            self.assertEqual(event.bot.calls[0][1]["file"], str(path.resolve()))
 
     def test_video_generation_is_offloaded_from_the_event_loop(self):
         class Request:

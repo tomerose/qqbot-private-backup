@@ -30,10 +30,6 @@ node_modules/
 astrbot/data/cmd_config.json
 astrbot/data/vertex-key.json
 data/cmd_config.json
-# This live plugin contains a hard-coded provider key.  A runnable,
-# environment-variable-based restoration template is tracked instead.
-astrbot/data/plugins/emotional_chat/main.py
-
 # AstrBot private runtime data
 astrbot/astrbot.log
 astrbot/data/attachments/

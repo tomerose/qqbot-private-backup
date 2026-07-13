@@ -2,7 +2,7 @@
 
 Tier flow: ORDINARY < GO < PRO. Each tier inherits all lower-tier capabilities.
 GO: owner-granted, time-limited (≤90 days), Agent 1x/week, Draw 6x/week.
-PRO: owner-granted, time-limited (≤365 days), no artificial caps.
+PRO: owner-granted, time-limited (direct grants ≤520 days), no artificial caps.
 """
 
 from __future__ import annotations

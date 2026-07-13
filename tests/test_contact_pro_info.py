@@ -13,6 +13,7 @@ sys.path.insert(0, str(PLUGINS_DIR))
 from contact_pro_info.main import (  # noqa: E402
     CONTACT_REPLY,
     ContactProInfo,
+    MUSIC_GUIDE,
     contact_reply_for,
     version_reply_for,
     VERSION_REPLY,
@@ -40,6 +41,10 @@ async def collect(generator):
 
 
 class ContactProInfoTests(unittest.TestCase):
+    def test_public_help_describes_the_explicit_music_paths(self):
+        self.assertIn("\u7f51\u6613\u4e91\u5361", MUSIC_GUIDE)
+        self.assertIn("\u539f\u521b\u6b4c\u66f2", VERSION_REPLY)
+
     def test_version_questions_return_user_facing_feature_summary(self):
         for text in (
             "普通版和Pro有什么区别",

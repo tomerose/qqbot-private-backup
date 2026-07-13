@@ -25,6 +25,8 @@ class ArtifactStagingTests(unittest.TestCase):
     def test_expected_types_are_derived_from_user_request(self):
         self.assertEqual(expected_artifact_suffixes("生成一份 Word 报告"), {".docx"})
         self.assertIn(".png", expected_artifact_suffixes("画一张图片"))
+        self.assertIn(".mp4", expected_artifact_suffixes("生成一段视频"))
+        self.assertIn(".mkv", expected_artifact_suffixes("生成一段视频"))
         self.assertEqual(expected_artifact_suffixes("生成 report.pdf"), {".pdf"})
         self.assertEqual(
             expected_artifact_suffixes("参考 https://github.com/openai 生成 Word 报告"),

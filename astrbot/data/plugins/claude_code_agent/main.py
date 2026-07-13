@@ -1296,7 +1296,7 @@ class ClaudeCodeAgent(Star):
             all_delivered = True
             for item in deliverables:
                 delivered = True
-                if item.kind == "image":
+                if item.kind == "image" and not (ctx.get_group_id() and hasattr(ctx, "bot")):
                     yield self._reply(ctx, Image(file=str(item.path)))
                 elif ctx.get_group_id() and hasattr(ctx, "bot"):
                     delivered = await self._deliver_file(ctx, item.path)

@@ -55,6 +55,20 @@ class DeliveryDLPTests(unittest.TestCase):
             self.assertTrue(inspect_deliverable(archive, root).allowed)
             self.assertEqual(inspect_deliverable(binary, root).code, "unsupported_type")
 
+    def test_common_video_is_allowed_but_unknown_binary_remains_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "result.mp4"
+            video.write_bytes(b"\x00\x00\x00\x18ftypisom" + b"\x00" * 16)
+            renamed = root / "renamed.mp4"
+            renamed.write_bytes(b"not really a video")
+            binary = root / "payload.exe"
+            binary.write_bytes(b"MZ")
+
+            self.assertTrue(inspect_deliverable(video, root).allowed)
+            self.assertEqual(inspect_deliverable(renamed, root).code, "invalid_video")
+            self.assertEqual(inspect_deliverable(binary, root).code, "unsupported_type")
+
     def test_clean_docx_with_xml_namespace_urls_is_allowed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

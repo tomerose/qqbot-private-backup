@@ -112,6 +112,22 @@ class DrawCommand(Star):
             source.convert(mode).save(target, format="PNG", optimize=True)
         return target
 
+    async def _deliver_image(self, event: AstrMessageEvent, path: Path):
+        group_id = str(getattr(event, "get_group_id", lambda: "")() or "").strip()
+        if group_id and hasattr(event, "bot"):
+            try:
+                await event.bot.call_action(
+                    "upload_group_file",
+                    group_id=int(group_id),
+                    file=str(path.resolve(strict=True)),
+                    name=path.name,
+                )
+                return event.plain_result(f"图片已上传到群文件：{path.name}")
+            except Exception as exc:
+                logger.error("[ProDraw] group image delivery failed: %s", type(exc).__name__)
+                return event.plain_result("图片已生成，但上传到群文件失败，请稍后重试。")
+        return event.chain_result([Image.fromFileSystem(str(path))])
+
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=940)
     async def on_message(self, event: AstrMessageEvent):
         try:
@@ -176,7 +192,7 @@ class DrawCommand(Star):
         else:
             self._daily_usage[dk] = used + 1
         event.set_extra("_pro_draw_output_paths", [str(output_path)])
-        yield event.chain_result([Image.fromFileSystem(str(output_path))])
+        yield await self._deliver_image(event, output_path)
         event.stop_event()
 
     @filter.after_message_sent(priority=-1000)

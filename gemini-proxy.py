@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import sys
@@ -43,6 +44,8 @@ PROJECT = os.getenv("VERTEX_PROJECT", "solar-modem-496213-f5")
 LOCATION = os.getenv("VERTEX_LOCATION", "global")
 MODEL_IDS = {"gemini-2.5-flash", "gemini-2.5-pro"}
 SEARCH_MODEL_ALIAS = "gemini-2.5-flash-search"
+MUSIC_MODEL = "lyria-3-clip-preview"
+MAX_MUSIC_BYTES = 20 * 1024 * 1024
 logger = logging.getLogger("vertex-gemini-proxy")
 
 
@@ -156,6 +159,56 @@ async def chat(request: Request):
             status_code=502,
             content={"error": {"message": str(exc), "type": "api_error"}},
         )
+
+
+def _generate_music(prompt: str) -> tuple[bytes, str]:
+    """Generate one original Lyria clip through the existing Vertex AI identity."""
+    client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
+    response = client.interactions.create(
+        model=MUSIC_MODEL,
+        input=[{"type": "text", "text": prompt}],
+    )
+    audio = next(
+        (
+            output
+            for output in (getattr(response, "outputs", None) or [])
+            if getattr(output, "type", None) == "audio"
+        ),
+        None,
+    )
+    encoded = getattr(audio, "data", None)
+    if not isinstance(encoded, str):
+        raise ValueError("missing music response")
+    payload = base64.b64decode(encoded, validate=True)
+    if not payload or len(payload) > MAX_MUSIC_BYTES:
+        raise ValueError("invalid music size")
+    mime = str(getattr(audio, "mime_type", "audio/mpeg") or "audio/mpeg")
+    return payload, mime
+
+
+@app.post("/v1/music/generations")
+async def generate_music(request: Request):
+    try:
+        prompt = str((await request.json()).get("prompt", "")).strip()
+    except (ValueError, json.JSONDecodeError):
+        prompt = ""
+    if not prompt or len(prompt) > 800:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "invalid music prompt", "type": "invalid_request_error"}},
+        )
+    try:
+        payload, mime = await asyncio.to_thread(_generate_music, prompt)
+    except Exception:
+        logger.exception("music generation failed")
+        return JSONResponse(
+            status_code=502,
+            content={"error": {"message": "music generation unavailable", "type": "api_error"}},
+        )
+    return {
+        "created": int(time.time()),
+        "data": [{"b64_json": base64.b64encode(payload).decode("ascii"), "mime_type": mime}],
+    }
 
 
 @app.post("/v1/images/generations")
@@ -395,11 +448,16 @@ def _is_supported_video_page(url: str) -> bool:
     return any(host == domain or host.endswith("." + domain) for domain in VIDEO_PAGE_HOSTS)
 
 
-def _try_direct_download(url: str) -> tuple[bytes, str] | None:
+def _try_direct_download(
+    url: str,
+    extra_headers: dict[str, str] | None = None,
+) -> tuple[bytes, str] | None:
     """Try to GET a direct video URL. Returns (bytes, mime_type) or None."""
     resp = None
     try:
         current_url = url
+        headers = {"User-Agent": "Mozilla/5.0"}
+        headers.update(extra_headers or {})
         for _ in range(4):
             if not _is_safe_video_url(current_url):
                 return None
@@ -407,7 +465,7 @@ def _try_direct_download(url: str) -> tuple[bytes, str] | None:
                 current_url,
                 stream=True,
                 timeout=VIDEO_DOWNLOAD_TIMEOUT,
-                headers={"User-Agent": "Mozilla/5.0"},
+                headers=headers,
                 allow_redirects=False,
             )
             if resp.is_redirect or resp.is_permanent_redirect:
@@ -440,6 +498,71 @@ def _try_direct_download(url: str) -> tuple[bytes, str] | None:
     finally:
         if resp is not None:
             resp.close()
+
+
+def _bilibili_bvid(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
+    if not (host == "bilibili.com" or host.endswith(".bilibili.com")):
+        return ""
+    match = re.search(r"/(BV[0-9A-Za-z]{10})(?:[/?#]|$)", parsed.path + "/")
+    return match.group(1) if match else ""
+
+
+def _try_bilibili_api_download(url: str) -> tuple[bytes, str] | None:
+    """Resolve a public Bilibili page when its anti-bot page blocks yt-dlp."""
+    bvid = _bilibili_bvid(url)
+    if not bvid:
+        return None
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://www.bilibili.com/",
+        "Accept": "application/json, text/plain, */*",
+    }
+    try:
+        page_response = requests.get(
+            "https://api.bilibili.com/x/player/pagelist",
+            params={"bvid": bvid},
+            headers=headers,
+            timeout=(5, 15),
+        )
+        page_response.raise_for_status()
+        pages = page_response.json().get("data", [])
+        cid = pages[0].get("cid") if isinstance(pages, list) and pages else None
+        if not cid:
+            return None
+        play_response = requests.get(
+            "https://api.bilibili.com/x/player/playurl",
+            params={
+                "bvid": bvid,
+                "cid": cid,
+                "qn": 16,
+                "fnval": 0,
+                "fnver": 0,
+                "fourk": 0,
+            },
+            headers=headers,
+            timeout=(5, 15),
+        )
+        play_response.raise_for_status()
+        candidates = play_response.json().get("data", {}).get("durl", [])
+        for candidate in candidates if isinstance(candidates, list) else []:
+            media_url = str(candidate.get("url") or "")
+            declared_size = int(candidate.get("size") or 0)
+            if declared_size > VIDEO_DOWNLOAD_MAX_MB * 1024 * 1024:
+                continue
+            result = _try_direct_download(
+                media_url,
+                {"Referer": f"https://www.bilibili.com/video/{bvid}"},
+            )
+            if result:
+                return result
+    except (requests.RequestException, ValueError, TypeError, IndexError, json.JSONDecodeError):
+        return None
+    return None
 
 
 def _try_ytdlp_download(url: str) -> tuple[bytes, str] | None:
@@ -507,7 +630,18 @@ async def download_video(request: Request):
             "size": len(data),
         }
 
-    # 2. Try yt-dlp
+    # 2. Bilibili's public low-resolution play URL bypasses anti-bot page 412s.
+    result = await asyncio.to_thread(_try_bilibili_api_download, url)
+    if result:
+        data, mime = result
+        return {
+            "b64_json": base64.b64encode(data).decode("ascii"),
+            "mime_type": mime,
+            "source": "bilibili",
+            "size": len(data),
+        }
+
+    # 3. Try yt-dlp for other supported platforms
     result = await asyncio.to_thread(_try_ytdlp_download, url)
     if result:
         data, mime = result

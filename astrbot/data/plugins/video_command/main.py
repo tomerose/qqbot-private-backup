@@ -20,10 +20,11 @@ from pathlib import Path
 import requests
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Image, Plain, Video
+from astrbot.api.message_components import File, Image, Plain
 from astrbot.api.star import Context, Star, StarTools
 
 from ..draw_command.pro_access import get_tier, Tier
+from ..claude_code_agent.agent_core import upload_aiocqhttp_group_file
 
 VIDEO_PROXY_URL = "http://127.0.0.1:3000/v1/videos/generations"
 VIDEO_CHAT_URL = "http://127.0.0.1:3000/v1/chat/completions"
@@ -63,6 +64,10 @@ _NATURAL_VIDEO = re.compile(
     r"[\s，,：:]*(.*)$",
     re.I,
 )
+_NATURAL_REQUEST_START = re.compile(
+    r"^\s*(?:\u5c0f\u67e0[\uff0c,,:：\s]*|(?:\u5e2e\u6211|\u8bf7|\u7ed9\u6211|\u5e2e\u5fd9)\s*)",
+    re.I,
+)
 
 _SPLIT_VIDEO = re.compile(
     r"(?:小柠[，,\s]*)?(?:帮我|请|给我|帮忙|来|整|想|想要?|要)?"
@@ -73,18 +78,6 @@ _SPLIT_VIDEO = re.compile(
     r"[\s，,：:。.!！?？]*$",
     re.I,
 )
-
-_GEN_VERBS = {"生成", "制作", "做", "创建", "搞", "整", "弄", "来", "画"}
-_VIDEO_NOUNS = {"视频", "短片", "小视频", "动画", "影片", "sp", "vid", "video"}
-_VIDEO_TRIGGERS: set[str] = set()
-for _gv in _GEN_VERBS:
-    for _vn in _VIDEO_NOUNS:
-        _VIDEO_TRIGGERS.add(_gv + _vn)
-        _VIDEO_TRIGGERS.add(_gv + "个" + _vn)
-        _VIDEO_TRIGGERS.add(_gv + "一个" + _vn)
-        _VIDEO_TRIGGERS.add(_gv + "段" + _vn)
-        _VIDEO_TRIGGERS.add(_gv + "一段" + _vn)
-
 
 def _parse_duration(text: str) -> int | None:
     """Extract duration in seconds from prompt, or None."""
@@ -120,6 +113,11 @@ def _is_search_mode(source_text: str, prompt: str) -> bool:
     )
 
 
+def _clean_natural_search_query(text: str) -> str:
+    value = re.sub(r"^(?:一个|一段|一部|一条|个|段)\s*", "", text.strip())
+    return re.sub(r"\s*(?:的)?(?:视频|短片|小视频|动画|影片)\s*$", "", value).strip()
+
+
 def _parse_video_command(text: str) -> str | None:
     raw = str(text or "").strip()
     lowered = raw.lower()
@@ -137,16 +135,6 @@ def _parse_video_command(text: str) -> str | None:
                 return None
             return parts[1].strip()
 
-    # bare keyword anywhere
-    bare = "".join(lowered.split())
-    for kw in sorted(_VIDEO_TRIGGERS, key=len, reverse=True):
-        idx = bare.find("".join(kw.split()))
-        if idx >= 0:
-            after = bare[idx + len("".join(kw.split())):]
-            if after and len(after) <= 800:
-                return after
-            return ""
-
     # split pattern: verb ... content ... noun
     m = _SPLIT_VIDEO.match(raw)
     if m:
@@ -162,6 +150,8 @@ def _parse_video_command(text: str) -> str | None:
     # natural language: verb + noun together
     m = _NATURAL_VIDEO.match(raw)
     if m:
+        if not _NATURAL_REQUEST_START.match(raw):
+            return None
         prompt = (m.group(1) or "").strip()
         if not prompt:
             return ""
@@ -172,6 +162,7 @@ def _parse_video_command(text: str) -> str | None:
     # search-only: user said "找视频 xxx" without a generate verb
     if _has_search_intent(raw):
         rest = _SEARCH_INTENT_RE.sub("", raw, count=1).strip()
+        rest = _clean_natural_search_query(rest)
         if rest and len(rest) <= 800:
             return rest
         return ""  # show help
@@ -277,7 +268,6 @@ class VideoCommand(Star):
             if text and len(text) > 10:
                 return text, urls
             return self._search_bilibili(query)
-            return f"没找到与「{query}」相关的视频，换个关键词试试？", []
         except Exception as exc:
             logger.warning("[VideoCmd] search failed: %s", type(exc).__name__)
             return self._search_bilibili(query)
@@ -343,6 +333,19 @@ class VideoCommand(Star):
         target.write_bytes(payload)
         return target
 
+    async def _deliver_video(self, event: AstrMessageEvent, path: Path):
+        """Use QQ's native group-file upload; private chats receive a file message."""
+        get_group_id = getattr(event, "get_group_id", None)
+        group_id = str(get_group_id() if callable(get_group_id) else "").strip()
+        if group_id and hasattr(event, "bot"):
+            try:
+                await upload_aiocqhttp_group_file(event.bot, group_id, path)
+                return event.plain_result(f"视频已上传到群文件：{path.name}")
+            except Exception as exc:
+                logger.error("[VideoCmd] group video delivery failed: %s", type(exc).__name__)
+                return event.plain_result("视频已生成，但上传到群文件失败，请稍后重试。")
+        return event.chain_result([File(name=path.name, file=str(path))])
+
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=935)
     async def on_message(self, event: AstrMessageEvent):
         text = str(getattr(event, "get_message_str", lambda: "")() or "")
@@ -390,9 +393,8 @@ class VideoCommand(Star):
             downloaded = False
             downloaded_url = ""
             for url in urls[:3]:  # try first 3 URLs
-                if not re.search(r"\.(?:mp4|webm|mkv|mov)(?:[?#]|$)", url, re.I):
-                    continue
-                # Skip non-video-platform URLs that we can't download
+                # Video platforms normally expose a page URL, not a direct .mp4.
+                # The proxy validates the destination and lets yt-dlp resolve it.
                 result = await asyncio.to_thread(self._try_download_video, url)
                 if result:
                     payload, mime = result
@@ -405,7 +407,7 @@ class VideoCommand(Star):
                     ext = ext_map.get(mime.split(";", 1)[0].strip().lower(), ".mp4")
                     output_path = self._save_video(payload, ext)
                     event.set_extra("_pro_video_output_paths", [str(output_path)])
-                    yield event.chain_result([Video.fromFileSystem(str(output_path))])
+                    yield await self._deliver_video(event, output_path)
                     downloaded = True
                     downloaded_url = url
                     break
@@ -469,7 +471,7 @@ class VideoCommand(Star):
         if ext == ".gif":
             yield event.chain_result([Image.fromFileSystem(str(output_path))])
         else:
-            yield event.chain_result([Video.fromFileSystem(str(output_path))])
+            yield await self._deliver_video(event, output_path)
         event.stop_event()
 
     @filter.after_message_sent(priority=-1000)

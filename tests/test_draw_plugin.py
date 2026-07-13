@@ -172,6 +172,34 @@ class DrawPluginTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_group_draw_delivery_uses_onebot_group_file_upload(self):
+        class Bot:
+            def __init__(self):
+                self.calls = []
+
+            async def call_action(self, action, **kwargs):
+                self.calls.append((action, kwargs))
+
+        class Event:
+            def __init__(self):
+                self.bot = Bot()
+
+            def get_group_id(self):
+                return "945598390"
+
+            def plain_result(self, text):
+                return text
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "draw.png"
+            path.write_bytes(b"image")
+            event = Event()
+            plugin = DrawCommand.__new__(DrawCommand)
+            reply = asyncio.run(plugin._deliver_image(event, path))
+            self.assertIn("图片已上传到群文件", reply)
+            self.assertEqual(event.bot.calls[0][0], "upload_group_file")
+            self.assertEqual(event.bot.calls[0][1]["file"], str(path.resolve()))
+
     def test_generated_image_is_sanitized_to_private_png_and_cleanup_keeps_outside_file(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:

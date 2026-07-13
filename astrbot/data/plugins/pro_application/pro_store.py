@@ -67,6 +67,7 @@ MAX_CODE_ATTEMPTS = 3
 DEFAULT_PRO_DAYS = 90
 MIN_PRO_DAYS = 1
 MAX_PRO_DAYS = 365
+MAX_DIRECT_PRO_DAYS = 520
 
 
 class ProStoreError(ValueError):
@@ -775,7 +776,7 @@ class ProStore:
             raise ProStoreError("tier_invalid")
         duration = OWNER_PRO_DAYS if permanent else int(days)
         max_d = OWNER_PRO_DAYS if permanent else (
-            self.GO_MAX_DAYS if tier == "go" else MAX_PRO_DAYS
+            self.GO_MAX_DAYS if tier == "go" else MAX_DIRECT_PRO_DAYS
         )
         min_d = 1
         if not min_d <= duration <= max_d:

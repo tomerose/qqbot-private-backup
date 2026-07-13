@@ -141,6 +141,12 @@ class ProStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ProStoreError, "duration_invalid"):
             self.store.request_approval(application.application_id, REVIEWER, 366, now=1_003)
 
+    def test_direct_pro_grant_allows_the_configured_520_day_ceiling(self):
+        self.store.grant(APPLICANT, REVIEWER, 520, now=1_000, tier="pro")
+        self.assertTrue(self.store.is_active_pro(APPLICANT, now=1_000 + 519 * 86400))
+        with self.assertRaisesRegex(ProStoreError, "duration_invalid"):
+            self.store.grant("3000000000", REVIEWER, 521, now=1_000, tier="pro")
+
     def test_status_only_returns_the_callers_latest_application(self):
         application = self.store.create_application(APPLICANT, now=1_000)
 
