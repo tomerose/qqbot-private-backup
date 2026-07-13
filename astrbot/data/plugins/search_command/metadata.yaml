@@ -1,0 +1,6 @@
+name: search_command
+display_name: Google搜索
+short_desc: /search + 自然语言 → Google实时搜索/Maps/代码执行
+desc: 基于Gemini Search Grounding，支持全网搜索、Google Maps地点查询、Python代码执行。无Pro限制，免费使用。
+version: v1.0.0
+author: lemon

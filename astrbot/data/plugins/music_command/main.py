@@ -28,9 +28,10 @@ _MUSIC_COMMAND = re.compile(r"^\s*(?:/music|/网易云|网易云音乐)\s+(.+?)\
 _SING_COMMAND = re.compile(r"^\s*/sing\s+(.+?)\s*$", re.I)
 MUSIC_MEMORY = (
     "\u3010\u97f3\u4e50\u80fd\u529b\u3011\u4ec5\u5728\u7528\u6237\u660e\u786e\u8bf7\u6c42\u65f6\u8bf4\u660e\u6216\u5f15\u5bfc\u3002"
+    "\u7528\u6237\u8bf4\u201c\u70b9\u6b4c/\u641c\u6b4c/\u653e\u6b4c/\u6765\u4e00\u9996 + \u6b4c\u540d\u201d\u65f6\uff0c\u81ea\u52a8\u641c\u7d22\u7f51\u6613\u4e91\u97f3\u4e50\u5e76\u53d1\u9001\u97f3\u4e50\u5361\u3002"
     "\u7528\u6237\u8bf4\u201c\u53d1\u9001/\u5206\u4eab\u7f51\u6613\u4e91\u97f3\u4e50 + \u6b4c\u66f2 ID \u6216\u5206\u4eab\u94fe\u63a5\u201d\u65f6\uff0c\u53d1\u9001\u7f51\u6613\u4e91\u97f3\u4e50\u5361\uff0c\u4e0d\u4e0b\u8f7d\u6216\u8f6c\u53d1\u7248\u6743\u97f3\u9891\u3002"
     "\u7528\u6237\u660e\u786e\u8bf4\u201c\u5531/\u5199/\u521b\u4f5c/\u751f\u6210\u4e00\u9996\u539f\u521b\u6b4c\u201d\u65f6\uff0c\u624d\u89e6\u53d1 Pro \u539f\u521b\u6b4c\u66f2\uff0c\u6bcf\u65e5 1 \u9996\u3002"
-    "\u201c\u627e\u6b4c\u3001\u63a8\u8350\u3001\u64ad\u653e\u67d0\u9996\u6b4c\u3001\u5531\u67d0\u4e2a\u6b4c\u624b\u6216\u5df2\u6709\u6b4c\u66f2\u201d\u4e0d\u89e6\u53d1\u6b4c\u66f2\u751f\u6210\uff1b\u9700\u6e05\u695a\u544a\u77e5\u4ec5\u652f\u6301\u7f51\u6613\u4e91\u97f3\u4e50\u5361\uff08\u9700 ID/\u94fe\u63a5\uff09\u6216\u539f\u521b\u6b4c\u66f2\u3002"
+    "\u201c\u627e\u6b4c\u3001\u63a8\u8350\u3001\u64ad\u653e\u67d0\u9996\u6b4c\u3001\u5531\u67d0\u4e2a\u6b4c\u624b\u6216\u5df2\u6709\u6b4c\u66f2\u201d\u4e0d\u89e6\u53d1\u6b4c\u66f2\u751f\u6210\uff1b\u9700\u6e05\u695a\u544a\u77e5\u4ec5\u652f\u6301\u7f51\u6613\u4e91\u97f3\u4e50\u5361\uff08\u53ef\u641c\u6b4c\u540d\uff09\u6216\u539f\u521b\u6b4c\u66f2\u3002"
 )
 _NATURAL_NETEASE_COMMAND = re.compile(
     r"^\s*(?:\u5c0f\u67e0[\uff0c,\uff1a:\s]*)?(?:(?:\u5e2e\u6211|\u7ed9\u6211|\u8bf7)[\uff0c,\uff1a:\s]*)?"
@@ -43,6 +44,15 @@ _NATURAL_ORIGINAL_SONG = re.compile(
     r"(?P<prompt>(?=[^\n]*\u539f\u521b)(?=[^\n]*(?:\u6b4c\u66f2|\u97f3\u4e50|\u6b4c)).+?)\s*$",
     re.I,
 )
+_SONG_SEARCH_COMMAND = re.compile(
+    r"^\s*(?:\u5c0f\u67e0[\uff0c,\uff1a:\s]*)?(?:(?:\u5e2e\u6211|\u7ed9\u6211|\u8bf7)[\uff0c,\uff1a:\s]*)?"
+    r"(?:\u70b9(?:\u9996|\u4e2a|\u4e00\u9996)?\u6b4c|\u641c\u6b4c|\u653e(?:\u9996|\u4e2a|\u4e00\u9996)?\u6b4c|"
+    r"\u6765(?:\u9996|\u4e2a|\u4e00\u9996)?(?:\u6b4c|\u97f3\u4e50)|\u542c(?:\u9996|\u4e2a|\u4e00\u9996)?\u6b4c|"
+    r"\u64ad\u653e(?:\u9996|\u4e2a|\u4e00\u9996)?)"
+    r"(?:\u6b4c\u66f2|\u97f3\u4e50|\u6b4c)?\s*(?P<query>.+?)\s*$",
+    re.I,
+)
+_NETEASE_SEARCH_URL = "https://music.163.com/api/search/get"
 
 
 def parse_netease_song_id(text: str) -> str | None:
@@ -72,6 +82,43 @@ def parse_original_song_prompt(text: str) -> str | None:
         return command_match.group(1).strip()
     natural_match = _NATURAL_ORIGINAL_SONG.match(value_text)
     return natural_match.group("prompt").strip() if natural_match else None
+
+
+def parse_song_search(text: str) -> str | None:
+    value_text = str(text or "")
+    match = _SONG_SEARCH_COMMAND.match(value_text)
+    return match.group("query").strip() if match else None
+
+
+def _search_netease_song(query: str) -> dict | None:
+    """Return the first NetEase result without asking an LLM to invent a song id."""
+    try:
+        response = requests.get(
+            _NETEASE_SEARCH_URL,
+            params={"s": query, "type": 1, "limit": 5, "offset": 0},
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://music.163.com/",
+            },
+            timeout=(5, 15),
+        )
+        response.raise_for_status()
+        songs = (response.json().get("result") or {}).get("songs") or []
+        song = next((item for item in songs if isinstance(item, dict) and str(item.get("id", "")).isdigit()), None)
+        if song is None:
+            return None
+        artists = song.get("artists") or []
+        return {
+            "song_id": str(song["id"]),
+            "title": str(song.get("name") or query),
+            "artist": "/".join(
+                str(artist.get("name")) for artist in artists
+                if isinstance(artist, dict) and artist.get("name")
+            ),
+        }
+    except (requests.RequestException, ValueError, TypeError):
+        logger.debug("[MusicCmd] song search failed for: %s", repr(query))
+    return None
 
 
 def netease_music_card(song_id: str) -> Music:
@@ -155,10 +202,26 @@ class MusicCommand(Star):
         text = str(getattr(event, "get_message_str", lambda: "")() or "")
         song_id = parse_netease_song_id(text)
         song_prompt = parse_original_song_prompt(text)
-        if song_id is None and song_prompt is None:
+        song_query = parse_song_search(text)
+        if song_id is None and song_prompt is None and song_query is None:
             return
         if not (event.is_private_chat() or event.is_at_or_wake_command):
             return
+        # --- song name search -> native NetEase card ---
+        if song_query:
+            yield event.plain_result(f"正在搜索歌曲「{song_query}」…")
+            result = await asyncio.to_thread(_search_netease_song, song_query)
+            if result and result.get("song_id", "").isdigit():
+                sid = result["song_id"]
+                title = result.get("title", song_query)
+                artist = result.get("artist", "")
+                yield event.plain_result(f"已找到：{title}" + (f" — {artist}" if artist else ""))
+                yield event.chain_result([netease_music_card(sid)])
+            else:
+                yield event.plain_result(f'未找到歌曲「{song_query}」，请尝试提供网易云歌曲ID或分享链接。')
+            event.stop_event()
+            return
+        # --- NetEase music card ---
         if song_id is not None:
             if not song_id:
                 yield event.plain_result("请发送网易云歌曲 ID 或歌曲分享链接，例如：/music 123456")
@@ -179,7 +242,7 @@ class MusicCommand(Star):
             return
         usage_key = f"{sender_id}:{time.strftime('%Y%m%d')}"
         if self._daily_usage.get(usage_key, 0) >= SONG_DAILY_LIMIT:
-            yield event.plain_result("今日原创歌曲生成次数已用完（1/1）。")
+            yield event.plain_result(f"今日原创歌曲生成次数已用完（{SONG_DAILY_LIMIT}/{SONG_DAILY_LIMIT}）。")
             event.stop_event()
             return
         yield event.plain_result("原创歌曲生成中，约需 1-3 分钟，请稍候。")

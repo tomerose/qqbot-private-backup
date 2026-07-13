@@ -5,6 +5,8 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 _PROJ_ROOT = Path(__file__).resolve().parents[1]
 os.environ["ASTRBOT_ROOT"] = str(_PROJ_ROOT / "astrbot")
@@ -211,6 +213,30 @@ class VoiceModelPluginTests(unittest.TestCase):
             )
             await plugin.route_voice_request(event)
             self.assertIsNone(event.get_extra("voice_reply_requested"))
+
+        asyncio.run(scenario())
+
+    def test_qq_ai_voice_uses_the_real_group_and_removes_duplicate_text(self):
+        async def scenario():
+            action = AsyncMock(side_effect=[
+                [{"type": "推荐", "characters": [{"character_id": "1001", "character_name": "小柠"}]}],
+                {"message_id": "456"},
+            ])
+            plugin = VoiceModelRouter.__new__(VoiceModelRouter)
+            plugin._ai_characters_by_group = {}
+            plugin.tts_client = None
+            result = FakeResult([Plain("语音内容")])
+            event = FakeEvent("请发语音", private=False, wake=True, result=result)
+            event.bot = SimpleNamespace(call_action=action)
+            event.get_group_id = lambda: "1075963106"
+            event.set_extra("voice_reply_requested", True)
+
+            await plugin.synthesize_voice_reply(event)
+
+            self.assertEqual(result.chain, [])
+            self.assertTrue(event.get_extra("_qq_ai_voice_sent"))
+            self.assertEqual(action.await_args_list[0].kwargs["group_id"], "1075963106")
+            self.assertEqual(action.await_args_list[1].args[0], "send_group_ai_record")
 
         asyncio.run(scenario())
 

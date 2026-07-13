@@ -1,7 +1,7 @@
 """Unified tier-based membership lookups. Replaces binary is_active_pro checks.
 
 Tier flow: ORDINARY < GO < PRO. Each tier inherits all lower-tier capabilities.
-GO: owner-granted, time-limited (≤90 days), Agent 1x/week, Draw 6x/week.
+Ordinary and GO: Draw 6x/week. GO additionally has Agent 1x/week.
 PRO: owner-granted, time-limited (direct grants ≤520 days), no artificial caps.
 """
 

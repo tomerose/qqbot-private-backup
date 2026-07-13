@@ -1,6 +1,6 @@
 name: draw_command
 display_name: AI 作图
-short_desc: Pro /draw 命令作图
-desc: 仅 Pro 可用；通过本机 Vertex Gemini 代理生成，图片会在发送后清理
-version: v2.0.0
+short_desc: /draw 命令作图
+desc: 普通版和 GO 每周 6 次，Pro 每日 10 次；通过本机 Vertex Gemini 代理生成，图片会在发送后清理
+version: v2.1.0
 author: lemon

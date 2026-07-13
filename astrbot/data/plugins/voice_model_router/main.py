@@ -62,6 +62,49 @@ class VoiceModelRouter(Star):
                     token,
                     audio_root,
                 )
+        self._ai_characters_by_group: dict[str, list[dict]] = {}
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=985)
+    async def handle_voice_commands(self, event: AstrMessageEvent):
+        """List QQ AI voices for the current group."""
+        text = str(getattr(event, "get_message_str", lambda: "")() or "").strip()
+        if not (event.is_private_chat() or event.is_at_or_wake_command):
+            return
+        if text == "/voicelist":
+            characters = await self._fetch_ai_characters(event)
+            if characters:
+                lines = ["可用 QQ AI 语音角色:"]
+                for cat in characters[:3]:
+                    ctype = cat.get("type", "未知")
+                    for ch in cat.get("characters", [])[:5]:
+                        lines.append(f"  {ch.get('character_name', '?')} ({ch.get('character_id', '?')})")
+                lines.append("群聊语音回复将使用第一个可用角色。")
+                yield event.plain_result("\n".join(lines))
+            else:
+                yield event.plain_result("请在群聊中使用 /voicelist；没有可用角色时会自动使用本地语音。")
+            event.stop_event()
+
+    async def _fetch_ai_characters(self, event: AstrMessageEvent) -> list[dict]:
+        group_id = str(getattr(event, "get_group_id", lambda: "")() or "").strip()
+        if not group_id:
+            return []
+        cache = getattr(self, "_ai_characters_by_group", {})
+        if group_id in cache:
+            return cache[group_id]
+        try:
+            bot = getattr(event, "bot", None)
+            call_action = getattr(bot, "call_action", None) if bot else None
+            if callable(call_action):
+                result = await call_action(
+                    "get_ai_characters", group_id=group_id, chat_type=2
+                )
+                if isinstance(result, list):
+                    cache[group_id] = result
+                    self._ai_characters_by_group = cache
+                    return result
+        except Exception:
+            logger.debug("[Voice] get_ai_characters failed")
+        return []
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=1000)
     async def route_voice_request(self, event: AstrMessageEvent) -> None:
@@ -93,16 +136,10 @@ class VoiceModelRouter(Star):
 
     @filter.on_decorating_result(priority=-10000)
     async def synthesize_voice_reply(self, event: AstrMessageEvent) -> None:
-        client = getattr(self, "tts_client", None)
-        if client is None:
-            return
-        transcript = str(
-            event.get_extra("_gemini_stt_transcript", "")
-            or event.get_extra("_gemini_stt_raw_text", "")
-            or ""
-        )
         requested = bool(event.get_extra("voice_reply_requested", False)) or wants_voice_reply(
-            transcript
+            str(event.get_extra("_gemini_stt_transcript", "")
+                or event.get_extra("_gemini_stt_raw_text", "")
+                or "")
         )
         if not requested:
             return
@@ -121,6 +158,19 @@ class VoiceModelRouter(Star):
         if not plain_text or plain_text.startswith(
             ("已启动", "检测到高风险", "确认码", "当前没有可取消", "任务队列已满")
         ) or ("已排队" in plain_text and plain_text.startswith("任务 ")):
+            return
+
+        # Try QQ AI voice for group chats (lighter weight, sounds natural)
+        group_id = str(getattr(event, "get_group_id", lambda: "")() or "").strip()
+        if group_id:
+            sent = await self._send_qq_ai_voice(event, group_id, plain_text)
+            if sent:
+                event.set_extra("_qq_ai_voice_sent", True)
+                result.chain = [component for component in components if not isinstance(component, Plain)]
+                return
+
+        client = getattr(self, "tts_client", None)
+        if client is None:
             return
         chunks = prepare_spoken_chunks(plain_text)
         if not chunks:
@@ -188,3 +238,38 @@ class VoiceModelRouter(Star):
             pass
         logger.info("[VoiceRouter] Falling back to Gemini proxy for voice")
         return 'gemini-2.5-flash'
+
+    async def _send_qq_ai_voice(self, event: AstrMessageEvent, group_id: str, text: str) -> bool:
+        """Try QQ AI voice for group chat. Returns True if sent successfully."""
+        characters = await self._fetch_ai_characters(event)
+        if not characters:
+            return False
+        # Pick first available character
+        char_id = None
+        for cat in characters:
+            for ch in cat.get("characters", []):
+                char_id = ch.get("character_id")
+                if char_id:
+                    break
+            if char_id:
+                break
+        if not char_id:
+            return False
+        text_clean = str(text or "").strip()
+        if len(text_clean) > 200:
+            text_clean = text_clean[:197] + "..."
+        try:
+            bot = getattr(event, "bot", None)
+            call_action = getattr(bot, "call_action", None) if bot else None
+            if callable(call_action):
+                await call_action(
+                    "send_group_ai_record",
+                    group_id=group_id,
+                    character=str(char_id),
+                    text=text_clean,
+                )
+                logger.debug("[Voice] QQ AI voice sent: %s chars to group %s", len(text_clean), group_id)
+                return True
+        except Exception:
+            logger.debug("[Voice] QQ AI voice failed, falling back to local TTS")
+        return False

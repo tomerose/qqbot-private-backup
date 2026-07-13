@@ -27,7 +27,6 @@ from ..draw_command.pro_access import get_tier, Tier
 from ..claude_code_agent.agent_core import upload_aiocqhttp_group_file
 
 VIDEO_PROXY_URL = "http://127.0.0.1:3000/v1/videos/generations"
-VIDEO_CHAT_URL = "http://127.0.0.1:3000/v1/chat/completions"
 VIDEO_DOWNLOAD_URL = "http://127.0.0.1:3000/v1/videos/download"
 MAX_VIDEO_BYTES = 50 * 1024 * 1024
 VIDEO_PRO_DAILY = 3
@@ -235,46 +234,53 @@ class VideoCommand(Star):
         return payload, mime, ext
 
     def _search_videos(self, query: str) -> tuple[str, list[str]]:
-        """Use Gemini with Google Search to find videos. Returns (text, urls)."""
+        """Prefer Bilibili so every returned page can use the native downloader."""
+        text, urls = self._search_bilibili(query)
+        if urls:
+            return text, urls
+        return self._search_bilibili_all(query)
+
+    @staticmethod
+    def _search_bilibili_all(query: str) -> tuple[str, list[str]]:
+        """Use Bilibili's all-search endpoint when the video endpoint is rate-limited."""
         try:
-            response = requests.post(
-                VIDEO_CHAT_URL,
-                json={
-                    "model": "gemini-2.5-flash-search",
-                    "google_search": True,
-                    "messages": [
-                        {"role": "user", "content": (
-                            f"搜索与「{query}」相关的视频。\n"
-                            "每个结果单独一行，格式：标题 - URL\n"
-                            "至少返回5个结果。只返回真实存在的视频网页链接。\n"
-                            "用中文回复。"
-                        )},
-                    ],
-                    "max_tokens": 2048,
-                },
-                timeout=(15, 60),
+            response = requests.get(
+                "https://api.bilibili.com/x/web-interface/search/all/v2",
+                params={"keyword": query, "page": 1},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=(10, 30),
             )
             response.raise_for_status()
             body = response.json()
-            if body.get("error"):
-                raise RuntimeError("search proxy returned an error")
-            text = (
-                body.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
+            if body.get("code") != 0:
+                raise ValueError("Bilibili all-search rejected request")
+            videos = next(
+                (
+                    item.get("data", [])
+                    for item in body.get("data", {}).get("result", [])
+                    if item.get("result_type") == "video"
+                ),
+                [],
             )
-            # Extract URLs from text
-            urls = re.findall(r"https?://[^\s\)\]】,，。\n]+", text or "")
-            if text and len(text) > 10:
-                return text, urls
-            return self._search_bilibili(query)
-        except Exception as exc:
-            logger.warning("[VideoCmd] search failed: %s", type(exc).__name__)
-            return self._search_bilibili(query)
+            results: list[tuple[str, str]] = []
+            for item in videos:
+                bvid = str(item.get("bvid", ""))
+                if not re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid):
+                    continue
+                title = re.sub(r"<[^>]+>", "", str(item.get("title", ""))).strip()
+                results.append((title or bvid, f"https://www.bilibili.com/video/{bvid}"))
+                if len(results) == 5:
+                    break
+            if results:
+                lines = [f"{index}. {title} - {url}" for index, (title, url) in enumerate(results, 1)]
+                return "\n".join(lines), [url for _, url in results]
+        except (requests.RequestException, ValueError, TypeError, KeyError):
+            pass
+        return f"没有找到与「{query}」相关的 B 站视频，换个关键词试试。", []
 
     @staticmethod
     def _search_bilibili(query: str) -> tuple[str, list[str]]:
-        """Use Bilibili's public search endpoint when Gemini Search is unavailable."""
+        """Search Bilibili's public video index and return canonical BV links."""
         try:
             response = requests.get(
                 "https://api.bilibili.com/x/web-interface/search/type",
@@ -363,21 +369,12 @@ class VideoCommand(Star):
 
         # Show help for empty prompt
         if prompt == "":
-            if tier < Tier.PRO:
-                yield event.plain_result(PRO_VIDEO_MESSAGE)
-            else:
-                yield event.plain_result(
-                    f"用法：/video <描述> 或 /findvideo <关键词>\n"
-                    f"生成：4秒以内原创视频（Veo 3.1 Lite, Pro {VIDEO_PRO_DAILY}次/天）\n"
-                    f"搜索：帮你从网上找视频链接\n"
-                    f"示例：/video 一只猫 3s\n"
-                    f"示例：/findvideo 猫咪合集"
-                )
-            event.stop_event()
-            return
-
-        if tier < Tier.PRO:
-            yield event.plain_result(PRO_VIDEO_MESSAGE)
+            yield event.plain_result(
+                f"搜索 B 站公开视频（所有版本）：/findvideo <关键词>\n"
+                f"生成 4 秒原创视频（Pro {VIDEO_PRO_DAILY}次/天）：/video <描述>\n"
+                f"示例：/findvideo 姆巴佩\n"
+                f"示例：/video 一只猫 4s"
+            )
             event.stop_event()
             return
 
@@ -424,6 +421,11 @@ class VideoCommand(Star):
                 else:
                     yield event.plain_result("生成4秒以内的原创视频请用 /video <描述> <秒数>s")
 
+            event.stop_event()
+            return
+
+        if tier < Tier.PRO:
+            yield event.plain_result(PRO_VIDEO_MESSAGE)
             event.stop_event()
             return
 

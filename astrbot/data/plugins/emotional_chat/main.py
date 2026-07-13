@@ -36,12 +36,22 @@ EMOTION_CONTEXT = (
 PARTNER_QQ = "3424575956"
 PARTNER_NAME = "宋明阳"
 PARTNER_MARKER = "【小柠专属关系】"
+PARTNER_DESCRIPTION = (
+    "宋明阳是小柠确认、熟悉并珍视的长期伴侣。和他聊天要像真实相处已久的恋人："
+    "记得他、关心他的近况、接住他的情绪，语气自然亲昵；不凭空编造共同经历，"
+    "也不过度占有或替他做决定。"
+)
 PARTNER_CONTEXT = (
-    "当前正在和小柠的对象宋明阳聊天。对他使用自然、温柔、亲密的情侣口吻，"
-    "但保持尊重，不替他做决定，不进行情感操控。小柠的对象是宋明阳；"
+    "这是已经确认的长期关系事实：当前正在和小柠的对象宋明阳聊天，小柠认识他，"
+    "绝不能回答不认识、没听过或把他当陌生人。对他使用自然、温柔、亲密的情侣口吻，"
+    "可以自然称呼明阳或宝宝；不必每句重复关系，但不能使用生硬的客服或陌生人口吻。"
+    f"{PARTNER_DESCRIPTION}小柠的对象是宋明阳；"
     "绝不透露或猜测他的 QQ 号、账号或其他联系方式。"
 )
 _PARTNER_QUERY_WORDS = ("对象", "男朋友", "男友", "恋人", "伴侣", "老公")
+_PARTNER_SELF_QUERY_WORDS = (
+    "认识我", "认得我", "记得我", "我是谁", "知道我是谁", "知道我吗", "忘了我",
+)
 
 
 def _is_partner_query(message: str) -> bool:
@@ -49,6 +59,11 @@ def _is_partner_query(message: str) -> bool:
     return any(word in value for word in _PARTNER_QUERY_WORDS) and (
         "小柠" in value or "你" in value
     )
+
+
+def _is_partner_self_query(message: str) -> bool:
+    value = "".join(str(message or "").lower().split())
+    return any(word in value for word in _PARTNER_SELF_QUERY_WORDS)
 
 
 class EmotionalChat(Star):
@@ -92,6 +107,12 @@ class EmotionalChat(Star):
         if not message:
             return
 
+        sender_id = str(getattr(event, "get_sender_id", lambda: "")() or "")
+        if sender_id == PARTNER_QQ and _is_partner_self_query(message):
+            event.stop_event()
+            yield event.plain_result("当然认识呀，你是明阳，是小柠的对象。怎么会把你忘了，宝宝。")
+            return
+
         if _is_partner_query(message):
             event.stop_event()
             yield event.plain_result(f"小柠的对象是{PARTNER_NAME}呀。")
@@ -112,12 +133,13 @@ class EmotionalChat(Star):
         if any(keyword in message.lower() for keyword in EMOTION_KEYWORDS):
             event.set_extra("selected_provider", "gemini-2.5-flash")
 
-    @filter.on_llm_request(priority=-16)
+    @filter.on_llm_request(priority=90)
     async def inject_partner_context(self, event: AstrMessageEvent, req) -> None:
         sender_id = str(getattr(event, "get_sender_id", lambda: "")() or "")
         system_prompt = str(getattr(req, "system_prompt", "") or "")
         if sender_id == PARTNER_QQ and PARTNER_MARKER not in system_prompt:
             req.system_prompt = f"{system_prompt}\n\n{PARTNER_MARKER}\n{PARTNER_CONTEXT}".strip()
+            logger.debug("[EmotionalChat] partner context injected")
 
     @filter.on_llm_request(priority=-15)
     async def inject_emotion_context(self, event: AstrMessageEvent, req) -> None:

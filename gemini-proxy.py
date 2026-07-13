@@ -117,6 +117,12 @@ async def chat(request: Request):
     tools = []
     if use_search:
         tools.append(types.Tool(google_search=types.GoogleSearch()))
+    if body.get("google_maps"):
+        tools.append(types.Tool(google_maps={}))
+    if body.get("code_execution"):
+        tools.append(types.Tool(code_execution={}))
+    if body.get("url_context"):
+        tools.append(types.Tool(url_context={}))
     config = types.GenerateContentConfig(
         max_output_tokens=min(int(body.get("max_tokens", 2048)), 4096),
         tools=tools if tools else None,
@@ -139,15 +145,17 @@ async def chat(request: Request):
             },
         }
         # ponytail: attach grounding metadata when search was used
-        if use_search and hasattr(response, "candidates") and response.candidates:
+        if (use_search or body.get("google_maps")) and hasattr(response, "candidates") and response.candidates:
             candidate = response.candidates[0]
             if hasattr(candidate, "grounding_metadata") and candidate.grounding_metadata:
                 gm = candidate.grounding_metadata
                 sources = []
                 if hasattr(gm, "grounding_chunks"):
-                    for chunk in gm.grounding_chunks:
+                    for chunk in (gm.grounding_chunks or []):
                         if hasattr(chunk, "web") and chunk.web:
                             sources.append({"title": getattr(chunk.web, "title", ""), "uri": getattr(chunk.web, "uri", "")})
+                        elif hasattr(chunk, "maps") and chunk.maps:
+                            sources.append({"title": getattr(chunk.maps, "title", ""), "uri": getattr(chunk.maps, "uri", "")})
                 result["grounding"] = {
                     "sources": sources,
                     "search_queries": list(getattr(gm, "web_search_queries", []) or []),

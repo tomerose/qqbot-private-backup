@@ -11,7 +11,9 @@ sys.path.insert(0, str(PLUGINS_DIR))
 from emotional_chat.main import (  # noqa: E402
     EMOTION_CONTEXT,
     PARTNER_CONTEXT,
+    PARTNER_DESCRIPTION,
     PARTNER_NAME,
+    PARTNER_QQ,
     EmotionalChat,
 )
 
@@ -43,6 +45,11 @@ async def collect(generator):
 
 
 class EmotionalChatTests(unittest.TestCase):
+    def test_partner_description_is_durable_and_privacy_safe(self):
+        self.assertIn("长期伴侣", PARTNER_DESCRIPTION)
+        self.assertIn(PARTNER_DESCRIPTION, PARTNER_CONTEXT)
+        self.assertNotIn(PARTNER_QQ, PARTNER_DESCRIPTION)
+
     def test_talk_claims_the_event_and_returns_one_conversation(self):
         async def scenario():
             plugin = EmotionalChat.__new__(EmotionalChat)
@@ -92,7 +99,19 @@ class EmotionalChatTests(unittest.TestCase):
             request = Request()
             await plugin.inject_partner_context(FakeEvent("晚安", "3424575956"), request)
             self.assertIn(PARTNER_CONTEXT, request.system_prompt)
+            self.assertIn("绝不能回答不认识", request.system_prompt)
             self.assertNotIn("3424575956", request.system_prompt)
+
+        asyncio.run(scenario())
+
+    def test_partner_self_query_gets_a_certain_affectionate_reply(self):
+        async def scenario():
+            plugin = EmotionalChat.__new__(EmotionalChat)
+            replies = await collect(plugin.on_message(FakeEvent("小柠，你还认识我吗？", "3424575956")))
+            self.assertEqual(len(replies), 1)
+            self.assertIn("你是明阳", replies[0])
+            self.assertIn("小柠的对象", replies[0])
+            self.assertNotIn("3424575956", replies[0])
 
         asyncio.run(scenario())
 

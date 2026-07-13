@@ -14,7 +14,7 @@ PLUGINS_DIR = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugin
 sys.path.insert(0, str(PLUGINS_DIR))
 
 from draw_command.draw_core import DrawRateLimiter, parse_draw_command  # noqa: E402
-from draw_command.main import DrawCommand  # noqa: E402
+from draw_command.main import DRAW_MEMORY, DrawCommand  # noqa: E402
 from draw_command.pro_client import ProClient  # noqa: E402
 from draw_command import main as draw_main  # noqa: E402
 from pro_application.pro_store import ProStore  # noqa: E402
@@ -85,6 +85,20 @@ class DrawPluginTests(unittest.TestCase):
         self.assertIsNone(parse_draw_command("帮我生成一份 Word 报告"))
         self.assertEqual(parse_draw_command("生成图片"), "一张适合分享的高质量图片")
 
+    def test_draw_memory_exposes_the_same_limit_to_ordinary_and_go(self):
+        class Request:
+            system_prompt = "原始人设"
+
+        async def scenario():
+            plugin = DrawCommand.__new__(DrawCommand)
+            request = Request()
+            await plugin.inject_draw_memory(object(), request)
+            await plugin.inject_draw_memory(object(), request)
+            self.assertIn(DRAW_MEMORY, request.system_prompt)
+            self.assertEqual(request.system_prompt.count("【作图能力】"), 1)
+
+        asyncio.run(scenario())
+
     @staticmethod
     def build_plugin(output_root: Path) -> DrawCommand:
         plugin = DrawCommand.__new__(DrawCommand)
@@ -129,7 +143,7 @@ class DrawPluginTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_revoked_dynamic_pro_member_cannot_draw(self):
+    def test_revoked_member_falls_back_to_ordinary_draw_allowance(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp) / "draws"
@@ -137,25 +151,48 @@ class DrawPluginTests(unittest.TestCase):
                 self.activate_pro(plugin._pro_db_path, "2000000000")
                 store = ProStore(plugin._pro_db_path, reviewer_id="1211000567")
                 self.assertTrue(store.revoke("2000000000", "1211000567", now=time.time()))
-                plugin._request_image = lambda _prompt: self.fail("proxy should not run")
+                image = PillowImage.new("RGB", (2, 2), "blue")
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                plugin._request_image = lambda _prompt: buffer.getvalue()
 
                 replies = await collect(plugin.on_message(FakeEvent("/draw a cat", "2000000000")))
 
-                self.assertEqual(replies, [("plain", "作图是 Pro/GO 功能。发送 /pro status 查看资格，或联系管理员开通")])
+                self.assertEqual(replies[0], ("plain", "我开始画了，预计 30–90 秒。"))
+                self.assertEqual(replies[-1][0], "chain")
 
         asyncio.run(scenario())
 
-    def test_non_pro_draw_request_is_stopped_without_calling_proxy(self):
+    def test_ordinary_user_can_draw_with_the_go_weekly_allowance(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self.build_plugin(Path(tmp))
-                plugin._request_image = lambda _prompt: self.fail("proxy should not run")
+                image = PillowImage.new("RGB", (2, 2), "green")
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                plugin._request_image = lambda _prompt: buffer.getvalue()
                 event = FakeEvent("/draw a cat", "2000000000")
 
                 replies = await collect(plugin.on_message(event))
 
                 self.assertTrue(event.stopped)
-                self.assertEqual(replies, [("plain", "作图是 Pro/GO 功能。发送 /pro status 查看资格，或联系管理员开通")])
+                self.assertEqual(replies[0], ("plain", "我开始画了，预计 30–90 秒。"))
+                self.assertEqual(replies[-1][0], "chain")
+
+        asyncio.run(scenario())
+
+    def test_ordinary_user_uses_the_same_weekly_cap_as_go(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self.build_plugin(Path(tmp))
+                sender = "2000000000"
+                year, week_num = time.strftime("%Y"), time.strftime("%W")
+                plugin._daily_usage[f"{sender}:{year}:{week_num}"] = 6
+                plugin._request_image = lambda _prompt: self.fail("quota should stop before proxy")
+
+                replies = await collect(plugin.on_message(FakeEvent("/draw a cat", sender)))
+
+                self.assertEqual(replies, [("plain", "本周作图已用 6/6 次。下周自动重置。")])
 
         asyncio.run(scenario())
 

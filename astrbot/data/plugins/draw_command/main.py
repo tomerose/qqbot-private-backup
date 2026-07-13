@@ -1,8 +1,4 @@
-"""Pro-only QQ drawing command — verified via HMAC-signed DB records only.
-
-No config-file bypass. No operator whitelist. All Pro access is verified
-through cryptographically signed memberships managed by the ProStore.
-"""
+"""QQ drawing command with a shared weekly limit for ordinary and GO users."""
 
 from __future__ import annotations
 
@@ -29,15 +25,17 @@ from .pro_access import get_tier, is_active_pro_group, Tier
 from .pro_client import ProClient
 
 
-PRO_DRAW_MESSAGE = "作图是 Pro/GO 功能。发送 /pro status 查看资格，或联系管理员开通"
 DRAW_PROXY_URL = "http://127.0.0.1:3000/v1/images/generations"
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_EDGE = 4096
 DRAW_PRO_DAILY = 10
-DRAW_FREE_DAILY = 1
 DRAW_GO_WEEKLY = 6
 DRAW_LIMIT_MSG = "作图次数已用完（今日 {used}/{limit}）。明天自动重置。"
-DRAW_GO_LIMIT_MSG = "GO 作图本周已用 {used}/{limit} 次。下周自动重置。"
+DRAW_GO_LIMIT_MSG = "本周作图已用 {used}/{limit} 次。下周自动重置。"
+DRAW_MEMORY = (
+    "【作图能力】普通用户和 GO 都可使用 /draw 或自然语言作图，每周 6 次；"
+    "Pro 每天 10 次。只在用户明确要求画图时触发，不承诺生成失败的结果。"
+)
 
 
 class DrawCommand(Star):
@@ -128,6 +126,12 @@ class DrawCommand(Star):
                 return event.plain_result("图片已生成，但上传到群文件失败，请稍后重试。")
         return event.chain_result([Image.fromFileSystem(str(path))])
 
+    @filter.on_llm_request(priority=-19)
+    async def inject_draw_memory(self, event: AstrMessageEvent, req) -> None:
+        system_prompt = str(getattr(req, "system_prompt", "") or "")
+        if "【作图能力】" not in system_prompt:
+            req.system_prompt = f"{system_prompt}\n\n{DRAW_MEMORY}".strip()
+
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=940)
     async def on_message(self, event: AstrMessageEvent):
         try:
@@ -143,18 +147,15 @@ class DrawCommand(Star):
         group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
         in_pro_group = bool(group_id) and is_active_pro_group(group_id, self._pro_db_path)
         tier = get_tier(sender_id, self._pro_db_path)
-        if tier < Tier.GO and not in_pro_group:
-            yield event.plain_result(PRO_DRAW_MESSAGE)
-            event.stop_event()
-            return
-        # ponytail: GO uses weekly limit, PRO/group uses daily
+        # Ordinary and GO share the same weekly drawing allowance.
+        # Pro members and activated Pro groups keep the higher daily allowance.
         today = time.strftime("%Y%m%d")
         dk = f"{sender_id}:{today}"
         year, week_num = time.strftime("%Y"), time.strftime("%W")
         wk = f"{sender_id}:{year}:{week_num}"
         go_used = self._daily_usage.get(wk, 0)
         used = self._daily_usage.get(dk, 0)
-        if tier == Tier.GO and not in_pro_group:
+        if tier < Tier.PRO and not in_pro_group:
             if go_used >= DRAW_GO_WEEKLY:
                 yield event.plain_result(DRAW_GO_LIMIT_MSG.format(used=go_used, limit=DRAW_GO_WEEKLY))
                 event.stop_event()
@@ -186,8 +187,7 @@ class DrawCommand(Star):
             event.stop_event()
             return
 
-        # ponytail: increment correct counter for tier
-        if tier == Tier.GO and not in_pro_group:
+        if tier < Tier.PRO and not in_pro_group:
             self._daily_usage[wk] = go_used + 1
         else:
             self._daily_usage[dk] = used + 1

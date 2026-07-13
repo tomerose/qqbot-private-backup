@@ -16,8 +16,10 @@ sys.path.insert(0, str(ROOT / "astrbot"))
 from data.plugins.music_command.main import (  # noqa: E402
     MUSIC_MEMORY,
     MusicCommand,
+    _search_netease_song,
     parse_netease_song_id,
     parse_original_song_prompt,
+    parse_song_search,
 )
 
 
@@ -60,6 +62,25 @@ class MusicCommandTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(parse_netease_song_id(text))
                 self.assertIsNone(parse_original_song_prompt(text))
+
+    def test_song_name_search_is_narrow_and_returns_a_real_netease_id(self):
+        self.assertEqual(parse_song_search("小柠，帮我点歌 稻香 周杰伦"), "稻香 周杰伦")
+        self.assertIsNone(parse_song_search("推荐一些适合学习的音乐"))
+
+        response = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "result": {
+                    "songs": [
+                        {"id": 123456, "name": "稻香", "artists": [{"name": "周杰伦"}]}
+                    ]
+                }
+            },
+        )
+        with patch("data.plugins.music_command.main.requests.get", return_value=response):
+            result = _search_netease_song("稻香 周杰伦")
+        self.assertEqual(result["song_id"], "123456")
+        self.assertEqual(result["artist"], "周杰伦")
 
     def test_music_memory_is_added_once_to_llm_requests(self):
         class Request:

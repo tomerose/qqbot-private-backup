@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import requests
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGINS_DIR = ROOT / "astrbot" / "data" / "plugins"
@@ -81,7 +83,7 @@ class VideoCommandTests(unittest.TestCase):
             plugin._search_videos = lambda query: ("https://example.com/mbappe", [])
             event = Event()
             event.stopped = False
-            with patch("data.plugins.video_command.main.get_tier", return_value=Tier.PRO):
+            with patch("data.plugins.video_command.main.get_tier", return_value=Tier.ORDINARY):
                 replies = [reply async for reply in plugin.on_message(event)]
             self.assertEqual(replies[0], "搜索视频中…")
             self.assertIn("https://example.com/mbappe", replies[1])
@@ -89,7 +91,7 @@ class VideoCommandTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_search_falls_back_to_bilibili_when_search_proxy_fails(self):
+    def test_search_returns_only_bilibili_links(self):
         class Response:
             def __init__(self, body):
                 self.body = body
@@ -103,10 +105,6 @@ class VideoCommandTests(unittest.TestCase):
         plugin = VideoCommand.__new__(VideoCommand)
         with (
             patch(
-                "data.plugins.video_command.main.requests.post",
-                return_value=Response({"error": {"message": "quota"}}),
-            ),
-            patch(
                 "data.plugins.video_command.main.requests.get",
                 return_value=Response(
                     {"data": {"result": [{"bvid": "BV1test", "title": "<em>姆巴佩</em> 集锦"}]}}
@@ -116,6 +114,72 @@ class VideoCommandTests(unittest.TestCase):
             text, urls = plugin._search_videos("姆巴佩")
         self.assertIn("姆巴佩 集锦", text)
         self.assertEqual(urls, ["https://www.bilibili.com/video/BV1test"])
+
+    def test_bilibili_412_falls_back_to_all_search_with_verified_bv_links(self):
+        class Response:
+            def __init__(self, body=None, status_code=200):
+                self.body = body or {}
+                self.status_code = status_code
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise requests.HTTPError(str(self.status_code))
+
+            def json(self):
+                return self.body
+
+        plugin = VideoCommand.__new__(VideoCommand)
+        with patch(
+            "data.plugins.video_command.main.requests.get",
+            side_effect=[
+                Response({"code": -412}, 412),
+                Response(
+                    {
+                        "code": 0,
+                        "data": {
+                            "result": [
+                                {
+                                    "result_type": "video",
+                                    "data": [
+                                        {"bvid": "BV19g4y1G7uK", "title": "<em>姆巴佩</em> 集锦"},
+                                        {"bvid": "invalid", "title": "should be ignored"},
+                                    ],
+                                }
+                            ]
+                        },
+                    }
+                ),
+            ],
+        ):
+            text, urls = plugin._search_videos("姆巴佩踢球")
+        self.assertIn("姆巴佩 集锦", text)
+        self.assertEqual(urls, ["https://www.bilibili.com/video/BV19g4y1G7uK"])
+
+    def test_all_search_rejects_unverified_bv_text(self):
+        class Response:
+            def __init__(self, body=None, *, status_code=200):
+                self.body = body or {}
+                self.status_code = status_code
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise requests.HTTPError(str(self.status_code))
+
+            def json(self):
+                return self.body
+
+        plugin = VideoCommand.__new__(VideoCommand)
+        with patch(
+            "data.plugins.video_command.main.requests.get",
+            return_value=Response(
+                {
+                    "code": 0,
+                    "data": {"result": [{"result_type": "video", "data": [{"bvid": "BVLSWZN8Ar35M2s"}]}]},
+                }
+            ),
+        ):
+            _, urls = plugin._search_bilibili_all("姆巴佩踢球")
+        self.assertEqual(urls, [])
 
     def test_search_page_url_is_resolved_and_video_is_delivered(self):
         class Event:
@@ -154,12 +218,40 @@ class VideoCommandTests(unittest.TestCase):
             plugin._deliver_video = AsyncMock(return_value="视频文件")
             event = Event()
             event.stopped = False
-            with patch("data.plugins.video_command.main.get_tier", return_value=Tier.PRO):
+            with patch("data.plugins.video_command.main.get_tier", return_value=Tier.ORDINARY):
                 replies = [reply async for reply in plugin.on_message(event)]
             self.assertEqual(attempted, ["https://www.bilibili.com/video/BV1test"])
             self.assertEqual(replies[1], "视频文件")
             self.assertIn("更多相关视频", replies[2])
             self.assertTrue(event.stopped)
+
+        asyncio.run(scenario())
+
+    def test_ordinary_users_can_search_but_cannot_generate(self):
+        class Event:
+            is_at_or_wake_command = False
+
+            def get_message_str(self):
+                return "帮我生成一只猫的视频"
+
+            def is_private_chat(self):
+                return True
+
+            def get_sender_id(self):
+                return "123456789"
+
+            def plain_result(self, text):
+                return text
+
+            def stop_event(self):
+                self.stopped = True
+
+        async def scenario():
+            plugin = VideoCommand.__new__(VideoCommand)
+            event = Event()
+            with patch("data.plugins.video_command.main.get_tier", return_value=Tier.ORDINARY):
+                replies = [reply async for reply in plugin.on_message(event)]
+            self.assertEqual(replies, ["视频生成是 Pro 专属功能。发送 /pro status 查看资格。"])
 
         asyncio.run(scenario())
 
