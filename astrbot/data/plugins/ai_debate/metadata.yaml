@@ -1,0 +1,6 @@
+name: ai_debate
+display_name: AI 圆桌辩论
+short_desc: /debate 多角色 AI 辩论
+desc: 4 位 AI 专家从不同角度辩论并给出综合结论。普通版每日 1 场，GO/Pro 每日 10 场。
+version: v1.0.0
+author: lemon

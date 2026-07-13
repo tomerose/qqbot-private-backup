@@ -15,6 +15,7 @@ sys.path.insert(0, str(PLUGINS_DIR))
 
 from draw_command.draw_core import DrawRateLimiter, parse_draw_command  # noqa: E402
 from draw_command.main import DrawCommand  # noqa: E402
+from draw_command.pro_client import ProClient  # noqa: E402
 from draw_command import main as draw_main  # noqa: E402
 from pro_application.pro_store import ProStore  # noqa: E402
 
@@ -58,6 +59,11 @@ async def collect(generator):
 
 
 class DrawPluginTests(unittest.TestCase):
+    def setUp(self):
+        # ponytail: clear cached ProClients so each test has clean isolation
+        from draw_command.pro_access import _clients
+        _clients.clear()
+
     def test_proxy_request_uses_current_vertex_image_model(self):
         plugin = DrawCommand.__new__(DrawCommand)
 
@@ -82,11 +88,17 @@ class DrawPluginTests(unittest.TestCase):
     @staticmethod
     def build_plugin(output_root: Path) -> DrawCommand:
         plugin = DrawCommand.__new__(DrawCommand)
-        plugin._pro_user_ids = frozenset({"1211000567"})
+        # ponytail: keep DB inside temp dir so each test isolates cleanly
+        db_path = output_root / "pro_members.db"
+        output_root.mkdir(parents=True, exist_ok=True)
+        # Ensure owner has permanent Pro membership in the test DB
+        ProStore(db_path, reviewer_id="1211000567")
         plugin._rate_limiter = DrawRateLimiter(cooldown_seconds=60)
         plugin._generation_lock = asyncio.Lock()
         plugin._output_root = output_root
-        plugin._pro_db_path = output_root.parent / "pro_members.db"
+        plugin._pro_client = ProClient(db_path)
+        plugin._pro_db_path = db_path  # retained for test helpers
+        plugin._daily_usage = {}
         return plugin
 
     @staticmethod
@@ -129,7 +141,7 @@ class DrawPluginTests(unittest.TestCase):
 
                 replies = await collect(plugin.on_message(FakeEvent("/draw a cat", "2000000000")))
 
-                self.assertEqual(replies, [("plain", "作图是 Pro 功能。要开通或了解 Pro，可发邮件说明用途：portelamicheli636@gmail.com")])
+                self.assertEqual(replies, [("plain", "作图是 Pro/GO 功能。发送 /pro status 查看资格，或联系管理员开通")])
 
         asyncio.run(scenario())
 
@@ -143,7 +155,7 @@ class DrawPluginTests(unittest.TestCase):
                 replies = await collect(plugin.on_message(event))
 
                 self.assertTrue(event.stopped)
-                self.assertEqual(replies, [("plain", "作图是 Pro 功能。要开通或了解 Pro，可发邮件说明用途：portelamicheli636@gmail.com")])
+                self.assertEqual(replies, [("plain", "作图是 Pro/GO 功能。发送 /pro status 查看资格，或联系管理员开通")])
 
         asyncio.run(scenario())
 
@@ -180,7 +192,15 @@ class DrawPluginTests(unittest.TestCase):
                 self.assertEqual(generated.suffix, ".png")
                 event.set_extra("_pro_draw_output_paths", [str(generated), str(outside)])
 
-                await plugin.cleanup_sent_images(event)
+                original_sleep = asyncio.sleep
+
+                async def immediate_sleep(_seconds):
+                    await original_sleep(0)
+
+                with patch("draw_command.main.asyncio.sleep", new=immediate_sleep):
+                    await plugin.cleanup_sent_images(event)
+                    await original_sleep(0)
+                    await original_sleep(0)
 
                 self.assertFalse(generated.exists())
                 self.assertTrue(outside.exists())

@@ -21,7 +21,17 @@ class NaturalAgentIntent:
 _STATUS_TEXTS = {"任务进度怎么样", "看看任务进度", "任务状态", "进度怎么样"}
 _CANCEL_TEXTS = {"取消刚才的任务", "取消任务", "停止任务", "停下任务"}
 _CONFIRM_TEXTS = {"确认执行", "我确认执行", "确认这个任务"}
-_TASK_PREFIX = re.compile(r"^(?:小柠[，, ]*)?(?:帮我|请你|麻烦你)\s*(.+)$", re.S)
+_TASK_PREFIX = re.compile(
+    r"^(?:小柠[，, ]*)?"
+    r"(?:帮我|请你|麻烦你|请(?:你)?|帮忙)"
+    r"[，, ]*"
+    r"(.{3,})$",
+    re.S,
+)
+_GREETING_ONLY = re.compile(
+    r"^(?:你?好[呀啊]?|嗨|hi|hello|早[啊呀]?|晚安|再见|bye|在[吗么]?|嗯+|哦|谢谢|多谢|OK|ok|好的?|收到|明白|知道了)[!！。.,，]?$",
+    re.I,
+)
 _BACKEND_PREFIX = re.compile(
     r"^用\s*(claude(?:\s*code)?|codex|workbuddy)\s*", re.I
 )
@@ -42,6 +52,7 @@ def _extract_backend(task: str) -> tuple[str, str]:
 
 def route_natural_agent(text: str) -> NaturalAgentIntent | None:
     """Return an Agent intent only for explicit, low-ambiguity owner language."""
+    raw = str(text or "").strip()
     normalized = _normalized_control_text(text)
     if normalized in _STATUS_TEXTS:
         return NaturalAgentIntent("status")
@@ -49,8 +60,10 @@ def route_natural_agent(text: str) -> NaturalAgentIntent | None:
         return NaturalAgentIntent("cancel")
     if normalized in _CONFIRM_TEXTS:
         return NaturalAgentIntent("confirm")
+    if _GREETING_ONLY.match(raw):
+        return None
 
-    match = _TASK_PREFIX.match(str(text or "").strip())
+    match = _TASK_PREFIX.match(raw)
     if not match:
         return None
     backend, task = _extract_backend(match.group(1))

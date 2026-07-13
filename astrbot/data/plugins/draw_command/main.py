@@ -1,10 +1,15 @@
-"""Pro-only QQ drawing command backed by the local Vertex proxy."""
+"""Pro-only QQ drawing command — verified via HMAC-signed DB records only.
+
+No config-file bypass. No operator whitelist. All Pro access is verified
+through cryptographically signed memberships managed by the ProStore.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import base64
 import io
+import time
 import uuid
 from pathlib import Path
 
@@ -19,34 +24,43 @@ from .draw_core import (
     DrawRateLimiter,
     DrawRequestError,
     parse_draw_command,
-    parse_pro_user_ids,
 )
-from .pro_access import is_active_pro
+from .pro_access import get_tier, is_active_pro_group, Tier
+from .pro_client import ProClient
 
 
-PRO_DRAW_MESSAGE = "作图是 Pro 功能。要开通或了解 Pro，可发邮件说明用途：portelamicheli636@gmail.com"
+PRO_DRAW_MESSAGE = "作图是 Pro/GO 功能。发送 /pro status 查看资格，或联系管理员开通"
 DRAW_PROXY_URL = "http://127.0.0.1:3000/v1/images/generations"
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_EDGE = 4096
+DRAW_PRO_DAILY = 10
+DRAW_FREE_DAILY = 1
+DRAW_GO_WEEKLY = 6
+DRAW_LIMIT_MSG = "作图次数已用完（今日 {used}/{limit}）。明天自动重置。"
+DRAW_GO_LIMIT_MSG = "GO 作图本周已用 {used}/{limit} 次。下周自动重置。"
 
 
 class DrawCommand(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config)
         self.config = config or {}
-        self._pro_user_ids = frozenset(
-            parse_pro_user_ids(self.config.get("pro_user_ids", "1211000567"))
-        )
         self._rate_limiter = DrawRateLimiter(
             cooldown_seconds=int(self.config.get("cooldown_seconds", 75))
         )
         self._generation_lock = asyncio.Lock()
+        self._daily_usage: dict[str, int] = {}
         project_root = Path(__file__).resolve().parents[4]
-        self._output_root = project_root / "astrbot" / "data" / "temp" / "pro_draw"
+        self._output_root = project_root / "claude_workspace" / "pro_draw"
         self._pro_db_path = project_root / "astrbot" / "data" / "plugin_data" / "xiaoning_pro" / "pro_members.db"
+        self._pro_client = ProClient(self._pro_db_path)
 
     def _is_pro(self, sender_id: str) -> bool:
-        return sender_id in self._pro_user_ids or is_active_pro(sender_id, self._pro_db_path)
+        """Pro access is granted ONLY via HMAC-signed DB membership.
+
+        There is no config-file bypass. The owner's permanent membership
+        is maintained by ProStore.ensure_owner_membership() on startup.
+        """
+        return self._pro_client.is_active(sender_id)
 
     @staticmethod
     def _message_text(event: AstrMessageEvent) -> str:
@@ -80,7 +94,7 @@ class DrawCommand(Star):
         response = requests.post(
             DRAW_PROXY_URL,
             json={"prompt": prompt, "model": "gemini-2.5-flash-image", "size": "1024x1024"},
-            timeout=(10, 95),
+            timeout=(30, 180),
         )
         response.raise_for_status()
         return self._decode_proxy_image(response)
@@ -103,23 +117,46 @@ class DrawCommand(Star):
         try:
             prompt = parse_draw_command(self._message_text(event))
         except DrawRequestError as exc:
-            event.stop_event()
             yield event.plain_result(str(exc))
+            event.stop_event()
             return
         if prompt is None or not self._is_allowed_context(event):
             return
 
-        event.stop_event()
         sender_id = self._safe_sender_id(event)
-        if not self._is_pro(sender_id):
+        group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
+        in_pro_group = bool(group_id) and is_active_pro_group(group_id, self._pro_db_path)
+        tier = get_tier(sender_id, self._pro_db_path)
+        if tier < Tier.GO and not in_pro_group:
             yield event.plain_result(PRO_DRAW_MESSAGE)
+            event.stop_event()
             return
+        # ponytail: GO uses weekly limit, PRO/group uses daily
+        today = time.strftime("%Y%m%d")
+        dk = f"{sender_id}:{today}"
+        year, week_num = time.strftime("%Y"), time.strftime("%W")
+        wk = f"{sender_id}:{year}:{week_num}"
+        go_used = self._daily_usage.get(wk, 0)
+        used = self._daily_usage.get(dk, 0)
+        if tier == Tier.GO and not in_pro_group:
+            if go_used >= DRAW_GO_WEEKLY:
+                yield event.plain_result(DRAW_GO_LIMIT_MSG.format(used=go_used, limit=DRAW_GO_WEEKLY))
+                event.stop_event()
+                return
+        else:
+            limit = DRAW_PRO_DAILY if (tier >= Tier.PRO or in_pro_group) else DRAW_FREE_DAILY
+            if used >= limit:
+                yield event.plain_result(DRAW_LIMIT_MSG.format(used=used, limit=limit))
+                event.stop_event()
+                return
         if self._generation_lock.locked():
             yield event.plain_result("我正在画一张图，等这张发出后再试。")
+            event.stop_event()
             return
         retry_after = self._rate_limiter.try_acquire(sender_id)
         if retry_after:
             yield event.plain_result(f"作图冷却中，{retry_after} 秒后再试。")
+            event.stop_event()
             return
 
         yield event.plain_result("我开始画了，预计 30–90 秒。")
@@ -130,27 +167,52 @@ class DrawCommand(Star):
         except Exception as exc:
             logger.warning("[ProDraw] generation failed: %s", type(exc).__name__)
             yield event.plain_result("这次没能画出来，稍后再试。")
+            event.stop_event()
             return
 
+        # ponytail: increment correct counter for tier
+        if tier == Tier.GO and not in_pro_group:
+            self._daily_usage[wk] = go_used + 1
+        else:
+            self._daily_usage[dk] = used + 1
         event.set_extra("_pro_draw_output_paths", [str(output_path)])
         yield event.chain_result([Image.fromFileSystem(str(output_path))])
+        event.stop_event()
 
     @filter.after_message_sent(priority=-1000)
     async def cleanup_sent_images(self, event: AstrMessageEvent) -> None:
         paths = event.get_extra("_pro_draw_output_paths", []) or []
         event.set_extra("_pro_draw_output_paths", [])
-        root = self._output_root.resolve(strict=False)
-        for raw_path in paths:
-            candidate = Path(str(raw_path or ""))
-            if candidate.is_symlink():
-                continue
-            try:
-                resolved = candidate.resolve(strict=True)
-            except OSError:
-                continue
-            if root not in resolved.parents or resolved.suffix.lower() != ".png":
-                continue
-            try:
-                resolved.unlink()
-            except OSError:
-                continue
+        # ponytail: NapCat uploads files asynchronously after after_message_sent
+        # fires. Schedule deletion with a delay so QQ has time to upload.
+        async def _delayed_cleanup():
+            await asyncio.sleep(45)
+            root = self._output_root.resolve(strict=False)
+            for raw_path in paths:
+                candidate = Path(str(raw_path or ""))
+                if candidate.is_symlink():
+                    continue
+                try:
+                    resolved = candidate.resolve(strict=True)
+                except OSError:
+                    continue
+                if root not in resolved.parents or resolved.suffix.lower() != ".png":
+                    continue
+                try:
+                    resolved.unlink()
+                except OSError:
+                    continue
+        asyncio.ensure_future(_delayed_cleanup())
+        # Also clean up stale images older than 10 minutes
+        try:
+            now = time.time()
+            root = self._output_root.resolve(strict=False)
+            if root.is_dir():
+                for png in root.glob("draw-*.png"):
+                    try:
+                        if now - png.stat().st_mtime > 600:
+                            png.unlink()
+                    except OSError:
+                        continue
+        except Exception:
+            pass

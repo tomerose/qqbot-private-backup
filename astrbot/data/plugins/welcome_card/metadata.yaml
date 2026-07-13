@@ -1,0 +1,6 @@
+name: welcome_card
+display_name: 小柠欢迎卡片
+short_desc: 首次私聊/群聊@发送自我介绍图+欢迎语
+desc: 检测与新用户的首次交互，发送小柠角色介绍图和自然欢迎语。去AI化，不列功能清单。
+version: 1.0.0
+author: lemon

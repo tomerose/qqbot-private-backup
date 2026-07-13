@@ -46,16 +46,16 @@ def plan_task(request: TaskRequest) -> ExecutionPlan:
         raise ValueError("任务编号无效")
     goal = validate_task(request.goal)
     backend = normalize_backend(request.preferred_backend)
-    clauses = [item.strip(" ，") for item in _SEPARATOR.split(goal)]
-    clauses = [item for item in clauses if item][:8] or [goal]
-    steps = tuple(
+    # ponytail: single invocation — backend LLM plans internally.
+    # Regex-splitting lost cross-step context and produced fake "multi-step"
+    # plans with no shared state between independent CLI invocations.
+    steps = (
         TaskStep(
             task_id=task_id,
-            index=index,
-            instruction=clause,
-            action_class=classify_action(clause).action_class,
-            expected_artifact=bool(_ARTIFACT_HINT.search(clause)),
-        )
-        for index, clause in enumerate(clauses)
+            index=0,
+            instruction=goal,
+            action_class=classify_action(goal).action_class,
+            expected_artifact=bool(_ARTIFACT_HINT.search(goal)),
+        ),
     )
     return ExecutionPlan(task_id, backend, steps)

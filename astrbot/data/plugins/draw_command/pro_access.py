@@ -1,91 +1,111 @@
-"""Fail-closed read-only access to approved Pro memberships."""
+"""Unified tier-based membership lookups. Replaces binary is_active_pro checks.
+
+Tier flow: ORDINARY < GO < PRO. Each tier inherits all lower-tier capabilities.
+GO: owner-granted, time-limited (≤90 days), Agent 1x/week, Draw 6x/week.
+PRO: owner-granted, time-limited (≤365 days), no artificial caps.
+"""
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import os
-import secrets
 import sqlite3
 import time
+from contextlib import closing
+from enum import Enum
 from pathlib import Path
 
+from .pro_client import ProClient
 
-SIGNING_KEY_ENV = "XIAONING_PRO_SIGNING_KEY"
-MIN_SIGNING_KEY_BYTES = 32
+_clients: dict[str, ProClient] = {}
 
 
-def _load_signing_key(database_path: Path) -> bytes | None:
-    configured = os.environ.get(SIGNING_KEY_ENV)
-    if configured is not None:
-        key = configured.encode("utf-8")
-        return key if len(key) >= MIN_SIGNING_KEY_BYTES else None
-    key_path = Path(database_path).with_suffix(".key")
+def _get_client(db_path: Path) -> ProClient:
+    key = str(Path(db_path).resolve())
+    client = _clients.get(key)
+    if client is None:
+        client = ProClient(db_path)
+        _clients[key] = client
+    return client
+
+
+class Tier(str, Enum):
+    ORDINARY = "ordinary"
+    GO = "go"
+    PRO = "pro"
+
+    def __ge__(self, other: Tier) -> bool:
+        order = {Tier.ORDINARY: 0, Tier.GO: 1, Tier.PRO: 2}
+        return order[self] >= order[other]
+
+    def __lt__(self, other: Tier) -> bool:
+        order = {Tier.ORDINARY: 0, Tier.GO: 1, Tier.PRO: 2}
+        return order[self] < order[other]
+
+
+def get_tier(qq_id: object, db_path: object, now: float | None = None) -> Tier:
+    """Return the membership tier for *qq_id*. Falls back to ORDINARY.
+    Uses ProClient.is_active() directly (not is_active_pro) to avoid recursion."""
+    tier_raw = _get_client(Path(db_path)).active_tier(qq_id, now)
+    return {"go": Tier.GO, "pro": Tier.PRO}.get(tier_raw, Tier.ORDINARY)
+
+
+def agent_available(qq_id: object, db_path: object) -> tuple[bool, str]:
+    """Returns (available, reason). GO: once per week. PRO: unlimited."""
+    tier = get_tier(qq_id, db_path)
+    if tier == Tier.PRO:
+        return True, ""
+    if tier != Tier.GO:
+        return False, "Agent 功能需要 GO 或 PRO 权限。发送 /go 了解获取方式"
+
+    db = Path(db_path)
     try:
-        key = key_path.read_bytes()
-    except FileNotFoundError:
-        generated = secrets.token_bytes(MIN_SIGNING_KEY_BYTES)
-        try:
-            descriptor = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            try:
-                key = key_path.read_bytes()
-            except OSError:
-                return None
-        except OSError:
-            return None
-        else:
-            try:
-                with os.fdopen(descriptor, "wb") as handle:
-                    handle.write(generated)
-                key = generated
-            except OSError:
-                return None
-    except OSError:
-        return None
-    return key if len(key) >= MIN_SIGNING_KEY_BYTES else None
+        with closing(sqlite3.connect(str(db.resolve(strict=True)))) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """SELECT agent_used_at FROM applications
+                   WHERE qq_id = ? AND tier = 'go' AND state = 'active'
+                     AND pro_expires_at >= ? LIMIT 1""",
+                (str(qq_id or "").strip(), time.time()),
+            ).fetchone()
+    except (OSError, sqlite3.Error):
+        return False, "权限查询失败，稍后再试"
+
+    if row and row["agent_used_at"]:
+        elapsed = time.time() - float(row["agent_used_at"])
+        if elapsed < 7 * 86400:
+            remaining = 7 * 86400 - elapsed
+            days = int(remaining // 86400)
+            hours = int((remaining % 86400) // 3600)
+            return False, f"GO 用户 Agent 每周可用 1 次。{days}天{hours}小时后刷新"
+    return True, ""
 
 
-def _membership_signature(
-    key: bytes, application_id: str, qq_id: str, state: str, pro_expires_at: float
-) -> str:
-    payload = f"{application_id}|{qq_id}|{state}|{float(pro_expires_at):.6f}".encode("utf-8")
-    return hmac.new(key, payload, hashlib.sha256).hexdigest()
-
-
-def is_active_pro(qq_id: object, db_path: Path, now: float | None = None) -> bool:
-    identity = str(qq_id or "").strip()
-    if not identity.isdigit() or not (5 <= len(identity) <= 12):
-        return False
+def use_agent(qq_id: object, db_path: object) -> bool:
+    """Atomically record one GO Agent use. Return False if already consumed."""
+    tier = get_tier(qq_id, db_path)
+    if tier != Tier.GO:
+        return tier == Tier.PRO
+    db = Path(db_path)
+    now = time.time()
     try:
-        path = Path(db_path).resolve(strict=True)
-        connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
-        connection.row_factory = sqlite3.Row
-    except (OSError, sqlite3.Error, ValueError):
-        return False
-    try:
-        checked_at = time.time() if now is None else float(now)
-        key = _load_signing_key(path)
-        if key is None:
-            return False
-        row = connection.execute(
-            """
-            SELECT application_id, qq_id, state, pro_expires_at, membership_signature FROM applications
-            WHERE qq_id = ? AND state = 'active' AND pro_expires_at >= ?
-            LIMIT 1
-            """,
-            (identity, checked_at),
-        ).fetchone()
-        if row is None:
-            return False
-        try:
-            expected = _membership_signature(
-                key, row["application_id"], row["qq_id"], row["state"], row["pro_expires_at"]
+        with closing(sqlite3.connect(str(db.resolve(strict=True)))) as conn, conn:
+            cursor = conn.execute(
+                """UPDATE applications SET agent_used_at = ?
+                   WHERE qq_id = ? AND tier = 'go' AND state = 'active'
+                     AND pro_expires_at >= ?
+                      AND (agent_used_at IS NULL OR agent_used_at <= ?)""",
+                (now, str(qq_id or "").strip(), now, now - 7 * 86400),
             )
-        except (TypeError, ValueError):
-            return False
-        return hmac.compare_digest(str(row["membership_signature"] or ""), expected)
-    except sqlite3.Error:
+            return cursor.rowcount == 1
+    except (OSError, sqlite3.Error):
         return False
-    finally:
-        connection.close()
+
+
+# Backward-compatible aliases — existing plugins can migrate incrementally
+def is_active_pro(qq_id: object, db_path: object, now: float | None = None) -> bool:
+    """DEPRECATED: use get_tier() >= Tier.GO instead."""
+    return get_tier(qq_id, db_path, now) >= Tier.GO
+
+
+def is_active_pro_group(group_id: object, db_path: object, now: float | None = None) -> bool:
+    """Return True when *group_id* is an active Pro group."""
+    return _get_client(Path(db_path)).is_active_group(group_id, now=now)

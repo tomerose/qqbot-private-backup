@@ -1,0 +1,6 @@
+name: werewolf_game
+display_name: 狼人杀
+short_desc: /werewolf 群狼人杀游戏
+desc: 群聊狼人杀。Bot 当裁判管理角色、回合、投票。免费 3 局/天，Pro 无限+AI 旁白。
+version: v1.0.0
+author: lemon

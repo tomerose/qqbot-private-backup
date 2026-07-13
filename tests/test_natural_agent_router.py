@@ -3,11 +3,12 @@ import sys
 import unittest
 from pathlib import Path
 
-os.environ["ASTRBOT_ROOT"] = r"D:\Claudecoda学习\qqbot\astrbot"
+_PROJ_ROOT = Path(__file__).resolve().parents[1]
+os.environ["ASTRBOT_ROOT"] = str(_PROJ_ROOT / "astrbot")
 
 from astrbot.api.message_components import At, Plain
 
-PLUGIN_DIR = Path(r"D:\Claudecoda学习\qqbot\astrbot\data\plugins\claude_code_agent")
+PLUGIN_DIR = _PROJ_ROOT / "astrbot" / "data" / "plugins" / "claude_code_agent"
 sys.path.insert(0, str(PLUGIN_DIR))
 
 from natural_router import (  # noqa: E402
@@ -34,8 +35,24 @@ class NaturalAgentRouterTests(unittest.TestCase):
             "能不能写代码",
             "今天心情怎么样",
             "小柠真聪明",
+            "今天天气怎么样",
+            "解释一下这段代码",
         ):
             self.assertIsNone(route_natural_agent(text), text)
+
+    def test_optional_prefixes_still_route_to_run(self):
+        for text, expected_task in (
+            ("帮我看看天气", "看看天气"),
+            ("请你运行测试", "运行测试"),
+            ("麻烦你重启服务", "重启服务"),
+            ("请检查 disk", "检查 disk"),
+            ("请你整理文件", "整理文件"),
+            ("帮忙导出报告", "导出报告"),
+        ):
+            got = route_natural_agent(text)
+            self.assertIsNotNone(got, text)
+            self.assertEqual(got.action, "run", text)
+            self.assertEqual(got.task, expected_task, text)
 
     def test_status_cancel_and_confirm_are_supported(self):
         self.assertEqual(route_natural_agent("任务进度怎么样").action, "status")

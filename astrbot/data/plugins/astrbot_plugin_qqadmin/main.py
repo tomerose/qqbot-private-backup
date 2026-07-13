@@ -99,7 +99,7 @@ class QQAdminPlugin(Star):
 
     async def _set_ai_moderation(self, event: AiocqhttpMessageEvent, enabled: bool):
         if not self._is_ai_moderation_owner(event):
-            await event.send(event.plain_result("只有小姚可以修改 AI 群管状态。"))
+            await event.send(event.plain_result("只有小柠可以修改 AI 群管状态。"))
             event.stop_event()
             return
         if event.is_private_chat():
@@ -125,7 +125,7 @@ class QQAdminPlugin(Star):
     @filter.command("AI群管状态")
     async def ai_moderation_status(self, event: AiocqhttpMessageEvent):
         if not self._is_ai_moderation_owner(event):
-            await event.send(event.plain_result("只有小姚可以查看 AI 群管状态。"))
+            await event.send(event.plain_result("只有小柠可以查看 AI 群管状态。"))
         elif event.is_private_chat():
             await event.send(event.plain_result("请在目标群内查看 AI 群管状态。"))
         elif self.ai_moderation_store is None:

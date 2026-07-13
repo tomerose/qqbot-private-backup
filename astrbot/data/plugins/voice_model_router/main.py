@@ -1,4 +1,4 @@
-"""Route incoming QQ voice messages to the audio-capable Gemini provider."""
+"""Route QQ voice messages to Gemini and convert the reply to QQ voice."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ class VoiceModelRouter(Star):
         allowed_chat = event.is_private_chat() or event.is_at_or_wake_command
         if explicit_voice and allowed_chat:
             event.set_extra("voice_reply_requested", True)
-            event.set_extra("selected_provider", "gemini-2.5-flash")
+            event.set_extra("selected_provider", self._best_voice_provider())
             return
 
         message_obj = getattr(event, "message_obj", None)
@@ -81,7 +81,15 @@ class VoiceModelRouter(Star):
         # group chats still need an @ mention or wake prefix.
         if not event.is_private_chat() and not event.is_at_or_wake_command:
             return
-        event.set_extra("selected_provider", "gemini-2.5-flash")
+        event.set_extra("selected_provider", self._best_voice_provider())
+        # ponytail: voice input → auto voice reply.  User sent a Record
+        # so they want spoken output.  No need for "发语音" keyword.
+        if self.config.get("auto_voice_reply", True):
+            event.set_extra("voice_reply_requested", True)
+
+        # The selected audio-capable provider consumes the Record component
+        # in the normal AstrBot request pipeline. Do not start a second,
+        # racing transcription request against the same event.
 
     @filter.on_decorating_result(priority=-10000)
     async def synthesize_voice_reply(self, event: AstrMessageEvent) -> None:
@@ -165,3 +173,18 @@ class VoiceModelRouter(Star):
                 resolved.unlink()
             except OSError:
                 continue
+
+    def _best_voice_provider(self) -> str:
+        """Return best available Gemini provider for voice: direct API first, proxy fallback."""
+        try:
+            providers = getattr(self.context, 'provider_manager', None)
+            if providers:
+                for p in getattr(providers, 'providers', []):
+                    pid = getattr(p, 'id', '')
+                    if pid == 'gemini-2.5-flash-direct' and getattr(p, 'enable', False):
+                        logger.info("[VoiceRouter] Using direct Gemini for voice")
+                        return 'gemini-2.5-flash-direct'
+        except Exception:
+            pass
+        logger.info("[VoiceRouter] Falling back to Gemini proxy for voice")
+        return 'gemini-2.5-flash'

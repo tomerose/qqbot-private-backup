@@ -20,12 +20,12 @@ from astrbot.core.workspace import default_workspace_root
 from .agent_core import (
     ApprovalRegistry,
     BACKEND_CLAUDE,
+    BACKEND_CODEX,
     DEFAULT_WORKSPACE,
     DEFAULT_WORK_DIR,
     DEFAULT_CODEX_MODEL,
     MAX_OUTPUT_BYTES,
     Deliverable,
-    assess_task_risk,
     build_job_agent_env,
     build_backend_command,
     create_job_dir,
@@ -49,7 +49,6 @@ from .encrypted_payload_store import (
     PayloadIntegrityError,
 )
 from .natural_router import extract_natural_agent_text, route_natural_agent
-from .recovery_policy import assess_recovery
 from .access_policy import AccessPolicy, Capability
 from .bounded_process_io import capture_bounded_process
 from .action_policy import ActionClass
@@ -66,7 +65,6 @@ from .document_quality import (
     render_docx,
     requires_research_quality,
 )
-from .isolation_policy import choose_isolation
 from .step_policy import assess_step, step_digest
 from .task_orchestrator import StepExecution, TaskEvent, TaskOrchestrator
 from .task_planner import ExecutionPlan, TaskRequest, TaskStep, plan_task
@@ -86,9 +84,9 @@ from .trusted_policy import (
     assess_trusted_task,
 )
 try:
-    from draw_command.pro_access import is_active_pro
+    from draw_command.pro_access import agent_available, get_tier, Tier, use_agent
 except ImportError:  # AstrBot package import path.
-    from data.plugins.draw_command.pro_access import is_active_pro
+    from data.plugins.draw_command.pro_access import agent_available, get_tier, Tier, use_agent
 
 OWNER_ID = "1211000567"
 MAX_REPLY_CHARS = 3500
@@ -158,20 +156,40 @@ class ClaudeCodeAgent(Star):
             sender_id
         )
 
-    def _is_public_pro(self, sender_id: object) -> bool:
-        path = getattr(
+    def _is_public_pro(self, sender_id: str) -> bool:
+        """Return True when *sender_id* holds an active Pro/GO membership."""
+        try:
+            return get_tier(sender_id, self._pro_db()) >= Tier.GO
+        except Exception:
+            return False
+
+    def _pro_db(self) -> Path:
+        return getattr(
             self,
             "_pro_db_path",
             Path(__file__).resolve().parents[2] / "plugin_data" / "xiaoning_pro" / "pro_members.db",
         )
-        return is_active_pro(sender_id, path)
+
+    def _check_agent_access(self, sender_id: object) -> tuple[bool, str]:
+        """Returns (allowed, reason). GO: 1x/week, PRO: unlimited."""
+        path = self._pro_db()
+        available, reason = agent_available(sender_id, path)
+        if not available:
+            return False, reason
+        tier = get_tier(sender_id, path)
+        if tier >= Tier.PRO:
+            return True, ""
+        if tier == Tier.GO:
+            return True, "go"  # "go" signals caller to call use_agent() after success
+        return False, "Agent 功能需要 GO 或 PRO 权限"
 
     def _authorize_agent_task(self, sender_id: object, task: str):
         if self._trusted_policy.is_trusted(sender_id):
             return self._trusted_policy.authorize_task(
                 sender_id, task, self.work_dir, self.recovery_root
             )
-        if self._is_public_pro(sender_id):
+        tier = get_tier(sender_id, self._pro_db())
+        if tier >= Tier.GO:
             return assess_trusted_task(task, self.work_dir, self.recovery_root)
         return TrustedDecision(TrustedDisposition.DENY, "not_pro")
 
@@ -225,18 +243,24 @@ class ClaudeCodeAgent(Star):
         if origin:
             return origin
         group_id = str(ctx.get_group_id() or "").strip()
-        return f"group:{group_id}" if group_id else f"private:{OWNER_ID}"
+        sender_id = str(ctx.get_sender_id() or "").strip()
+        return f"group:{group_id}" if group_id else f"private:{sender_id}"
 
-    def _help_text(self) -> str:
-        return (
-            "本机 Agent（仅小姚）\n"
-            "/agent use claude|codex|workbuddy\n"
-            "/agent cwd [绝对目录]\n"
+    def _help_text(self, *, trusted_runtime: bool) -> str:
+        common = (
+            "Agent 任务\n"
             "/agent run <任务>\n"
             "/agent approve <确认码>\n"
             "/agent status\n"
             "/agent cancel\n"
-            f"当前后端：{self.backend}。工作目录已设置，本机路径不在聊天中显示。"
+        )
+        if not trusted_runtime:
+            return common + "GO 每周 1 次，Pro 不限次数；任务在独立安全工作区运行。"
+        return (
+            common
+            + "/agent use claude|codex|workbuddy\n"
+            + "/agent cwd [绝对目录]\n"
+            + f"当前后端：{self.backend}。工作目录已设置，本机路径不在聊天中显示。"
         )
 
     async def _deliver_file(self, event: AstrMessageEvent, path: Path) -> bool:
@@ -256,6 +280,37 @@ class ClaudeCodeAgent(Star):
                 f"[LocalAgent] file delivery failed: {type(exc).__name__}"
             )
             return False
+
+    def _is_declared_plugin_media(self, event: AstrMessageEvent, path: Path) -> bool:
+        """Allow only existing media outputs explicitly registered by the media plugins."""
+        try:
+            if path.is_symlink():
+                return False
+            resolved = path.resolve(strict=True)
+        except OSError:
+            return False
+
+        declarations = (
+            ("_pro_draw_output_paths", self.workspace / "pro_draw", {".png", ".jpg", ".jpeg", ".webp"}),
+            ("_pro_video_output_paths", self.workspace / "pro_video", {".mp4", ".webm", ".mkv", ".mov", ".gif"}),
+        )
+        for extra_key, root, suffixes in declarations:
+            if resolved.suffix.lower() not in suffixes:
+                continue
+            try:
+                resolved_root = root.resolve(strict=True)
+            except OSError:
+                continue
+            if resolved_root not in resolved.parents:
+                continue
+            for raw_path in event.get_extra(extra_key, []) or []:
+                candidate = Path(str(raw_path or ""))
+                try:
+                    if not candidate.is_symlink() and candidate.resolve(strict=True) == resolved:
+                        return True
+                except OSError:
+                    continue
+        return False
 
     @filter.on_decorating_result(priority=-9999)
     async def protect_privacy_and_deliver_files(self, event: AstrMessageEvent) -> None:
@@ -309,7 +364,11 @@ class ClaudeCodeAgent(Star):
                     local_path = Path(decoded)
                 elif raw and Path(raw).is_absolute():
                     local_path = Path(raw)
-                if local_path is not None and not is_within_allowed_roots(local_path, allowed_roots):
+                if (
+                    local_path is not None
+                    and not self._is_declared_plugin_media(event, local_path)
+                    and not is_within_allowed_roots(local_path, allowed_roots)
+                ):
                     cleaned.append(Plain("[本地图片因隐私策略未发送]"))
                     logger.warning("[LocalAgent] blocked local image outside approved roots")
                     continue
@@ -378,11 +437,16 @@ class ClaudeCodeAgent(Star):
         backend: str,
         high_risk_approved: bool,
     ) -> tuple[str, list[Deliverable], str, int | None, str]:
+        trusted_runtime = bool(getattr(self, "_execution_trusted_runtime", True))
         output_dir = job_dir / "outputs"
         boundary = assess_trusted_task(task, self.work_dir, self.recovery_root)
         if boundary.disposition is TrustedDisposition.DENY:
             return "任务被本机安全边界拒绝。", [], "failed", None, boundary.code
-        execution_dir = select_execution_dir(task, self.work_dir, job_dir)
+        execution_dir = (
+            select_execution_dir(task, self.work_dir, job_dir)
+            if trusted_runtime
+            else job_dir.resolve(strict=True)
+        )
         command = build_backend_command(
             backend,
             task,
@@ -390,6 +454,7 @@ class ClaudeCodeAgent(Star):
             output_dir,
             self.codex_model,
             high_risk_approved=high_risk_approved,
+            trusted_runtime=trusted_runtime,
         )
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         returncode: int | None = None
@@ -559,6 +624,7 @@ class ClaudeCodeAgent(Star):
             delivery_cursor=tuple(sorted(digests)),
             plan=payload.plan,
             step_cursor=payload.step_cursor,
+            trusted_runtime=payload.trusted_runtime,
         )
 
     @staticmethod
@@ -603,6 +669,7 @@ class ClaudeCodeAgent(Star):
             delivery_cursor=payload.delivery_cursor,
             plan=payload.plan,
             step_cursor=int(step_cursor),
+            trusted_runtime=payload.trusted_runtime,
         )
 
     async def _deliver_recovered_files(
@@ -714,7 +781,11 @@ class ClaudeCodeAgent(Star):
 
             async with self._execution_lock:
                 original_work_dir = self.work_dir
+                original_trusted_runtime = getattr(
+                    self, "_execution_trusted_runtime", True
+                )
                 self.work_dir = work_dir
+                self._execution_trusted_runtime = payload.trusted_runtime
                 self._active_job_id = job_id
                 self._active_backend = payload.backend
                 self._cancel_requested = False
@@ -863,6 +934,7 @@ class ClaudeCodeAgent(Star):
                         pass
                 finally:
                     self.work_dir = original_work_dir
+                    self._execution_trusted_runtime = original_trusted_runtime
                     self._active_job_id = None
                     self._active_backend = None
 
@@ -876,12 +948,6 @@ class ClaudeCodeAgent(Star):
         sender_id = str(ctx.get_sender_id() or "")
         scope = self._approval_scope(ctx)
         approved_steps: dict[str, str] = {}
-        if (
-            self._execution_lock.locked()
-            and self._queued_handlers >= self.max_queued_jobs
-        ):
-            yield self._reply(ctx, Plain("任务队列已满，请稍后再试。"))
-            return
         try:
             if action in {"approve", "confirm"}:
                 pending = (
@@ -894,6 +960,7 @@ class ClaudeCodeAgent(Star):
                     return
                 job_id = pending.task_id
                 payload = self._payload_store.read(job_id)
+                trusted_runtime = payload.trusted_runtime
                 plan = self._plan_from_payload(payload, job_id)
                 if payload.step_cursor >= len(plan.steps):
                     raise ValueError("任务步骤游标无效")
@@ -916,12 +983,24 @@ class ClaudeCodeAgent(Star):
                     if natural_intent is not None
                     else None
                 ) or self.backend
+                trusted_runtime = self._can_manage_runtime(ctx)
                 task = validate_task(parts[2])
                 trusted_decision = self._authorize_agent_task(sender_id, task)
                 if trusted_decision.disposition is TrustedDisposition.DENY:
                     yield self._reply(
                         ctx, Plain("这个任务超出本机安全边界，没有执行。")
                     )
+                    return
+                # Tier preflight only. GO is charged after verified execution;
+                # Pro follows the published unlimited-Agent contract.
+                if not trusted_runtime:
+                    available, reason = self._check_agent_access(sender_id)
+                    if not available:
+                        yield self._reply(ctx, Plain(reason))
+                        return
+                # ponytail: check queue capacity BEFORE persisting to avoid orphaned entries.
+                if self._execution_lock.locked() and self._queued_handlers >= self.max_queued_jobs:
+                    yield self._reply(ctx, Plain("任务队列已满，请稍后再试。"))
                     return
                 job_id = uuid.uuid4().hex[:12]
                 job_dir = create_job_dir(self.workspace, job_id)
@@ -937,6 +1016,7 @@ class ClaudeCodeAgent(Star):
                     recovery="replay_safe" if replay_safe else "blocked",
                     plan=self._plan_records(plan),
                     step_cursor=0,
+                    trusted_runtime=trusted_runtime,
                 )
                 self._payload_store.write(job_id, payload)
                 self._job_store.start(
@@ -950,16 +1030,18 @@ class ClaudeCodeAgent(Star):
                     recovery=payload.recovery,
                     step_count=len(plan.steps),
                 )
-        except (ValueError, PayloadIntegrityError, OSError):
+        except (ValueError, PayloadIntegrityError) as exc:
+            logger.warning(f"[LocalAgent] job plan rejected: {type(exc).__name__}")
             yield self._reply(ctx, Plain("任务计划无效或已失效，请重新提交。"))
+            return
+        except OSError as exc:
+            logger.error(f"[LocalAgent] job persistence failed: {type(exc).__name__}")
+            yield self._reply(ctx, Plain("任务存储失败，请稍后再试。"))
             return
 
         will_queue = self._execution_lock.locked()
         queue_ahead = self._queued_handlers + (1 if will_queue else 0)
         eta = estimate_eta(plan, queue_ahead=queue_ahead)
-        if will_queue and self._queued_handlers >= self.max_queued_jobs:
-            yield self._reply(ctx, Plain("任务队列已满，请稍后再试。"))
-            return
         queued_counted = False
         lock_acquired = False
         if will_queue:
@@ -981,6 +1063,19 @@ class ClaudeCodeAgent(Star):
             current = self._job_store.get(job_id)
             if current is None:
                 raise ValueError("任务不存在")
+            charge_go_usage = False
+            if not self._can_manage_runtime(ctx):
+                tier = get_tier(sender_id, self._pro_db())
+                if tier == Tier.GO:
+                    available, reason = agent_available(sender_id, self._pro_db())
+                    if not available:
+                        self._job_store.finish(
+                            job_id, "failed", error_code="agent_quota_exhausted"
+                        )
+                        self._delete_payload(job_id)
+                        yield self._reply(ctx, Plain(reason))
+                        return
+                    charge_go_usage = True
             self._job_store.transition(
                 job_id,
                 "executing",
@@ -1006,7 +1101,6 @@ class ClaudeCodeAgent(Star):
 
             output_dir = job_dir / "outputs"
             available_backends = await self._backend_health.available()
-
             def policy(step: TaskStep):
                 decision = assess_step(
                     step,
@@ -1015,15 +1109,18 @@ class ClaudeCodeAgent(Star):
                     allowed_work_root=self.recovery_root,
                     allowed_output_root=self.workspace,
                 )
-                if (
-                    step.action_class is ActionClass.UNKNOWN
-                    and step_digest(step) in approved_steps
-                    and choose_isolation(step, sandbox_ready=False).mode == "blocked"
-                ):
-                    return type(decision)(False, False, "isolation_unavailable")
+                # ponytail: unknown steps are approved via assess_step's
+                # requires_approval=True; once approved the orchestrator runs
+                # them on the host (same path as HIGH_IMPACT). No dead
+                # isolation adapter exists, so do not synthesize a blocked
+                # decision that would waste the user's approval effort.
                 return decision
 
             def router(step: TaskStep, attempted: frozenset[str]):
+                if not trusted_runtime:
+                    if BACKEND_CODEX not in available_backends or BACKEND_CODEX in attempted:
+                        return BackendRoute(None, "public_sandbox_unavailable")
+                    return BackendRoute(BACKEND_CODEX, "selected")
                 selected = route_backend(
                     step,
                     plan.preferred_backend,
@@ -1036,15 +1133,23 @@ class ClaudeCodeAgent(Star):
                 return selected
 
             async def execute(step: TaskStep, route):
-                response, deliverables, state, exit_code, _error = await self._execute(
-                    job_id,
-                    job_dir,
-                    step.instruction,
-                    str(route.backend),
-                    high_risk_approved=step_digest(step) in approved_steps,
+                original_trusted_runtime = getattr(
+                    self, "_execution_trusted_runtime", True
                 )
+                self._execution_trusted_runtime = trusted_runtime
+                try:
+                    response, deliverables, state, exit_code, _error = await self._execute(
+                        job_id,
+                        job_dir,
+                        step.instruction,
+                        str(route.backend),
+                        high_risk_approved=step_digest(step) in approved_steps,
+                    )
+                finally:
+                    self._execution_trusted_runtime = original_trusted_runtime
                 isolated_attempt = (
-                    select_execution_dir(step.instruction, self.work_dir, job_dir)
+                    not trusted_runtime
+                    or select_execution_dir(step.instruction, self.work_dir, job_dir)
                     == job_dir.resolve(strict=True)
                 )
                 started_side_effect = step.action_class is not ActionClass.READ_ONLY
@@ -1054,11 +1159,12 @@ class ClaudeCodeAgent(Star):
                 effective_exit = exit_code if state == "completed" else (exit_code or 1)
                 verification_exit = None
                 if state == "completed" and should_run_project_verification(step):
-                    verification_command = select_verification_command(self.work_dir)
+                    verification_root = job_dir if not trusted_runtime else self.work_dir
+                    verification_command = select_verification_command(verification_root)
                     if verification_command is not None:
                         verification = await run_verification_command(
                             verification_command,
-                            self.work_dir,
+                            verification_root,
                             timeout=min(self.timeout_seconds, 600),
                         )
                         verification_exit = (
@@ -1157,11 +1263,7 @@ class ClaudeCodeAgent(Star):
                     error_code=outcome.events[-1].code,
                 )
                 self._delete_payload(job_id)
-                detail = (
-                    "安全隔离执行器尚未就绪，没有执行该步骤。"
-                    if outcome.events[-1].code == "isolation_unavailable"
-                    else "验证未通过，未标记为完成。"
-                )
+                detail = "验证未通过，未标记为完成。"
                 failed_event = TaskEvent(
                     "failed", job_id, next_cursor, outcome.events[-1].code
                 )
@@ -1170,6 +1272,9 @@ class ClaudeCodeAgent(Star):
                         ctx, Plain(format_task_reply("failed", detail))
                     )
                 return
+
+            if charge_go_usage and not use_agent(sender_id, self._pro_db()):
+                logger.warning("[LocalAgent] GO usage record could not be committed")
 
             unique: dict[str, Deliverable] = {}
             for item in outcome.deliverables:
@@ -1273,7 +1378,7 @@ class ClaudeCodeAgent(Star):
                 if not self._is_owner(ctx):
                     yield self._reply(
                         ctx,
-                        Plain("本机 Agent 是 Trusted Pro 能力，当前账号不能使用。")
+                        Plain("Agent 需要 GO 或 Pro 资格。发送 /pro status 查看当前资格。")
                     )
                     return
                 if natural_intent.action == "run":
@@ -1288,13 +1393,25 @@ class ClaudeCodeAgent(Star):
         action = parts[1].lower() if len(parts) > 1 else "help"
 
         if not self._is_owner(ctx):
-            yield self._reply(ctx, Plain("本机 Agent 是 Trusted Pro 能力，当前账号不能使用。"))
+            yield self._reply(
+                ctx, Plain("Agent 需要 GO 或 Pro 资格。发送 /pro status 查看当前资格。")
+            )
             return
-        if action in {"use", "cwd", "status", "cancel"} and not self._can_manage_runtime(ctx):
-            yield self._reply(ctx, Plain("该管理指令仅限小姚使用；Pro 可直接提交和确认任务。"))
+        if action in {"use", "cwd"} and not self._can_manage_runtime(ctx):
+            yield self._reply(ctx, Plain("该管理指令仅限小姚使用。"))
+            return
+        if action in {"status", "cancel"} and not self._is_owner(ctx):
+            yield self._reply(ctx, Plain("该操作需要 GO 或 Pro 资格。"))
             return
         if action in {"help", "?"}:
-            yield self._reply(ctx, Plain(self._help_text()))
+            yield self._reply(
+                ctx,
+                Plain(
+                    self._help_text(
+                        trusted_runtime=self._can_manage_runtime(ctx)
+                    )
+                ),
+            )
             return
         if action == "use":
             if len(parts) < 3:

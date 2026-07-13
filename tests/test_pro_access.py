@@ -8,7 +8,13 @@ from pathlib import Path
 PLUGINS_DIR = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugins"
 sys.path.insert(0, str(PLUGINS_DIR))
 
-from draw_command.pro_access import is_active_pro  # noqa: E402
+from draw_command.pro_access import (  # noqa: E402
+    Tier,
+    agent_available,
+    get_tier,
+    is_active_pro,
+    use_agent,
+)
 from pro_application.pro_store import ProStore  # noqa: E402
 
 
@@ -77,6 +83,41 @@ class ProAccessTests(unittest.TestCase):
 
             self.assertFalse(is_active_pro(APPLICANT, missing, now=1_000))
             self.assertFalse(is_active_pro(APPLICANT, broken, now=1_000))
+
+    def test_tier_is_covered_by_membership_signature(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pro_members.db"
+            store = ProStore(path, reviewer_id=REVIEWER)
+            store.grant(APPLICANT, REVIEWER, 30, now=1_000, tier="go")
+
+            self.assertEqual(get_tier(APPLICANT, path, now=1_001), Tier.GO)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE applications SET tier = 'pro' WHERE qq_id = ?",
+                    (APPLICANT,),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            self.assertEqual(get_tier(APPLICANT, path, now=1_001), Tier.ORDINARY)
+
+    def test_go_agent_usage_is_recorded_atomically(self):
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pro_members.db"
+            store = ProStore(path, reviewer_id=REVIEWER)
+            now = time.time()
+            store.grant(APPLICANT, REVIEWER, 30, now=now, tier="go")
+
+            self.assertEqual(agent_available(APPLICANT, path), (True, ""))
+            self.assertTrue(use_agent(APPLICANT, path))
+            self.assertFalse(use_agent(APPLICANT, path))
+            allowed, reason = agent_available(APPLICANT, path)
+            self.assertFalse(allowed)
+            self.assertIn("每周", reason)
 
 
 if __name__ == "__main__":

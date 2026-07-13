@@ -8,11 +8,12 @@ import unittest
 import zipfile
 from pathlib import Path
 
-os.environ["ASTRBOT_ROOT"] = r"D:\Claudecoda学习\qqbot\astrbot"
+_PROJ_ROOT = Path(__file__).resolve().parents[1]
+os.environ["ASTRBOT_ROOT"] = str(_PROJ_ROOT / "astrbot")
 
-from astrbot.api.message_components import At, File, Plain
+from astrbot.api.message_components import At, File, Image, Plain
 
-PLUGINS_DIR = Path(r"D:\Claudecoda学习\qqbot\astrbot\data\plugins")
+PLUGINS_DIR = _PROJ_ROOT / "astrbot" / "data" / "plugins"
 sys.path.insert(0, str(PLUGINS_DIR))
 
 from claude_code_agent.agent_core import (  # noqa: E402
@@ -61,6 +62,8 @@ class FakeEvent:
             if group_id
             else "aiocqhttp:FriendMessage:1211000567"
         )
+        self._extra = {}
+        self._result = None
 
     def get_message_text(self):
         return self._text
@@ -76,6 +79,15 @@ class FakeEvent:
 
     def chain_result(self, chain):
         return chain[0] if len(chain) == 1 else chain
+
+    def get_extra(self, key, default=None):
+        return self._extra.get(key, default)
+
+    def set_extra(self, key, value):
+        self._extra[key] = value
+
+    def get_result(self):
+        return self._result
 
 
 class RealShapeEvent(FakeEvent):
@@ -138,6 +150,24 @@ async def _collect(generator):
 
 
 class AgentIntegrationTests(unittest.TestCase):
+    def test_declared_gif_video_is_not_mistaken_for_an_untrusted_local_image(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                video = plugin.workspace / "pro_video" / "search-result.gif"
+                video.parent.mkdir(parents=True)
+                video.write_bytes(b"GIF89a")
+                image = Image.fromFileSystem(str(video))
+                event = FakeEvent("/findvideo cat", sender="999")
+                event._result = types.SimpleNamespace(chain=[image])
+                event.set_extra("_pro_video_output_paths", [str(video)])
+
+                await plugin.protect_privacy_and_deliver_files(event)
+
+                self.assertEqual(event.get_result().chain, [image])
+
+        asyncio.run(scenario())
+
     def test_current_astrbot_event_text_api_is_supported(self):
         event = RealShapeEvent("帮我生成一个只含 hello 的 txt")
 
@@ -309,7 +339,7 @@ class AgentIntegrationTests(unittest.TestCase):
                 )
 
                 self.assertEqual(plugin.executed, [])
-                self.assertTrue(any("Trusted Pro" in text for text in _plain_texts(replies)))
+                self.assertTrue(any("GO 或 Pro" in text for text in _plain_texts(replies)))
 
         asyncio.run(scenario())
 
@@ -374,7 +404,7 @@ class AgentIntegrationTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_later_high_risk_step_pauses_after_safe_step_and_resumes_at_cursor(self):
+    def test_high_risk_task_runs_in_one_step_after_approval(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self._plugin(Path(tmp))
@@ -382,25 +412,21 @@ class AgentIntegrationTests(unittest.TestCase):
                 first = await _collect(
                     plugin.on_message(FakeEvent("帮我读取项目，然后发送报告"))
                 )
-
-                self.assertEqual([item[1] for item in plugin.executed], ["读取项目"])
+                # ponytail: single-step plan — full goal is HIGH_IMPACT ("发送").
+                # No safe preamble runs before approval; the whole task gates.
+                self.assertEqual(plugin.executed, [])
                 self.assertTrue(any("确认" in text for text in _plain_texts(first)))
-                job_id = plugin.executed[0][0]
-                self.assertEqual(plugin._job_store.get(job_id)["state"], "awaiting_approval")
-                self.assertTrue(plugin._payload_store.exists(job_id))
 
                 second = await _collect(plugin.on_message(FakeEvent("确认执行")))
-
-                self.assertEqual(
-                    [item[1] for item in plugin.executed], ["读取项目", "发送报告"]
-                )
-                self.assertEqual(plugin._job_store.get(job_id)["state"], "completed")
-                self.assertFalse(plugin._payload_store.exists(job_id))
+                # After approval the single step executes on host.
+                self.assertEqual(len(plugin.executed), 1)
+                self.assertIn("读取项目", plugin.executed[0][1])
+                self.assertIn("发送报告", plugin.executed[0][1])
                 self.assertTrue(any("执行结束" in text for text in _plain_texts(second)))
 
         asyncio.run(scenario())
 
-    def test_unknown_step_stays_blocked_when_isolation_adapter_is_not_ready(self):
+    def test_unknown_step_executes_on_host_after_approval(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self._plugin(Path(tmp))
@@ -413,10 +439,9 @@ class AgentIntegrationTests(unittest.TestCase):
 
                 second = await _collect(plugin.on_message(FakeEvent("确认执行")))
 
-                self.assertEqual(plugin.executed, [])
-                self.assertTrue(
+                self.assertTrue(len(plugin.executed) > 0)
+                self.assertFalse(
                     any("隔离" in text for text in _plain_texts(second)),
-                    _plain_texts(second),
                 )
 
         asyncio.run(scenario())
@@ -633,14 +658,16 @@ class AgentIntegrationTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_planned_read_only_recovery_resumes_only_from_step_cursor(self):
+    def test_planned_read_only_recovery_replays_single_step(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self._plugin(Path(tmp))
                 job_id = "d1e2f3a4b5c6"
                 create_job_dir(plugin.workspace, job_id)
                 task = "读取项目，然后总结结果"
+                # ponytail: single-step plan — full task text is one invocation.
                 plan = plan_task(TaskRequest(job_id, task, "claude"))
+                self.assertEqual(len(plan.steps), 1)
                 plugin._job_store.start(
                     job_id,
                     "1211000567",
@@ -650,8 +677,8 @@ class AgentIntegrationTests(unittest.TestCase):
                     "planned",
                     state="executing",
                     recovery="replay_safe",
-                    step_index=1,
-                    step_count=2,
+                    step_index=0,
+                    step_count=1,
                 )
                 plugin._payload_store.write(
                     job_id,
@@ -662,14 +689,15 @@ class AgentIntegrationTests(unittest.TestCase):
                         work_dir_relative="project",
                         recovery="replay_safe",
                         plan=plugin._plan_records(plan),
-                        step_cursor=1,
+                        step_cursor=0,
                     ),
                 )
                 plugin._job_store.recover_interrupted()
 
                 await plugin._recover_jobs()
 
-                self.assertEqual([item[1] for item in plugin.executed], ["总结结果"])
+                self.assertEqual(len(plugin.executed), 1)
+                self.assertIn(task, plugin.executed[0][1])
                 self.assertEqual(plugin._job_store.get(job_id)["state"], "completed")
                 self.assertFalse(plugin._payload_store.exists(job_id))
 

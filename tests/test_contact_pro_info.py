@@ -90,11 +90,11 @@ class ContactProInfoTests(unittest.TestCase):
         self.assertIn(rule, config["provider_settings"]["prompt_prefix"])
         self.assertIn("Pro 在此基础上支持 AI 作图", config["provider_settings"]["prompt_prefix"])
         self.assertIn("Agent 任务", config["provider_settings"]["prompt_prefix"])
-        persona_rule = "询问联系作者、老板或获取 Pro 时"
         self.assertTrue(
             any(
                 persona.get("name") == "xiaoning"
-                and persona_rule in persona.get("prompt", "")
+                and "询问联系作者" in persona.get("prompt", "")
+                and "公开邮箱" in persona.get("prompt", "")
                 for persona in config["persona"]
             )
         )

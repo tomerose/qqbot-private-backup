@@ -102,6 +102,37 @@ class ProStoreTests(unittest.TestCase):
             self.store.revoke(other, "2000000000", now=1_000 + 72 * 3600 + 11)
         self.assertTrue(self.store.revoke(other, REVIEWER, now=1_000 + 72 * 3600 + 11))
 
+    def test_restart_does_not_resign_tampered_active_membership(self):
+        self.store.grant(APPLICANT, REVIEWER, 30, now=1_000, tier="go")
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute(
+                "UPDATE applications SET tier = 'pro' WHERE qq_id = ?",
+                (APPLICANT,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        restarted = ProStore(self.path, reviewer_id=REVIEWER)
+        self.assertFalse(restarted.is_active_pro(APPLICANT, now=1_001))
+
+    def test_deactivated_group_can_be_reactivated(self):
+        self.store.activate_group("12345678", REVIEWER, now=1_000)
+        self.assertTrue(self.store.deactivate_group("12345678", REVIEWER, now=1_001))
+        self.store.activate_group("12345678", REVIEWER, now=1_002)
+        self.assertTrue(self.store.is_active_group("12345678", now=1_003))
+
+    def test_permanent_go_grant_is_signed_and_does_not_expire(self):
+        self.store.grant(
+            APPLICANT,
+            REVIEWER,
+            now=1_000,
+            tier="go",
+            permanent=True,
+        )
+        self.assertTrue(self.store.is_active_pro(APPLICANT, now=1_000 + 36500 * 86400 - 1))
+        self.assertFalse(self.store.is_active_pro(APPLICANT, now=1_000 + 36500 * 86400 + 1))
+
     def test_duration_is_bounded_and_pending_application_is_rate_limited(self):
         application = self.store.create_application(APPLICANT, now=1_000)
         with self.assertRaisesRegex(ProStoreError, "application_pending"):

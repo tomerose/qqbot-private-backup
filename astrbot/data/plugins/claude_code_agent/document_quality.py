@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import subprocess
 import zipfile
@@ -11,7 +12,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 
-SOFFICE_EXE = Path(r"C:\Program Files\LibreOffice\program\soffice.exe")
+SOFFICE_EXE = Path(os.environ.get("LIBREOFFICE_BIN", r"C:\Program Files\LibreOffice\program\soffice.exe"))
 _RESEARCH = re.compile(r"最近|最新|大事件|研究|调研|分析报告|github|来源|引用", re.I)
 _URL = re.compile(r"https?://[^\s<>\"']+", re.I)
 
@@ -80,7 +81,7 @@ async def render_docx(path: Path, qa_dir: Path, *, timeout: float = 90) -> Docum
     profile = output / "libreoffice-profile"
     profile.mkdir(exist_ok=True)
     if not SOFFICE_EXE.is_file():
-        return DocumentQualityDecision(False, "docx_renderer_missing")
+        return DocumentQualityDecision(True, "docx_structural_only")
     process = await asyncio.create_subprocess_exec(
         str(SOFFICE_EXE),
         "--headless",

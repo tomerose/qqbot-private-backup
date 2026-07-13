@@ -6,11 +6,12 @@ import unittest
 import wave
 from pathlib import Path
 
-os.environ["ASTRBOT_ROOT"] = r"D:\Claudecoda学习\qqbot\astrbot"
+_PROJ_ROOT = Path(__file__).resolve().parents[1]
+os.environ["ASTRBOT_ROOT"] = str(_PROJ_ROOT / "astrbot")
 
 from astrbot.api.message_components import File, Plain, Record
 
-PLUGINS_DIR = Path(r"D:\Claudecoda学习\qqbot\astrbot\data\plugins")
+PLUGINS_DIR = _PROJ_ROOT / "astrbot" / "data" / "plugins"
 sys.path.insert(0, str(PLUGINS_DIR))
 
 from voice_model_router.main import VoiceModelRouter  # noqa: E402
@@ -169,6 +170,47 @@ class VoiceModelPluginTests(unittest.TestCase):
                 self.assertFalse(generated.exists())
                 self.assertTrue(outside.exists())
                 self.assertEqual(event.get_extra("_local_tts_audio_paths"), [])
+
+        asyncio.run(scenario())
+
+    def test_voice_message_auto_enables_voice_reply_in_private_chat(self):
+        async def scenario():
+            plugin = VoiceModelRouter.__new__(VoiceModelRouter)
+            plugin.config = {"auto_voice_reply": True}
+            # Simulate a voice message (Record component, non-empty text from STT)
+            event = FakeEvent(
+                "帮我查天气",
+                private=True,
+                components=[Record(file="voice.amr")],
+            )
+            await plugin.route_voice_request(event)
+            self.assertTrue(event.get_extra("voice_reply_requested"))
+            self.assertEqual(event.get_extra("selected_provider"), "gemini-2.5-flash")
+
+        asyncio.run(scenario())
+
+    def test_text_message_without_record_does_not_set_voice_reply(self):
+        async def scenario():
+            plugin = VoiceModelRouter.__new__(VoiceModelRouter)
+            plugin.config = {"auto_voice_reply": True}
+            event = FakeEvent("帮我查天气", private=True, components=[Plain("帮我查天气")])
+            await plugin.route_voice_request(event)
+            self.assertIsNone(event.get_extra("voice_reply_requested"))
+
+        asyncio.run(scenario())
+
+    def test_voice_message_in_group_without_at_does_not_set_voice_reply(self):
+        async def scenario():
+            plugin = VoiceModelRouter.__new__(VoiceModelRouter)
+            plugin.config = {"auto_voice_reply": True}
+            event = FakeEvent(
+                "帮我查天气",
+                private=False,
+                wake=False,
+                components=[Record(file="voice.amr")],
+            )
+            await plugin.route_voice_request(event)
+            self.assertIsNone(event.get_extra("voice_reply_requested"))
 
         asyncio.run(scenario())
 

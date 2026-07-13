@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-PLUGIN_DIR = Path(r"D:\Claudecoda学习\qqbot\astrbot\data\plugins\voice_model_router")
+PLUGIN_DIR = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugins" / "voice_model_router"
 sys.path.insert(0, str(PLUGIN_DIR))
 
 from local_tts_client import LocalTTSClient  # noqa: E402

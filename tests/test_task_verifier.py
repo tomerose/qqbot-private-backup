@@ -88,6 +88,13 @@ class TaskVerifierTests(unittest.TestCase):
             command = select_verification_command(root)
             self.assertEqual(command[1:], ["-m", "unittest", "discover", "-s", "tests"])
 
+    def test_go_project_takes_priority_over_generic_tests_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "go.mod").write_text("module example.com/demo\n", encoding="utf-8")
+            (root / "tests").mkdir()
+            self.assertEqual(select_verification_command(root), ["go", "test", "./..."])
+
     def test_project_verification_runs_only_for_code_change_or_test_steps(self):
         read_step = TaskStep(
             "job123", 0, "读取并总结报告", ActionClass.READ_ONLY, False

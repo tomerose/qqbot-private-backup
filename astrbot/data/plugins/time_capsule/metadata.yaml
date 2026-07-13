@@ -1,0 +1,6 @@
+name: time_capsule
+display_name: 时间胶囊
+short_desc: /capsule 给未来的自己写信
+desc: 给未来的自己留言，到时间自动送达。每用户最多 5 个活跃胶囊。
+version: v1.0.0
+author: lemon
