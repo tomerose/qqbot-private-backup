@@ -1,4 +1,12 @@
-"""Public help, tier and contact replies backed by implemented features."""
+# -*- coding: utf-8 -*-
+"""Public help, tier and contact replies backed by implemented features.
+
+Long Chinese text is loaded from external UTF-8 .txt files to avoid encoding issues
+that can occur when writing Chinese characters through certain tools.
+"""
+
+import os
+import re
 
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Star
@@ -8,42 +16,17 @@ except ImportError:
     from data.plugins.xiaoning_runtime import defer_stop_event
 
 
-USER_GUIDE = (
-    "【小柠使用指南】\n\n"
-    "💬 日常对话\n"
-    "直接聊天即可；支持识图、答疑和情绪陪伴。\n"
-    "发语音时会用音频模型理解，并在本地 TTS 可用时回复语音。\n\n"
-    "🧰 免费工具\n"
-    "/tr <语言> <内容> — 翻译\n"
-    "/summary <链接> — 链接摘要\n"
-    "发送 PDF/TXT/MD — 文档分析（普通用户 1次/天）\n"
-    "/capsule <多久后> <内容> — 时间胶囊\n"
-    "/werewolf 8 — 群聊 8 人狼人杀（3局/天）\n"
-    "/debate <话题> — AI 圆桌（普通用户 1次/天）\n\n"
-    "🎨 AI 画图\n"
-    "/draw <描述> 或「帮我画…」\n"
-    "普通版/GO 6次/周 | Pro 10次/天\n\n"
-    "🎬 AI 视频\n"
-    "/video <描述> — 生成 4 秒视频\n"
-    "/findvideo <关键词> — 搜索公开视频\n"
-    "Pro 专属，生成 3次/天\n\n"
-    "🤖 Agent 任务\n"
-    "/agent run <任务描述>\n"
-    "在独立安全工作区完成报告、资料整理和文件制作\n"
-    "GO 1次/周 | Pro 不限次数\n\n"
-    "🎯 GO/Pro 工具\n"
-    "/interview <岗位> — 五轮模拟面试\n"
-    "文档分析和 AI 圆桌额度提升至每日 10 次\n\n"
-    "⏰ 提醒\n"
-    "/remind <时间> <内容>\n\n"
-    "🛡 群管理\n"
-    "禁言、撤回、公告需要机器人拥有对应群权限。\n\n"
-    "💳 资格\n"
-    "/pro status — 查看当前资格\n"
-    "/redeem <邀请码> — 私聊兑换 GO/Pro\n\n"
-    "📧 联系：portelamicheli636@gmail.com\n"
-    "安全：不读取密码、私聊记录或通讯录。"
-)
+# ---- Load long Chinese text from external UTF-8 files ----
+
+def _load_text(filename):
+    """Load Chinese text from a UTF-8 file next to this plugin."""
+    path = os.path.join(os.path.dirname(__file__), filename)
+    with open(path, 'r', encoding='utf-8') as f:
+        return f.read().strip()
+
+
+USER_GUIDE = _load_text('user_guide.txt')
+CAPABILITY_MEMORY = _load_text('capability_memory.txt')
 
 CONTACT_REPLY = (
     "联系邮箱：portelamicheli636@gmail.com。"
@@ -52,35 +35,69 @@ CONTACT_REPLY = (
 
 PRO_APPLICATION_GUIDE = (
     "【小柠资格指南】\n"
-    "GO 和 Pro 为邀请制。请联系小柠拥有者获取邀请码，"
-    "然后私聊发送：/redeem <邀请码>。\n"
+    "添加小柠为 QQ 好友即可自动获得 X资格（无需口令，系统自动检测）。\n"
+    "Pro 资格通过邀请码开通：/redeem <邀请码>。\n"
     "发送 /pro status 可查看当前资格。"
+)
+
+CONVERSATIONAL_HELP_REPLY = (
+    "能陪你聊，也能真动手：查资料、读文件、画图、做网页、报告和视频都行。"
+    "别研究命令，直接说眼下想搞定什么；比如“帮我比较 A 和 B”，我会自己接到合适的功能。"
 )
 
 VERSION_REPLY = (
     "【小柠版本说明】\n"
-    "普通版：聊天、语音、翻译、链接摘要、文档分析、提醒、时间胶囊、狼人杀和每日 1 次 AI 圆桌。\n"
-    "普通版：聊天、语音、翻译、链接摘要、文档分析、提醒、时间胶囊、狼人杀、每日 1 次 AI 圆桌和作图 6次/周。\n"
-    "GO：普通版 + Agent 1次/周 + 模拟面试，文档/圆桌每日 10 次。\n"
-    "Pro：GO 全部能力 + 作图 10次/天 + AI 视频 3次/天 + Agent 不限次数。\n"
-    "GO/Pro 均为邀请制；安全限制始终有效。"
+    "普通版：聊天、识图、语音、情绪倾听、"
+    "实时搜索/地图/计算、GitHub与B站工具、"
+    "翻译、链接与文档分析、时间胶囊、狼人杀、"
+    "欢迎卡片、消息回应、作图 1次/天。\n"
+    "X资格（添加QQ好友自动获得）：普通版全部 + "
+    "个人长期记忆、深度思考、私聊增强对话、文件交付、"
+    "AI 早报订阅、AI 辩论 3次/天、模拟面试 3次/天、"
+    "文档/PDF分析 5次/天、网页工坊 1次/天（最多3个）、"
+    "搜索行动包 3次/天（文件返回QQ）、Agent 1次/周、"
+    "作图 6次/周、AI 视频 3次/天、视频Agent 1次/天。\n"
+    "Pro（邀请制）：X资格全部 + 网页工坊 5次/天（最多20个并独立复核）+ "
+    "行动包 10次/天并独立复核 + 作图 10次/天 + 定制图 1次/天 + "
+    "AI 视频 Veo全功能 1次/月 + 视频Agent 5次/天 + "
+    "音乐生成 + Agent 不限次数 + 辩论/面试/文档无限。\n"
+    "添加小柠为QQ好友自动获得X资格；Pro 邀请码仍有效；安全限制始终有效。"
 )
 
-MUSIC_GUIDE = (
-    "\n\n\U0001f3b5 \u97f3\u4e50\n"
-    "\u7f51\u6613\u4e91\u5361\uff1a/music <\u6b4c\u66f2 ID \u6216\u5206\u4eab\u94fe\u63a5>\uff0c\u4e5f\u53ef\u4ee5\u8bf4\u201c\u5e2e\u6211\u53d1\u9001\u7f51\u6613\u4e91\u97f3\u4e50 <ID/\u94fe\u63a5>\u201d\u3002\n"
-    "\u539f\u521b\u6b4c\u66f2\uff1aPro \u53ef\u7528 /sing <\u63cf\u8ff0>\uff0c\u4e5f\u53ef\u4ee5\u8bf4\u201c\u5c0f\u67e0\uff0c\u7ed9\u6211\u5531\u4e00\u9996\u5173\u4e8e\u590f\u5929\u7684\u539f\u521b\u6b4c\u201d\u3002\u6bcf\u65e5 1 \u6b21\uff0c\u4e0d\u6a21\u4eff\u6b4c\u624b\u3001\u4e0d\u590d\u523b\u5df2\u6709\u6b4c\u66f2\u3002"
-)
-USER_GUIDE += MUSIC_GUIDE
-VERSION_REPLY += "\n\u97f3\u4e50\uff1a\u666e\u901a\u7248\u53ef\u53d1\u9001\u7f51\u6613\u4e91\u97f3\u4e50\u5361\uff1bPro \u53ef\u6bcf\u5929\u751f\u6210 1 \u9996\u7ea6 30 \u79d2\u539f\u521b\u6b4c\u66f2\u3002"
-
-_HELP_TEXTS = {
-    "帮助", "help", "/help", "小柠怎么用", "小柠使用指南", "使用指南",
-    "新手帮助", "小柠能干嘛", "小柠能做什么", "小柠有什么功能",
-    "小柠功能", "功能列表", "全部命令", "所有命令",
+_GUIDE_TEXTS = {
+    "帮助", "help", "/help",
+    "小柠使用指南", "使用指南", "新手帮助",
+    "功能列表", "全部命令", "所有命令",
 }
-_TIER_SUBJECTS = {"pro", "go", "普通版", "会员", "版本"}
-_TIER_INTENTS = {"是什么", "区别", "功能", "权限", "升级", "多少钱", "收费", "付费"}
+_CONVERSATIONAL_HELP_TEXTS = {
+    "小柠怎么用", "小柠能干嘛", "小柠能做什么", "小柠有什么功能", "小柠功能",
+    "你能干嘛", "你能做什么", "你会什么", "你可以干什么", "你有什么功能",
+}
+_FEATURE_HELP = (
+    (("深度研究",), "深度研究适合需要多轮检索、交叉核验再出完整报告的题，Pro 可用。直接说“帮我深度研究大学生就业趋势”，做好后报告会发回 QQ。"),
+    (("行动包", "比较决策", "旅行规划"), "行动包会把研究、比较或行程做成可执行报告。直接说“帮我比较 A 和 B”或“帮我规划杭州三天行程”就行。"),
+    (("网页工坊", "做网页", "制作网页"), "网页工坊会直接做出能操作的网页，并返回预览、HTML 和公开链接。你可以说“帮我做一个记账网页”。"),
+    (("画图", "作图", "绘图", "图片生成"), "会，直接把画面说清楚就行，比如“帮我画一只雨夜霓虹下的黑猫”。需要改图就回复原图说要改哪里。"),
+    (("视频", "短片", "动画"), "想要原创短片就说“帮我生成一段海边日落视频”；想找现成视频就说“帮我找周杰伦现场视频”，我会走不同的功能。"),
+    (("圆桌辩论", "圆桌讨论", "ai辩论", "辩论"), "圆桌适合把一个问题拆成多种立场。直接说“圆桌讨论 AI 会不会降低人的能力”就会开始。"),
+    (("模拟面试", "ai面试"), "模拟面试会连续追问并给反馈。直接说“帮我模拟产品经理面试”，我就按真实面试开始。"),
+    (("agent", "文件交付", "生成报告"), "要报告、Word、PDF 或表格成品时，直接说清楚要什么文件和内容，比如“帮我做一份暑假计划 Word”。成品会作为 QQ 文件返回。"),
+    (("实时搜索", "查资料", "搜索"), "需要最新资料时直接说“帮我查一下……”；如果想要完整报告，就说“帮我深度研究……”。"),
+    (("翻译",), "把原文和目标语言一起发来就行，比如“把这段话翻译成英文”，不用背命令。"),
+    (("原创歌曲", "写歌", "唱歌", "音乐生成"), "想点现成歌曲就说歌名和歌手；想生成原创歌就描述主题、风格和情绪，我会自动分开处理。"),
+    (("长期记忆", "记忆功能"), "你明确说出的长期偏好、计划和稳定事实可以被记住；一次性命令和文件任务不会当成长期记忆。"),
+)
+_META_QUESTION_WORDS = (
+    "怎么用", "如何用", "如何使用", "用法", "有什么用", "能做什么", "能干什么",
+    "是干嘛的", "是做什么的", "怎么玩", "支持什么",
+)
+_CAPABILITY_PREFIXES = ("能不能", "可不可以", "会不会", "能否", "是否", "有没有", "能", "会", "可以", "支持")
+_TASK_REQUEST_PREFIXES = (
+    "帮我", "给我", "替我", "帮忙", "我要", "我想", "麻烦", "请帮", "请给", "请做", "请生成", "请制作",
+)
+_TIER_SUBJECTS = {"pro", "普通版", "会员", "版本", "资格", "x资格"}
+_TIER_INTENTS = {"是什么", "区别", "功能", "权限",
+                 "升级", "多少钱", "收费", "付费"}
 _CONTACT_WORDS = {"联系", "联系方式", "邮箱", "找"}
 _CONTACT_TARGETS = {"作者", "老板", "管理员", "拥有者", "负责人"}
 _ACQUISITION_WORDS = {"获取", "开通", "申请", "资格", "怎么拿", "如何"}
@@ -90,8 +107,50 @@ def _normalized(text: str) -> str:
     return "".join(str(text or "").lower().split())
 
 
+def _normalized_query(text: str) -> str:
+    value = _normalized(text).rstrip("。！!？?")
+    return re.sub(r"(?:吗|嘛|呢|啊|呀)$", "", value)
+
+
 def _match_help(text: str) -> bool:
-    return _normalized(text) in _HELP_TEXTS
+    return _normalized_query(text) in _GUIDE_TEXTS
+
+
+def _match_conversational_help(text: str) -> bool:
+    return _normalized_query(text) in _CONVERSATIONAL_HELP_TEXTS
+
+
+def feature_help_for(text: str) -> str | None:
+    """Explain a named feature only for a clear meta/capability question."""
+    value = re.sub(r"[，,：:]", "", _normalized_query(text))
+    if not value:
+        return None
+    candidate = value
+    for subject in ("小柠", "柠柠", "你"):
+        if candidate.startswith(subject):
+            candidate = candidate[len(subject):]
+            break
+    if candidate.startswith(_TASK_REQUEST_PREFIXES) or (
+        candidate.startswith("请") and not candidate.startswith("请问")
+    ):
+        return None
+    for keywords, reply in _FEATURE_HELP:
+        if not any(keyword in value for keyword in keywords):
+            continue
+        if any(word in value for word in _META_QUESTION_WORDS):
+            return reply
+        for prefix in _CAPABILITY_PREFIXES:
+            if not candidate.startswith(prefix):
+                continue
+            remainder = candidate[len(prefix):]
+            for bridge in ("帮我", "使用", "用", "做", "制作", "生成"):
+                if remainder.startswith(bridge):
+                    remainder = remainder[len(bridge):]
+                    break
+            if remainder in keywords:
+                return reply
+        return None
+    return None
 
 
 def _match_tier(text: str) -> bool:
@@ -110,12 +169,14 @@ def _match_contact(text: str) -> bool:
 
 def _match_acquisition(text: str) -> bool:
     value = _normalized(text)
-    return ("pro" in value or "go" in value) and any(
+    return ("pro" in value or "x" in value or "go" in value) and any(
         item in value for item in _ACQUISITION_WORDS
     )
 
 
 def version_reply_for(text: str) -> str | None:
+    if _match_conversational_help(text):
+        return CONVERSATIONAL_HELP_REPLY
     return VERSION_REPLY if _match_help(text) or _match_tier(text) else None
 
 
@@ -126,14 +187,27 @@ def contact_reply_for(text: str) -> str | None:
 
 
 class ContactProInfo(Star):
-    @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=950)
+    @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=990)
     @defer_stop_event
     async def on_message(self, event: AstrMessageEvent):
         text = str(getattr(event, "get_message_str", lambda: "")() or "").strip()
         if not text:
             return
-        if _match_help(text):
+
+        # In group chats: require explicit @小柠 or "小柠" mention to avoid false triggers
+        is_private = bool(getattr(event, "is_private_chat", lambda: False)())
+        is_at = bool(getattr(event, "is_at_or_wake_command", False))
+        has_xiaoning = bool(re.search(r"小柠|柠柠|xiao\s*ning", text, re.I))
+        if not is_private and not is_at and not has_xiaoning:
+            return
+
+        feature_reply = feature_help_for(text)
+        if feature_reply:
+            reply = feature_reply
+        elif _match_help(text):
             reply = USER_GUIDE
+        elif _match_conversational_help(text):
+            reply = CONVERSATIONAL_HELP_REPLY
         elif _match_acquisition(text):
             reply = PRO_APPLICATION_GUIDE
         elif _match_tier(text):
@@ -144,3 +218,9 @@ class ContactProInfo(Star):
             return
         event.stop_event()
         yield event.plain_result(reply)
+
+    @filter.on_llm_request(priority=-17)
+    async def inject_capability_memory(self, event: AstrMessageEvent, req) -> None:
+        system_prompt = str(getattr(req, "system_prompt", "") or "")
+        if "【公开能力事实】" not in system_prompt:
+            req.system_prompt = f"{system_prompt}\n\n{CAPABILITY_MEMORY}".strip()

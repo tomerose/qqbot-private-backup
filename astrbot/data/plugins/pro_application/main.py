@@ -45,6 +45,10 @@ DIEDEEP_PATH = Path("D:/Claudecoda学习/diedeepbirth")
 INVITE_EXPIRE_HOURS = 72
 INVITE_CODE_PREFIX = "XIAONING-"
 
+# Friend-X sync: check friend list every 10 min, auto-grant/revoke X资格
+FRIEND_X_SYNC_INTERVAL_MINUTES = 10
+FRIEND_X_REVOKE_GRACE_CHECKS = 2  # Must be non-friend for N consecutive checks
+
 # Passphrase auth session
 AUTH_SESSION_TTL = 300         # 5 min
 MAX_AUTH_ATTEMPTS = 3
@@ -66,6 +70,9 @@ class ProApplication(Star):
         self._summary_scheduler: AsyncIOScheduler | None = None
         self._summary_lock = asyncio.Lock()
         self._review_lock = asyncio.Lock()
+        # Friend-X sync: track consecutive non-friend checks for grace period
+        self._friend_x_non_friend_count: dict[str, int] = {}
+        self._friend_x_lock = asyncio.Lock()
 
     # ── Daily summary ──────────────────────────────────────────────
 
@@ -92,10 +99,19 @@ class ProApplication(Star):
             id="pro_weekly_review",
             replace_existing=True,
         )
+        self._summary_scheduler.add_job(
+            self._friend_x_sync_job,
+            "interval",
+            minutes=FRIEND_X_SYNC_INTERVAL_MINUTES,
+            id="friend_x_sync",
+            replace_existing=True,
+            next_run_time=None,  # manual first run in on_platform_loaded
+        )
         self._summary_scheduler.start()
         logger.info(
             f"[Pro] 每日总结({SUMMARY_HOUR:02d}:{SUMMARY_MINUTE:02d}) + "
-            f"周复盘({REVIEW_DAY} {REVIEW_HOUR:02d}:{REVIEW_MINUTE:02d}) 已启动"
+            f"周复盘({REVIEW_DAY} {REVIEW_HOUR:02d}:{REVIEW_MINUTE:02d}) + "
+            f"好友X同步(每{FRIEND_X_SYNC_INTERVAL_MINUTES}分钟) 已启动"
         )
 
     async def _daily_summary_job(self) -> None:
@@ -294,6 +310,149 @@ class ProApplication(Star):
             await self.context.send_message(session, MessageChain([Plain(full_msg)]))
             logger.info(f"[Pro] 周复盘已发送给 owner")
             return f"周复盘完成（{week_range}）"
+
+    async def _quick_friend_grant(self, event, sender_id: str) -> None:
+        """Per-message quick check: if sender is QQ friend but has no tier, grant X."""
+        if not await self._is_qq_friend(event, sender_id):
+            return
+        try:
+            state, _ = self.store.claim_friend_x(sender_id, now=self._clock())
+            if state == "granted":
+                logger.info("[Pro] 即时X授予: %s", sender_id)
+                asyncio.create_task(self._notify_x_granted(sender_id))
+        except Exception:
+            pass
+
+    async def _notify_x_granted(self, qq_id: str) -> None:
+        """Send a private message to notify user they got X资格."""
+        try:
+            origin = ""
+            for inst in self.context.platform_manager.platform_insts:
+                meta = getattr(inst, "metadata", None)
+                if meta and hasattr(meta, "id"):
+                    origin = str(meta.id)
+                    break
+            if not origin:
+                return
+            session = f"{origin}:FriendMessage:{qq_id}"
+            msg = (
+                "🎉 小柠检测到你加了好友，已自动为你开通 X资格！\n\n"
+                "X资格解锁：\n"
+                "• 长期记忆 — 小柠会记住你分享的事，聊天时自然提起\n"
+                "• 跨对话任务追踪 — 帮你盯进行中的任务\n"
+                "• 深度思考 + 私聊增强对话\n"
+                "• AI作图 6次/周 | AI视频 3次/天 | 视频制作 1次/天\n"
+                "• AI辩论/面试/文档分析 | 网页工坊 | 搜索行动包\n"
+                "• Agent任务 1次/周 | 文件交付\n"
+                "• AI早报每日推送\n\n"
+                "发送 /pro status 查看资格详情。\n"
+                "就像跟朋友聊天一样，有什么需要直接说就行～"
+            )
+            await self.context.send_message(session, MessageChain([Plain(msg)]))
+            logger.info("[Pro] X资格通知已发送: %s", qq_id)
+        except Exception:
+            pass
+
+    # ── Friend-X sync ──────────────────────────────────────────────
+
+    async def _friend_x_sync_job(self) -> None:
+        """Scheduler entry point — delegate to the main sync logic."""
+        try:
+            await self._sync_friend_x()
+        except Exception:
+            logger.exception("[Pro] 好友X同步异常")
+
+    async def _sync_friend_x(self) -> None:
+        """Sync X资格: grant to new friends, revoke from removed friends (grace period)."""
+        async with self._friend_x_lock:
+            now = self._clock()
+            # 1. Get friend list from QQ
+            friend_ids: set[str] = set()
+            for inst in self.context.platform_manager.platform_insts:
+                client = None
+                if hasattr(inst, "get_client"):
+                    client = inst.get_client()
+                if client is None:
+                    continue
+                try:
+                    result = await client.call_action("get_friend_list")
+                except Exception:
+                    logger.debug("[Pro] get_friend_list 失败，跳过本轮同步")
+                    return  # fail-safe: skip this round, retry next interval
+                if isinstance(result, dict):
+                    result = result.get("data", result.get("friends", []))
+                if isinstance(result, list):
+                    for item in result:
+                        if isinstance(item, dict):
+                            uid = str(item.get("user_id", ""))
+                            if uid.isdigit() and len(uid) >= 5:
+                                friend_ids.add(uid)
+                break  # only use first platform instance
+
+            if not friend_ids:
+                logger.debug("[Pro] 好友列表为空，跳过X同步")
+                return
+
+            # 2. Grant X to new friends
+            granted = 0
+            granted_ids: list[str] = []
+            for uid in friend_ids:
+                if uid == REVIEWER_ID:
+                    continue  # owner already has PRO
+                try:
+                    state, _ = self.store.claim_friend_x(uid, now=now)
+                    if state == "granted":
+                        granted += 1
+                        granted_ids.append(uid)
+                        self._friend_x_non_friend_count.pop(uid, None)
+                    elif state == "already_member":
+                        self._friend_x_non_friend_count.pop(uid, None)
+                except Exception:
+                    pass
+
+            # 3. Revoke X from non-friends (grace period: N consecutive checks)
+            revoked = 0
+            active_x = self._list_active_x_qqs(now=now)
+            for uid in active_x:
+                if uid in friend_ids:
+                    self._friend_x_non_friend_count.pop(uid, None)
+                    continue
+                count = self._friend_x_non_friend_count.get(uid, 0) + 1
+                self._friend_x_non_friend_count[uid] = count
+                if count >= FRIEND_X_REVOKE_GRACE_CHECKS:
+                    try:
+                        if self.store.revoke_friend_x(uid, now=now):
+                            revoked += 1
+                            self._friend_x_non_friend_count.pop(uid, None)
+                    except Exception:
+                        pass
+
+            # 4. Notify newly granted users via private message
+            for uid in granted_ids:
+                asyncio.create_task(self._notify_x_granted(uid))
+
+            if granted or revoked:
+                logger.info(
+                    "[Pro] 好友X同步: +%d X资格, -%d X资格, %d好友",
+                    granted, revoked, len(friend_ids),
+                )
+
+    def _list_active_x_qqs(self, *, now: float) -> list[str]:
+        """Return all QQ IDs with active X tier (friend-granted only)."""
+        import sqlite3 as _sqlite3
+        from contextlib import closing as _closing
+        try:
+            with _closing(_sqlite3.connect(str(self.store.path.resolve(strict=True)))) as conn:
+                conn.row_factory = _sqlite3.Row
+                rows = conn.execute(
+                    """SELECT qq_id FROM applications
+                       WHERE tier = 'x' AND state = 'active' AND pro_expires_at >= ?
+                         AND application_id LIKE 'FRIEND-X-%'""",
+                    (float(now),),
+                ).fetchall()
+                return [str(r["qq_id"]) for r in rows]
+        except Exception:
+            return []
 
     # ── Passphrase auth ────────────────────────────────────────────
 
@@ -512,10 +671,29 @@ class ProApplication(Star):
                 self._save_invites(store)
                 logger.warning("[Pro] Invite grant rejected: %s", str(error))
                 return False, "开通失败，请稍后重试。"
-        label = "GO" if entry["tier"] == "go" else "Pro"
+        label = "X" if entry["tier"] == "x" else "Pro"
         return True, (
             f"小柠已为你开通 {label}（{entry['days']} 天）！\n"
             f"发送 /pro status 查看资格详情。"
+        )
+
+    @staticmethod
+    async def _is_qq_friend(event: AstrMessageEvent, sender_id: str) -> bool:
+        bot = getattr(event, "bot", None)
+        call_action = getattr(bot, "call_action", None) if bot is not None else None
+        if not callable(call_action):
+            return False
+        try:
+            result = await call_action("get_friend_list")
+        except Exception as exc:
+            logger.warning("[Pro] friend check failed: %s", type(exc).__name__)
+            return False
+        if isinstance(result, dict):
+            result = result.get("data", result.get("friends", []))
+        return isinstance(result, list) and any(
+            str(item.get("user_id", "")) == sender_id
+            for item in result
+            if isinstance(item, dict)
         )
 
     def _list_invites(self) -> str:
@@ -544,7 +722,7 @@ class ProApplication(Star):
     def _tokens(text: str) -> list[str] | None:
         value = str(text or "").strip()
         normalized = "".join(value.lower().split())
-        if normalized in {"申请pro", "申请pro资格", "开通pro", "申请go", "开通go"}:
+        if normalized in {"申请pro", "申请pro资格", "开通pro", "申请x", "开通x", "申请go", "开通go"}:
             return ["status"]
         parts = value.split()
         if not parts:
@@ -557,9 +735,10 @@ class ProApplication(Star):
     @staticmethod
     def _invite_help() -> str:
         return (
-            "【邀请制说明】\n"
-            "GO 和 Pro 改为邀请制，不再开放自申请。\n\n"
-            "拥有者：/invite <QQ号> <go|pro> [天数]\n"
+            "【X/Pro 说明】\n"
+            "添加小柠为 QQ 好友即自动获得 X资格（无需口令，系统自动检测）。\n"
+            "Pro 资格通过邀请码开通。\n\n"
+            "拥有者：/invite <QQ号> <x|pro> [天数]\n"
             "受邀人：私聊发送 /redeem <邀请码>\n\n"
             "查看资格：/pro status"
         )
@@ -567,7 +746,7 @@ class ProApplication(Star):
     @staticmethod
     def _status_reply(application: Application | None, now: float | None = None) -> str:
         if application is None:
-            return "你目前暂无 GO/Pro 有效资格。"
+            return "你目前暂无 X/Pro 有效资格。"
         states = {
             "pending_email": "待发送邮件",
             "awaiting_review": "小柠审核中",
@@ -582,7 +761,7 @@ class ProApplication(Star):
             "verification_locked": "验证码已锁定",
         }
         if application.state == "active" and application.pro_expires_at is not None:
-            label = "GO" if application.tier == "go" else "Pro"
+            label = "X" if application.tier == "x" else "Pro"
             checked_at = time.time() if now is None else float(now)
             return (
                 f"当前资格：{label}（有效）。\n"
@@ -640,6 +819,23 @@ class ProApplication(Star):
         sender_id = self._sender(event)
         now = float(self._clock())
 
+        # Lightweight friend-X check on @mention or private chat (5 min cooldown)
+        if sender_id.isdigit() and sender_id != REVIEWER_ID:
+            is_private = event.is_private_chat()
+            is_at = getattr(event, "is_at_or_wake_command", False)
+            if is_private or is_at:
+                last = getattr(self, "_last_quick_friend_check", {})
+                if now - last.get(sender_id, 0) > 300:
+                    last[sender_id] = now
+                    self._last_quick_friend_check = last
+                    try:
+                        app = self.store.status_for(sender_id, now=now)
+                        has_active = app is not None and app.state == "active" and app.pro_expires_at and app.pro_expires_at >= now
+                    except Exception:
+                        has_active = False
+                    if not has_active:
+                        asyncio.create_task(self._quick_friend_grant(event, sender_id))
+
         # ── /redeem <code> — 兑换邀请码（私聊）──
         if raw_text.lower().startswith("/redeem"):
             event.stop_event()
@@ -656,7 +852,7 @@ class ProApplication(Star):
             yield event.plain_result(msg)
             return
 
-        # ── /invite <QQ> <go|pro> [days] — 生成邀请码（拥有者）──
+        # ── /invite <QQ> <x|pro> [days] — 生成邀请码（拥有者）──
         if raw_text.lower().startswith("/invite"):
             event.stop_event()
             if sender_id != REVIEWER_ID:
@@ -672,22 +868,22 @@ class ProApplication(Star):
                 return
             parts = raw_text.split()
             if len(parts) < 3:
-                yield event.plain_result("用法：/invite <QQ号> <go|pro> [天数]\n示例：/invite 123456 pro 30")
+                yield event.plain_result("用法：/invite <QQ号> <x|pro> [天数]\n示例：/invite 123456 pro 30")
                 return
             target_qq = parts[1].strip()
             if not target_qq.isdigit() or len(target_qq) < 5:
                 yield event.plain_result("QQ 号格式不正确。")
                 return
             tier = parts[2].strip().lower()
-            if tier not in {"go", "pro"}:
-                yield event.plain_result("tier 必须为 go 或 pro。")
+            if tier not in {"x", "pro"}:
+                yield event.plain_result("tier 必须为 x 或 pro。X资格请引导对方添加小柠为QQ好友自动获得。")
                 return
             days = int(parts[3]) if len(parts) >= 4 and parts[3].isdigit() else 30
-            max_days = 90 if tier == "go" else 365
+            max_days = 90 if tier == "x" else 365
             days = max(1, min(days, max_days))
             async with self._invite_lock:
                 code = self._generate_invite(target_qq, tier, days, now)
-            label = "GO" if tier == "go" else "Pro"
+            label = "X" if tier == "x" else "Pro"
             yield event.plain_result(
                 f"邀请码已生成：{code}\n"
                 f"目标：QQ {target_qq}\n"
@@ -737,9 +933,9 @@ class ProApplication(Star):
             if action == "grant" and len(tokens) in {2, 3}:
                 self._check_auth(sender_id, now)
                 days = int(tokens[2]) if len(tokens) == 3 and tokens[2].isdigit() else 30
-                tier = "go" if raw_text.lower().startswith("/go") else "pro"
+                tier = "x" if raw_text.lower().startswith("/x") else "pro"
                 self.store.grant(tokens[1], sender_id, days, now=now, tier=tier)
-                label = "GO" if tier == "go" else "Pro"
+                label = "X" if tier == "x" else "Pro"
                 yield event.plain_result(f"小柠已授予 {tokens[1]} {label}（{days} 天）。")
                 return
 
@@ -803,8 +999,18 @@ class ProApplication(Star):
 
     @filter.on_platform_loaded()
     async def on_platform_loaded(self) -> None:
-        """平台连接后启动每日总结调度器。"""
+        """平台连接后启动每日总结调度器 + 首次好友X同步。"""
         await self._start_daily_summary()
+        # Initial friend-X sync (runs after a short delay for platform to fully init)
+        asyncio.create_task(self._delayed_initial_friend_sync())
+
+    async def _delayed_initial_friend_sync(self) -> None:
+        """Wait for platform to stabilise, then run initial friend-X sync."""
+        await asyncio.sleep(30)  # 30s delay for platform to be fully ready
+        try:
+            await self._sync_friend_x()
+        except Exception:
+            logger.exception("[Pro] 初始好友X同步失败")
 
     async def terminate(self) -> None:
         """插件终止时关闭调度器。"""

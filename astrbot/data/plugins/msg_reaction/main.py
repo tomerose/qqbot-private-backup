@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
@@ -27,7 +29,14 @@ REACTION_MAP: tuple[tuple[str, str], ...] = (
 
 def pick_reaction_emoji(text: str) -> str | None:
     value = str(text or "").strip().lower()
-    return next((emoji for keyword, emoji in REACTION_MAP if keyword.lower() in value), None)
+    for keyword, emoji in REACTION_MAP:
+        kw = keyword.lower()
+        if kw in value:
+            # "ok" is too aggressive as substring — require word boundary
+            if kw == "ok" and re.search(r"(?:^|[^a-z])ok(?:$|[^a-z])", value) is None:
+                continue
+            return emoji
+    return None
 
 
 def _get_message_id(event: AstrMessageEvent) -> str | None:

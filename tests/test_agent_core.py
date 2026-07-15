@@ -37,6 +37,7 @@ from agent_core import (  # noqa: E402
     redact_sensitive_text,
     referenced_workspace_files,
     upload_aiocqhttp_group_file,
+    upload_aiocqhttp_private_file,
     validate_work_dir,
     validate_task,
 )
@@ -365,7 +366,35 @@ class AgentCoreTests(unittest.TestCase):
             self.assertEqual(bot.calls[0][0], "upload_group_file")
             self.assertEqual(bot.calls[0][1]["group_id"], 945598390)
             self.assertEqual(bot.calls[0][1]["name"], "answer.pdf")
-            self.assertEqual(bot.calls[0][1]["file"], str(path.resolve()))
+            self.assertEqual(
+                bot.calls[0][1]["file"],
+                str(path.resolve()),
+            )
+
+    def test_private_file_delivery_uses_onebot_upload_action(self):
+        import asyncio
+        import tempfile
+
+        class FakeBot:
+            def __init__(self):
+                self.calls = []
+
+            async def call_action(self, action, **kwargs):
+                self.calls.append((action, kwargs))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "answer.pdf"
+            path.write_bytes(b"pdf")
+            bot = FakeBot()
+            asyncio.run(upload_aiocqhttp_private_file(bot, "1211000567", path))
+            self.assertEqual(len(bot.calls), 1)
+            self.assertEqual(bot.calls[0][0], "upload_private_file")
+            self.assertEqual(bot.calls[0][1]["user_id"], 1211000567)
+            self.assertEqual(bot.calls[0][1]["name"], "answer.pdf")
+            self.assertEqual(
+                bot.calls[0][1]["file"],
+                str(path.resolve()),
+            )
 
     def test_group_command_requires_at_self_and_private_command_does_not(self):
         self.assertEqual(

@@ -43,6 +43,29 @@ class StepPolicyTests(unittest.TestCase):
             self.assertTrue(decision.requires_approval)
             self.assertEqual(decision.code, "high_impact")
 
+    def test_unknown_step_needs_approval_before_host_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = root / "work"
+            output = root / "workspace" / "jobs" / "job123" / "outputs"
+            work.mkdir()
+            output.mkdir(parents=True)
+            step = TaskStep(
+                "job123", 0, "处理一下这个项目", ActionClass.UNKNOWN, False
+            )
+
+            decision = assess_step(
+                step,
+                work,
+                output,
+                allowed_work_root=root,
+                allowed_output_root=root / "workspace",
+            )
+
+            self.assertFalse(decision.allowed)
+            self.assertTrue(decision.requires_approval)
+            self.assertEqual(decision.code, "unknown")
+
     def test_safe_step_requires_both_roots_to_match(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -8,7 +8,9 @@ import ipaddress
 import io
 import json
 import logging
+import math
 import os
+import random
 import re
 import secrets
 import socket
@@ -16,13 +18,14 @@ import sys
 import time
 import uuid
 from contextlib import contextmanager
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import requests
 import uvicorn
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from google import genai
 from google.genai import types
 
@@ -33,7 +36,9 @@ if str(ROOT) not in sys.path:
 from image_proxy_core import (
     IMAGE_MODEL_FALLBACK,
     IMAGE_MODEL_PRIMARY,
+    IMAGEN_MODELS,
     ImageRequestError,
+    MAX_IMAGE_PROMPT_CHARS,
     extract_first_image_bytes,
     image_model_attempts,
     normalize_image_request,
@@ -42,16 +47,58 @@ from image_proxy_core import (
 app = FastAPI()
 PROJECT = os.getenv("VERTEX_PROJECT", "solar-modem-496213-f5")
 LOCATION = os.getenv("VERTEX_LOCATION", "global")
-MODEL_IDS = {"gemini-2.5-flash", "gemini-2.5-pro"}
-SEARCH_MODEL_ALIAS = "gemini-2.5-flash-search"
+MODEL_IDS = {
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-3.5-flash",
+}
+SEARCH_MODEL_ALIASES = {"gemini-2.5-flash-search", "gemini-3.5-flash-search"}
 MUSIC_MODEL = "lyria-3-clip-preview"
 MAX_MUSIC_BYTES = 20 * 1024 * 1024
+MAX_CHAT_REQUEST_BYTES = 24 * 1024 * 1024
+MAX_CHAT_MESSAGES = 100
+CHAT_UPSTREAM_ERROR = "chat service temporarily unavailable"
+CHAT_RATE_LIMIT_ERROR = "model capacity is temporarily limited; please retry shortly"
+UPSTREAM_RETRY_ATTEMPTS = 3
+UPSTREAM_RETRY_BASE_DELAY = 0.75
+UPSTREAM_RETRY_MAX_DELAY = 8.0
+UPSTREAM_COOLDOWN_SECONDS = 15.0
+_upstream_cooldown_until = 0.0
 logger = logging.getLogger("vertex-gemini-proxy")
 
 
 @app.get("/healthz")
-async def healthz():
-    return {"ok": True, "service": "vertex-gemini-proxy"}
+async def healthz(deep: bool = False):
+    result = {
+        "ok": True,
+        "service": "vertex-gemini-proxy",
+        "primary_model": "gemini-3.5-flash",
+        "image_model": IMAGE_MODEL_PRIMARY,
+    }
+    if not deep:
+        return result
+    try:
+        client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                client.models.generate_content,
+                model="gemini-3.5-flash",
+                contents="Reply OK",
+                config=types.GenerateContentConfig(
+                    max_output_tokens=8,
+                    thinking_config=types.ThinkingConfig(thinking_level="minimal"),
+                ),
+            ),
+            timeout=15,
+        )
+        result["upstream"] = "ok"
+        return result
+    except Exception as exc:
+        logger.warning("Vertex health probe failed: %s", type(exc).__name__)
+        return JSONResponse(
+            status_code=503,
+            content={**result, "ok": False, "upstream": "unavailable"},
+        )
 
 
 @app.get("/v1/models")
@@ -63,7 +110,8 @@ async def list_models():
             for model_id in sorted(MODEL_IDS)
         ]
         + [
-            {"id": SEARCH_MODEL_ALIAS, "object": "model", "capabilities": {"vision": True, "audio": True, "search": True}}
+            {"id": model_id, "object": "model", "capabilities": {"vision": True, "audio": True, "search": True}}
+            for model_id in sorted(SEARCH_MODEL_ALIASES)
         ],
     }
 
@@ -100,20 +148,169 @@ def _to_contents(messages: list[dict]) -> tuple[str | None, list[types.Content]]
     return system_prompt, contents
 
 
+class RequestPayloadError(ValueError):
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class UpstreamCapacityError(RuntimeError):
+    def __init__(self, retry_after: float):
+        super().__init__(CHAT_RATE_LIMIT_ERROR)
+        self.retry_after = retry_after
+
+
+def _upstream_status_code(exc: BaseException) -> int | None:
+    """Best-effort status extraction across google-genai transport errors."""
+    for value in (
+        getattr(exc, "status_code", None),
+        getattr(exc, "code", None),
+        getattr(getattr(exc, "response", None), "status_code", None),
+    ):
+        try:
+            status = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 100 <= status <= 599:
+            return status
+    return None
+
+
+def _is_retryable_upstream_error(exc: BaseException) -> bool:
+    status = _upstream_status_code(exc)
+    return status == 429 or (status is not None and 500 <= status < 600) or isinstance(
+        exc, (TimeoutError, ConnectionError, OSError)
+    )
+
+
+def _upstream_retry_delay(attempt: int) -> float:
+    capped_delay = min(UPSTREAM_RETRY_BASE_DELAY * (2 ** attempt), UPSTREAM_RETRY_MAX_DELAY)
+    return capped_delay * random.uniform(0.75, 1.25)
+
+
+def _upstream_retry_after() -> float:
+    return max(0.0, _upstream_cooldown_until - time.monotonic())
+
+
+def _open_upstream_cooldown() -> float:
+    global _upstream_cooldown_until
+    _upstream_cooldown_until = max(
+        _upstream_cooldown_until,
+        time.monotonic() + UPSTREAM_COOLDOWN_SECONDS,
+    )
+    return _upstream_retry_after()
+
+
+async def _read_json_request(
+    request: Request, max_bytes: int = MAX_CHAT_REQUEST_BYTES
+) -> dict:
+    content_length = request.headers.get("content-length", "").strip()
+    if content_length.isdigit() and int(content_length) > max_bytes:
+        raise RequestPayloadError("request body is too large", 413)
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > max_bytes:
+            raise RequestPayloadError("request body is too large", 413)
+        chunks.append(chunk)
+    try:
+        body = json.loads(b"".join(chunks).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RequestPayloadError("request body must be valid UTF-8 JSON") from exc
+    if not isinstance(body, dict):
+        raise RequestPayloadError("request body must be an object")
+    return body
+
+
+def _validate_chat_messages(messages: object) -> list[dict]:
+    if not isinstance(messages, list) or not messages:
+        raise RequestPayloadError("messages must be a non-empty array")
+    if any(not isinstance(message, dict) for message in messages):
+        raise RequestPayloadError("each message must be an object")
+    if len(messages) <= MAX_CHAT_MESSAGES:
+        return messages
+
+    # AstrBot can retain very long conversations. Gemini only needs the latest
+    # working window, while the last system message must survive because it is
+    # the effective persona/instruction used by _to_contents().
+    system = next(
+        (message for message in reversed(messages) if message.get("role") == "system"),
+        None,
+    )
+    recent = [message for message in messages if message.get("role") != "system"]
+    keep = MAX_CHAT_MESSAGES - (1 if system else 0)
+    trimmed = recent[-keep:]
+    if system:
+        trimmed.insert(0, system)
+    logger.info("Trimmed chat history from %d to %d messages", len(messages), len(trimmed))
+    return trimmed
+
+
+def _sse(data: dict | str) -> str:
+    payload = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
+    return f"data: {payload}\n\n"
+
+
+_COMPLEX_TASK = re.compile(
+    r"(?:设计|规划|制定|架构|实现|调试|排查|诊断|优化|证明|推导|计算|"
+    r"比较|权衡|分析|评估|拆解|方案|根因|算法|代码|数学|模型)"
+)
+_EXPLICIT_THINK = re.compile(r"(?:深度思考|深入分析|仔细分析|认真想想|好好想想|推理一下)")
+
+
+def _message_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            str(item.get("text", ""))
+            for item in content
+            if isinstance(item, dict)
+        )
+    return str(content or "")
+
+
+def _requires_deep_thinking(messages: list[dict]) -> bool:
+    """Keep casual chat fast while reserving high reasoning for real tasks."""
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        text = "".join(_message_text(message.get("content", "")).split())
+        if not text:
+            return False
+        return bool(
+            len(text) >= 240
+            or _EXPLICIT_THINK.search(text)
+            or (len(text) >= 12 and _COMPLEX_TASK.search(text))
+        )
+    return False
+
+
 @app.post("/v1/chat/completions")
 async def chat(request: Request):
-    body = json.loads((await request.body()).decode("utf-8", errors="replace"))
-    model_id = body.get("model", "gemini-2.5-flash")
+    try:
+        body = await _read_json_request(request)
+        messages = _validate_chat_messages(body.get("messages"))
+    except RequestPayloadError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": {"message": str(exc), "type": "invalid_request_error"}},
+        )
+    extra = body.get("custom_extra_body") or {}
+    if not isinstance(extra, dict):
+        return JSONResponse(status_code=400, content={"error": {"message": "custom_extra_body must be an object"}})
+    model_id = body.get("model", "gemini-3.5-flash")
     use_search = False
-    if model_id == SEARCH_MODEL_ALIAS:
-        model_id = "gemini-2.5-flash"
+    if model_id in SEARCH_MODEL_ALIASES:
+        model_id = "gemini-3.5-flash"
         use_search = True
     if model_id not in MODEL_IDS:
-        model_id = "gemini-2.5-flash"
+        model_id = "gemini-3.5-flash"
     # ponytail: google_search flag via custom_extra_body or top-level param
     if not use_search:
-        use_search = bool(body.get("google_search") or (body.get("custom_extra_body") or {}).get("google_search"))
-    system_prompt, contents = _to_contents(body.get("messages", []))
+        use_search = bool(body.get("google_search") or extra.get("google_search"))
+    system_prompt, contents = _to_contents(messages)
     tools = []
     if use_search:
         tools.append(types.Tool(google_search=types.GoogleSearch()))
@@ -123,27 +320,229 @@ async def chat(request: Request):
         tools.append(types.Tool(code_execution={}))
     if body.get("url_context"):
         tools.append(types.Tool(url_context={}))
-    config = types.GenerateContentConfig(
-        max_output_tokens=min(int(body.get("max_tokens", 2048)), 4096),
+    explicit_thinking = bool(body.get("thinking") or extra.get("thinking"))
+    auto_deep_thinking = (
+        model_id == "gemini-3.5-flash"
+        and not explicit_thinking
+        and _requires_deep_thinking(messages)
+    )
+    use_thinking = explicit_thinking  # ponytail: auto deep thinking disabled — Vertex AI 403s on high mode
+    try:
+        max_output_tokens = min(int(body.get("max_tokens", 4096)), 8192)
+        # ponytail: gemini-3.5-flash thinking needs ~1000 token headroom
+        if model_id == "gemini-3.5-flash" and max_output_tokens < 1000:
+            max_output_tokens = 1000
+        thinking_budget = int(extra.get("thinking_budget") or 2048)
+        temperature = float(body.get("temperature", extra.get("temperature", 1.05)))
+        top_p = float(body.get("top_p", extra.get("top_p", 0.98)))
+        if (
+            max_output_tokens < 1
+            or not math.isfinite(temperature)
+            or not 0 <= temperature <= 2
+            or not math.isfinite(top_p)
+            or not 0 <= top_p <= 1
+        ):
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": "numeric generation parameters are invalid",
+                    "type": "invalid_request_error",
+                }
+            },
+        )
+    config_options = dict(
+        max_output_tokens=max_output_tokens,
+        safety_settings=[
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH),
+        ],
         tools=tools if tools else None,
     )
+    config_options["temperature"] = temperature
+    config_options["top_p"] = top_p
+    config = types.GenerateContentConfig(**config_options)
+    if model_id == "gemini-3.5-flash":
+        # Gemini 3.5 has built-in thinking; DON'T set thinking_config by default
+        # (thinking_budget paradoxically makes the model eat ALL tokens for thoughts).
+        # Only enable when explicitly requested via thinking:true.
+        if use_thinking:
+            config.thinking_config = types.ThinkingConfig(
+                include_thoughts=explicit_thinking,
+                thinking_level="high",
+            )
+        # else: no thinking_config — model handles thinking internally without
+        # starving visible output. Requires sufficient max_output_tokens (>= 1000).
+    elif use_thinking:
+        config.thinking_config = types.ThinkingConfig(
+            include_thoughts=True,
+            thinking_budget=min(max(int(thinking_budget), 256), 8192),
+        )
     if system_prompt:
         config.system_instruction = system_prompt
 
     try:
+        retry_after = _upstream_retry_after()
+        if retry_after:
+            raise UpstreamCapacityError(retry_after)
         client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
-        response = client.models.generate_content(model=model_id, contents=contents, config=config)
-        usage = response.usage_metadata
+        if body.get("stream"):
+            async def stream_response():
+                response_id = "gemini-" + uuid.uuid4().hex[:8]
+                sent_role = False
+                try:
+                    stream = await client.aio.models.generate_content_stream(
+                        model=model_id,
+                        contents=contents,
+                        config=config,
+                    )
+                    async for chunk in stream:
+                        text = str(getattr(chunk, "text", "") or "")
+                        if not text:
+                            continue
+                        delta = {"content": text}
+                        if not sent_role:
+                            delta["role"] = "assistant"
+                            sent_role = True
+                        yield _sse({
+                            "id": response_id,
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": model_id,
+                            "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+                        })
+                    yield _sse({
+                        "id": response_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model_id,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    })
+                    yield _sse("[DONE]")
+                except Exception as exc:
+                    logger.exception("streaming chat completion failed")
+                    message = CHAT_RATE_LIMIT_ERROR if _is_retryable_upstream_error(exc) else CHAT_UPSTREAM_ERROR
+                    if message == CHAT_RATE_LIMIT_ERROR:
+                        _open_upstream_cooldown()
+                    yield _sse({"error": {"message": message, "type": "api_error"}})
+
+            return StreamingResponse(stream_response(), media_type="text/event-stream")
+
+        # Retry transient upstream errors and empty model replies with truncated
+        # exponential backoff. A short shared cooldown prevents QQ plugin bursts
+        # from repeatedly hitting Vertex while capacity is exhausted.
+        for attempt in range(UPSTREAM_RETRY_ATTEMPTS):
+            try:
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=model_id,
+                    contents=contents,
+                    config=config,
+                )
+            except Exception as exc:
+                if not _is_retryable_upstream_error(exc):
+                    raise
+                if attempt == UPSTREAM_RETRY_ATTEMPTS - 1:
+                    retry_after = _open_upstream_cooldown()
+                    logger.warning(
+                        "Vertex capacity remained unavailable after %d attempts; cooling down for %.1fs",
+                        UPSTREAM_RETRY_ATTEMPTS,
+                        retry_after,
+                    )
+                    raise UpstreamCapacityError(retry_after) from exc
+                delay = _upstream_retry_delay(attempt)
+                logger.warning(
+                    "Vertex request failed with retryable status %s; retrying in %.2fs (%d/%d)",
+                    _upstream_status_code(exc),
+                    delay,
+                    attempt + 1,
+                    UPSTREAM_RETRY_ATTEMPTS,
+                )
+                await asyncio.sleep(delay)
+                continue
+            usage = response.usage_metadata
+
+            # Extract thoughts and final text from Gemini thinking response
+            thoughts_parts: list[str] = []
+            text_parts: list[str] = []
+            execution_parts: list[str] = []
+            executable_code_parts: list[str] = []
+            if hasattr(response, "candidates") and response.candidates:
+                for candidate in response.candidates:
+                    parts = getattr(getattr(candidate, "content", None), "parts", []) or []
+                    for part in parts:
+                        if getattr(part, "thought", False):
+                            thoughts_parts.append(str(getattr(part, "text", "") or ""))
+                            continue
+                        part_text = str(getattr(part, "text", "") or "")
+                        if part_text:
+                            text_parts.append(part_text)
+                        # code_execution_result (output from executed code)
+                        execution = getattr(part, "code_execution_result", None)
+                        output = str(getattr(execution, "output", "") or "").strip()
+                        if output:
+                            execution_parts.append(output)
+                        # executable_code (code Gemini generated, e.g. for vision analysis)
+                        exe_code = getattr(part, "executable_code", None)
+                        if exe_code is not None:
+                            code_str = str(getattr(exe_code, "code", "") or "").strip()
+                            if code_str:
+                                executable_code_parts.append(code_str)
+
+            final_text = str(getattr(response, "text", "") or "")
+            if explicit_thinking and thoughts_parts:
+                thought_block = "\n".join(thoughts_parts).strip()
+                answer_block = "\n".join(text_parts).strip() or final_text
+                visible_text = (
+                    "🤔 深度思考中…\n\n"
+                    + thought_block
+                    + "\n\n━━━━━━━━━━\n\n"
+                    + answer_block
+                )
+            else:
+                visible_text = (
+                    final_text
+                    or "\n".join(execution_parts).strip()
+                    or "\n".join(text_parts).strip()
+                )
+                # ponytail: Gemini sometimes generates executable_code parts
+                # (e.g. when analyzing document images) even without code_execution
+                # tool enabled. When all other text is empty, surface the code as
+                # a fallback so the user sees something rather than an error.
+                if not visible_text.strip() and executable_code_parts:
+                    visible_text = (
+                        "Gemini 尝试执行以下代码来分析文档：\n```python\n"
+                        + "\n".join(executable_code_parts)
+                        + "\n```"
+                    )
+                thought_block = ""
+
+            if visible_text.strip():
+                break  # got a real response
+            if attempt < UPSTREAM_RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(_upstream_retry_delay(attempt))
+        else:
+            raise ValueError("empty model response")
+
         result = {
             "id": "gemini-" + uuid.uuid4().hex[:8],
             "object": "chat.completion",
             "model": model_id,
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": response.text or ""}, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": visible_text}, "finish_reason": "stop"}],
             "usage": {
                 "prompt_tokens": getattr(usage, "prompt_token_count", 0) if usage else 0,
                 "completion_tokens": getattr(usage, "candidates_token_count", 0) if usage else 0,
             },
         }
+        if explicit_thinking and thought_block:
+            result["thinking"] = {
+                "thoughts": thought_block,
+                "answer": answer_block or final_text,
+            }
         # ponytail: attach grounding metadata when search was used
         if (use_search or body.get("google_maps")) and hasattr(response, "candidates") and response.candidates:
             candidate = response.candidates[0]
@@ -161,11 +560,18 @@ async def chat(request: Request):
                     "search_queries": list(getattr(gm, "web_search_queries", []) or []),
                 }
         return result
+    except UpstreamCapacityError as exc:
+        logger.warning("chat completion temporarily rejected during Vertex cooldown")
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": str(max(1, math.ceil(exc.retry_after)))},
+            content={"error": {"message": CHAT_RATE_LIMIT_ERROR, "type": "rate_limit_error"}},
+        )
     except Exception as exc:
         logger.exception("chat completion failed")
         return JSONResponse(
             status_code=502,
-            content={"error": {"message": str(exc), "type": "api_error"}},
+            content={"error": {"message": CHAT_UPSTREAM_ERROR, "type": "api_error"}},
         )
 
 
@@ -176,7 +582,9 @@ def _generate_music(prompt: str) -> tuple[bytes, str]:
         model=MUSIC_MODEL,
         input=[{"type": "text", "text": prompt}],
     )
-    audio = next(
+    # Vertex's current Interaction schema exposes audio as ``output_audio``.
+    # Keep the older outputs scan for installed client compatibility.
+    audio = getattr(response, "output_audio", None) or next(
         (
             output
             for output in (getattr(response, "outputs", None) or [])
@@ -219,16 +627,38 @@ async def generate_music(request: Request):
     }
 
 
-@app.post("/v1/images/generations")
-async def generate_image(request: Request):
-    try:
-        payload = normalize_image_request(await request.json())
-    except (ImageRequestError, ValueError, json.JSONDecodeError):
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"message": "无效的作图请求。", "type": "invalid_request_error"}},
-        )
+def _generate_imagen_sync(payload, n_images: int = 1) -> list[tuple[str, bytes, str]] | None:
+    """Vertex Imagen 3/4 — high-quality dedicated image model via generate_images()."""
+    n = min(max(int(n_images), 1), 4)
+    for model_id in image_model_attempts(payload.model):
+        if model_id not in IMAGEN_MODELS:
+            break  # don't fall through to Gemini text-image models
+        try:
+            client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
+            response = client.models.generate_images(
+                model=model_id,
+                prompt=payload.prompt,
+                config=types.GenerateImagesConfig(
+                    number_of_images=n,
+                    aspect_ratio=payload.aspect_ratio,
+                    safety_filter_level="block_only_high",
+                ),
+            )
+            images = []
+            for gen_img in (getattr(response, "generated_images", None) or []):
+                img_obj = getattr(gen_img, "image", None)
+                img_bytes = getattr(img_obj, "image_bytes", None)
+                if img_bytes:
+                    images.append(("image/png", img_bytes, model_id))
+            if images:
+                return images
+            logger.warning("Imagen model %s returned no images", model_id)
+        except Exception:
+            logger.exception("Imagen generation failed for model %s", model_id)
+    return None
 
+
+def _generate_image_sync(payload):
     for model_id in image_model_attempts(payload.model):
         try:
             client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
@@ -239,7 +669,7 @@ async def generate_image(request: Request):
                     response_modalities=["TEXT", "IMAGE"],
                     image_config=types.ImageConfig(
                         aspect_ratio=payload.aspect_ratio,
-                        image_size="1K",
+                        image_size="2K",
                     ),
                 ),
             )
@@ -248,25 +678,197 @@ async def generate_image(request: Request):
                 logger.warning("image model %s returned no inline image", model_id)
                 continue
             mime_type, image_bytes = image
+            return mime_type, image_bytes, model_id
+        except Exception:
+            logger.exception("image generation failed for model %s", model_id)
+    return None
+
+
+@app.post("/v1/images/generations")
+async def generate_image(request: Request):
+    try:
+        body = await request.json()
+        payload = normalize_image_request(body)
+        n_images = min(max(int(body.get("n", 1)), 1), 4)
+    except (ImageRequestError, ValueError, json.JSONDecodeError, TypeError):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "无效的作图请求。", "type": "invalid_request_error"}},
+        )
+
+    # ── Imagen 3/4 path (PRO tier) ──────────────────────────────────
+    if payload.model in IMAGEN_MODELS:
+        images = await asyncio.to_thread(_generate_imagen_sync, payload, n_images)
+        if images:
             return {
                 "created": int(time.time()),
                 "data": [
                     {
-                        "b64_json": base64.b64encode(image_bytes).decode("ascii"),
-                        "mime_type": mime_type,
-                        "model": model_id,
+                        "b64_json": base64.b64encode(img_bytes).decode("ascii"),
+                        "mime_type": mime,
+                        "model": mid,
                     }
+                    for mime, img_bytes, mid in images
                 ],
             }
-        except Exception:
-            logger.exception("image generation failed for model %s", model_id)
+        return JSONResponse(
+            status_code=502,
+            content={"error": {"message": "Imagen 服务暂时不可用，请稍后再试。", "type": "api_error"}},
+        )
+
+    # ── Gemini image path (GO/ordinary) ────────────────────────────
+    image = await asyncio.to_thread(_generate_image_sync, payload)
+    if image is not None:
+        mime_type, image_bytes, model_id = image
+        return {
+            "created": int(time.time()),
+            "data": [
+                {
+                    "b64_json": base64.b64encode(image_bytes).decode("ascii"),
+                    "mime_type": mime_type,
+                    "model": model_id,
+                }
+            ],
+        }
     return JSONResponse(
         status_code=502,
         content={"error": {"message": "作图服务暂时不可用，请稍后再试。", "type": "api_error"}},
     )
 
 
+def _edit_image_sync(image_base64: str, prompt: str, model: str):
+    """Image-to-image editing: Vertex AI doesn't support image+text→image natively
+    ("Multi-modal output is not supported"). Two-step Google ecosystem pipeline:
+
+    Step 1: Gemini Vision → describe image content in detail, ignoring overlay elements
+    Step 2: Gemini Image Generation → regenerate from description, clean
+
+    This preserves the image essence while removing watermarks/logos/text overlays.
+    """
+    try:
+        image_bytes = base64.b64decode(image_base64, validate=True)
+    except (ValueError, base64.binascii.Error):
+        raise ImageRequestError("无效的图片数据。")
+    if len(image_bytes) > 10 * 1024 * 1024:
+        raise ImageRequestError("图片不能超过 10 MB。")
+
+    # ── Step 1: Vision — describe content, ignore watermarks/overlays ──
+    vision_prompt = (
+        "Describe this image in vivid detail — its subject, colors, composition, style, "
+        "background, lighting, mood. CRITICAL: IGNORE any watermarks, logos, text overlays, "
+        "subtitles, timestamps, or UI elements. Describe ONLY the actual image content "
+        "as if those overlays don't exist. Be specific enough that an artist could "
+        "recreate this exact image from your description alone. "
+        "Write in English, 200-400 words."
+    )
+    description = ""
+    # Vision: use gemini-2.5-flash (image→text); fallback to pro
+    for vision_model in ("gemini-2.5-flash", "gemini-2.5-pro"):
+        try:
+            client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
+            response = client.models.generate_content(
+                model=vision_model,
+                contents=[
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                    types.Part.from_text(text=vision_prompt),
+                ],
+            )
+            description = str(response.text or "").strip()
+            if len(description) >= 50:
+                logger.info("image edit: vision description (%d chars) via %s",
+                            len(description), vision_model)
+                break
+        except Exception:
+            logger.debug("image edit vision failed for %s", vision_model)
+
+    if not description:
+        raise ImageRequestError("无法分析图片内容，请换一张清晰的图片试试。")
+
+    # ── Step 2: Regenerate clean image from description ──
+    gen_prompt = (
+        f"Generate an image matching this exact description. "
+        f"IMPORTANT: Do NOT add ANY watermarks, logos, text, signatures, or overlays. "
+        f"The image must be completely clean.\n\nDescription:\n{description}"
+    )
+    # Also incorporate the original edit prompt (e.g. "去水印") as additional guidance
+    if prompt and prompt.strip():
+        gen_prompt += f"\n\nAdditional instruction: {prompt}"
+
+    for gen_model in image_model_attempts(model):
+        try:
+            client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
+            response = client.models.generate_content(
+                model=gen_model,
+                contents=gen_prompt,
+                config=types.GenerateContentConfig(
+                    response_modalities=["TEXT", "IMAGE"],
+                    image_config=types.ImageConfig(aspect_ratio="1:1", image_size="2K"),
+                ),
+            )
+            img = extract_first_image_bytes(response)
+            if img is None:
+                logger.warning("image edit regenerate: model %s returned no image", gen_model)
+                continue
+            mime_type, out_bytes = img
+            logger.info("image edit: regenerated clean image via %s (%d bytes)",
+                        gen_model, len(out_bytes))
+            return mime_type, out_bytes, gen_model
+        except Exception:
+            logger.exception("image edit regenerate failed for model %s", gen_model)
+
+    return None
+
+
+@app.post("/v1/images/edits")
+async def edit_image(request: Request):
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "无效的编辑请求。", "type": "invalid_request_error"}},
+        )
+    image_b64 = str(body.get("image", "") or "").strip()
+    if not image_b64:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "请提供要编辑的图片（base64）。", "type": "invalid_request_error"}},
+        )
+    prompt = " ".join(str(body.get("prompt", "") or "").split())
+    if not prompt or len(prompt) > MAX_IMAGE_PROMPT_CHARS:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": f"编辑描述最多 {MAX_IMAGE_PROMPT_CHARS} 个字符。", "type": "invalid_request_error"}},
+        )
+    model = str(body.get("model", "") or IMAGE_MODEL_PRIMARY).strip()
+    try:
+        result = await asyncio.to_thread(_edit_image_sync, image_b64, prompt, model)
+    except ImageRequestError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": str(exc), "type": "invalid_request_error"}},
+        )
+    except Exception:
+        logger.exception("image edit failed")
+        return JSONResponse(
+            status_code=502,
+            content={"error": {"message": "图片编辑服务暂时不可用，请稍后再试。", "type": "api_error"}},
+        )
+    if result is not None:
+        mime_type, image_bytes, model_id = result
+        return {
+            "created": int(time.time()),
+            "data": [{"b64_json": base64.b64encode(image_bytes).decode("ascii"), "mime_type": mime_type, "model": model_id}],
+        }
+    return JSONResponse(
+        status_code=502,
+        content={"error": {"message": "图片编辑失败，请尝试换一种描述。", "type": "api_error"}},
+    )
+
+
 VIDEO_MODEL = "veo-3.1-lite-generate-001"
+VIDEO_MODEL_PRO = "veo-3.1-generate-001"    # Veo 3.1 full — audio-enabled, up to 8s
+VIDEO_MODEL_PRO_FALLBACK = "veo-3.0-generate-001"  # Veo 3.0 fallback
 VIDEO_DURATION = 4
 VIDEO_ASPECT_RATIO = "16:9"
 VIDEO_POLL_SECONDS = 10
@@ -277,7 +879,6 @@ GIF_FRAME_DELAY = 300  # ms per frame
 
 def _generate_gif_frames(client, prompt: str, aspect: str, n: int) -> list[bytes]:
     """Generate N frame images via Gemini, return list of PNG bytes."""
-    size = "1024x1024" if aspect == "1:1" else "1280x720"
     frames = []
     for i in range(n):
         frame_prompt = (
@@ -288,32 +889,28 @@ def _generate_gif_frames(client, prompt: str, aspect: str, n: int) -> list[bytes
             frame_prompt = f"{prompt} — opening frame, establishing shot."
         if i == n - 1:
             frame_prompt = f"{prompt} — closing frame, final shot."
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash-image",
-                contents=frame_prompt,
-                config=types.GenerateContentConfig(
-                    response_modalities=["TEXT", "IMAGE"],
-                    image_config=types.ImageConfig(aspect_ratio=aspect, image_size="1K"),
-                ),
-            )
-            img = extract_first_image_bytes(response)
-            if img is None:
-                logger.warning("GIF frame %d returned no image, retrying", i)
-                # Retry once with simpler prompt
-                response = client.models.generate_content(
-                    model="gemini-2.5-flash-image",
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_modalities=["TEXT", "IMAGE"],
-                        image_config=types.ImageConfig(aspect_ratio=aspect, image_size="1K"),
-                    ),
-                )
-                img = extract_first_image_bytes(response)
+        img = None
+        for attempt_prompt in dict.fromkeys((frame_prompt, prompt)):
+            for model_id in image_model_attempts(IMAGE_MODEL_PRIMARY):
+                try:
+                    response = client.models.generate_content(
+                        model=model_id,
+                        contents=attempt_prompt,
+                        config=types.GenerateContentConfig(
+                            response_modalities=["TEXT", "IMAGE"],
+                            image_config=types.ImageConfig(aspect_ratio=aspect, image_size="1K"),
+                        ),
+                    )
+                    img = extract_first_image_bytes(response)
+                    if img:
+                        break
+                    logger.warning("GIF frame %d model %s returned no image", i, model_id)
+                except Exception:
+                    logger.exception("GIF frame %d generation failed for model %s", i, model_id)
             if img:
-                frames.append(img[1])  # img is (mime_type, bytes)
-        except Exception:
-            logger.exception("GIF frame %d generation failed", i)
+                break
+        if img:
+            frames.append(img[1])  # img is (mime_type, bytes)
     return frames
 
 
@@ -323,14 +920,23 @@ def _generate_video_sync(prompt: str, model: str, duration: int, aspect: str):
 
     # ── Try Veo first ──
     try:
+        # Non-lite Veo models (3.1 full, 3.0) support generate_audio
+        is_veo3_audio = "lite" not in model
+        video_config = types.GenerateVideosConfig(
+            aspect_ratio=aspect,
+            duration_seconds=duration,
+            enhance_prompt=True,
+        )
+        if is_veo3_audio:
+            # Enable native audio (dialogue + ambience + music)
+            try:
+                video_config.generate_audio = True  # type: ignore[attr-defined]
+            except Exception:
+                pass  # older SDK — audio will be best-effort
         operation = client.models.generate_videos(
             model=model,
             prompt=prompt,
-            config=types.GenerateVideosConfig(
-                aspect_ratio=aspect,
-                duration_seconds=duration,
-                enhance_prompt=True,
-            ),
+            config=video_config,
         )
         for _ in range(VIDEO_MAX_POLL):
             if operation.done:
@@ -371,7 +977,7 @@ def _generate_video_sync(prompt: str, model: str, duration: int, aspect: str):
         return {
             "created": int(time.time()),
             "data": [{"b64_json": base64.b64encode(gif_bytes).decode("ascii"),
-                       "mime_type": "image/gif", "model": "gemini-2.5-flash-image-gif",
+                       "mime_type": "image/gif", "model": f"{IMAGE_MODEL_PRIMARY}-gif",
                        "frames": len(frames)}],
         }
     except Exception:
@@ -1012,5 +1618,194 @@ async def invite_api_revoke(request: Request):
     return {"ok": True}
 
 
+# ── Unified search endpoint ────────────────────────────────────────
+_SEARCH_CACHE: dict[str, tuple[float, dict]] = {}
+_SEARCH_CACHE_TTL = 300  # 5 min TTL for repeated queries
+_SEARCH_CACHE_MAX = 200
+
+_NETEASE_SEARCH_URL = "https://music.163.com/api/search/get"
+
+
+def _search_netease_song_cached(query: str) -> dict | None:
+    """Search NetEase music with cache."""
+    cache_key = f"netease:{query}"
+    now = time.time()
+    if cache_key in _SEARCH_CACHE:
+        ts, result = _SEARCH_CACHE[cache_key]
+        if now - ts < _SEARCH_CACHE_TTL:
+            return result
+    try:
+        resp = requests.get(
+            _NETEASE_SEARCH_URL,
+            params={"s": query, "type": 1, "limit": 5, "offset": 0},
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://music.163.com/"},
+            timeout=(5, 15),
+        )
+        resp.raise_for_status()
+        songs = (resp.json().get("result") or {}).get("songs") or []
+        song = next((s for s in songs if isinstance(s, dict) and str(s.get("id", "")).isdigit()), None)
+        if not song:
+            return None
+        artists = song.get("artists") or []
+        result = {
+            "song_id": str(song["id"]),
+            "title": str(song.get("name") or query),
+            "artist": "/".join(
+                str(a.get("name")) for a in artists if isinstance(a, dict) and a.get("name")
+            ),
+        }
+    except Exception:
+        return None
+    # LRU eviction
+    if len(_SEARCH_CACHE) >= _SEARCH_CACHE_MAX:
+        oldest = min(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0], default=None)
+        if oldest:
+            _SEARCH_CACHE.pop(oldest, None)
+    _SEARCH_CACHE[cache_key] = (now, result)
+    return result
+
+
+def _search_bilibili_cached(query: str, limit: int = 5) -> list[dict]:
+    """Search Bilibili public videos with cache."""
+    cache_key = f"bili:{query}:{limit}"
+    now = time.time()
+    if cache_key in _SEARCH_CACHE:
+        ts, result = _SEARCH_CACHE[cache_key]
+        if now - ts < _SEARCH_CACHE_TTL:
+            return result
+    try:
+        resp = requests.get(
+            "https://api.bilibili.com/x/web-interface/search/type",
+            params={"search_type": "video", "keyword": query, "page": 1},
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://search.bilibili.com/"},
+            timeout=(5, 15),
+        )
+        resp.raise_for_status()
+        items = resp.json().get("data", {}).get("result", [])
+        results: list[dict] = []
+        for item in items[:limit]:
+            if not isinstance(item, dict):
+                continue
+            bvid = str(item.get("bvid") or "").strip()
+            if not bvid:
+                continue
+            title = re.sub(r"<[^>]+>", "", str(item.get("title") or "")).strip()
+            results.append({
+                "title": title or bvid,
+                "url": f"https://www.bilibili.com/video/{bvid}",
+                "bvid": bvid,
+                "platform": "bilibili",
+            })
+    except Exception:
+        return []
+    if len(_SEARCH_CACHE) >= _SEARCH_CACHE_MAX:
+        oldest = min(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0], default=None)
+        if oldest:
+            _SEARCH_CACHE.pop(oldest, None)
+    _SEARCH_CACHE[cache_key] = (now, results)
+    return results
+
+
+@app.post("/v1/search")
+async def unified_search(request: Request):
+    """Unified search: web, music, video. Reduces per-plugin search implementations."""
+    try:
+        body = await request.json()
+        query = str(body.get("query", "")).strip()
+        search_type = str(body.get("type", "web")).strip().lower()
+        limit = min(max(int(body.get("limit", 5)), 1), 10)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "无效的搜索请求", "type": "invalid_request_error"}},
+        )
+    if not query or len(query) > 500:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "搜索词需在 1-500 字符", "type": "invalid_request_error"}},
+        )
+
+    result: dict = {"query": query, "type": search_type}
+
+    # Music search
+    if search_type in ("music", "all"):
+        song = _search_netease_song_cached(query)
+        if song:
+            result["music"] = song
+
+    # Video search (Bilibili public API)
+    if search_type in ("video", "all"):
+        videos = _search_bilibili_cached(query, limit)
+        if videos:
+            result["videos"] = videos
+
+    # Web search via Gemini grounding
+    if search_type in ("web", "all"):
+        try:
+            client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
+            search_tool = types.Tool(google_search=types.GoogleSearch())
+            response = client.models.generate_content(
+                model="gemini-3.5-flash",
+                contents=f"搜索以下内容并给出简洁中文摘要（≤300字），附带来源链接：{query}",
+                config=types.GenerateContentConfig(
+                    tools=[search_tool],
+                    max_output_tokens=600,
+                    temperature=0.3,
+                ),
+            )
+            web_text = str(getattr(response, "text", "") or "").strip()
+            if web_text:
+                result["web_summary"] = web_text[:600]
+            grounding = getattr(response, "candidates", None)
+            if grounding:
+                sources = []
+                for c in grounding:
+                    for src in (getattr(getattr(c, "grounding_metadata", None), "grounding_chunks", None) or []):
+                        src_web = getattr(src, "web", None)
+                        uri = getattr(src_web, "uri", "") if src_web else ""
+                        title = getattr(src_web, "title", "") if src_web else ""
+                        if uri:
+                            sources.append({"title": title, "uri": uri})
+                if sources:
+                    result["web_sources"] = sources[:5]
+        except Exception:
+            logger.debug("Unified search web grounding failed for: %s", query)
+
+    # Don't return empty-handed
+    if len(result) <= 2:  # only query + type
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"message": f"未找到「{query}」的相关结果", "type": "not_found"}},
+        )
+    result["created"] = int(time.time())
+    return result
+
+
+def _configure_logging() -> None:
+    if logger.handlers:
+        return
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    file_handler = RotatingFileHandler(
+        ROOT / "gemini-proxy-runtime.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    logger.propagate = True
+
+
 if __name__ == "__main__":
+    _configure_logging()
+    logger.info(
+        "starting proxy primary=%s image=%s location=%s",
+        "gemini-3.5-flash",
+        IMAGE_MODEL_PRIMARY,
+        LOCATION,
+    )
     uvicorn.run(app, host="127.0.0.1", port=3000, log_level="info")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import uuid
 from pathlib import Path
 
@@ -142,9 +143,15 @@ class VoiceModelRouter(Star):
                 or "")
         )
         if not requested:
-            return
+            # 10% chance of voice reply in group chats for variety
+            if not event.is_private_chat() and random.random() < 0.10:
+                requested = True
+                logger.debug("[Voice] 10%% random voice triggered")
+            else:
+                return
         result = event.get_result()
         if result is None or not result.chain:
+            logger.debug("[Voice] no result chain, skipping voice")
             return
         if isinstance(result.chain, str):
             components = [Plain(result.chain)]
@@ -165,12 +172,15 @@ class VoiceModelRouter(Star):
         if group_id:
             sent = await self._send_qq_ai_voice(event, group_id, plain_text)
             if sent:
+                logger.debug("[Voice] QQ AI voice sent OK, group=%s", group_id)
                 event.set_extra("_qq_ai_voice_sent", True)
                 result.chain = [component for component in components if not isinstance(component, Plain)]
                 return
+            logger.debug("[Voice] QQ AI voice unavailable, trying local TTS")
 
         client = getattr(self, "tts_client", None)
         if client is None:
+            logger.debug("[Voice] no TTS client configured, voice skipped")
             return
         chunks = prepare_spoken_chunks(plain_text)
         if not chunks:

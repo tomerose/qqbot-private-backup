@@ -88,9 +88,9 @@ class ProAccessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "pro_members.db"
             store = ProStore(path, reviewer_id=REVIEWER)
-            store.grant(APPLICANT, REVIEWER, 30, now=1_000, tier="go")
+            store.grant(APPLICANT, REVIEWER, 30, now=1_000, tier="x")
 
-            self.assertEqual(get_tier(APPLICANT, path, now=1_001), Tier.GO)
+            self.assertEqual(get_tier(APPLICANT, path, now=1_001), Tier.X)
             connection = sqlite3.connect(path)
             try:
                 connection.execute(
@@ -103,14 +103,14 @@ class ProAccessTests(unittest.TestCase):
 
             self.assertEqual(get_tier(APPLICANT, path, now=1_001), Tier.ORDINARY)
 
-    def test_go_agent_usage_is_recorded_atomically(self):
+    def test_x_agent_usage_is_recorded_atomically(self):
         import time
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "pro_members.db"
             store = ProStore(path, reviewer_id=REVIEWER)
             now = time.time()
-            store.grant(APPLICANT, REVIEWER, 30, now=now, tier="go")
+            store.grant(APPLICANT, REVIEWER, 30, now=now, tier="x")
 
             self.assertEqual(agent_available(APPLICANT, path), (True, ""))
             self.assertTrue(use_agent(APPLICANT, path))

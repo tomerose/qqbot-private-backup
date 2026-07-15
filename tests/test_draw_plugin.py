@@ -28,6 +28,7 @@ class FakeEvent:
         self.is_at_or_wake_command = wake
         self.stopped = False
         self.extra = {}
+        self.sent = []
 
     def get_message_str(self):
         return self.text
@@ -46,6 +47,9 @@ class FakeEvent:
 
     def chain_result(self, components):
         return ("chain", components)
+
+    async def send(self, chain):
+        self.sent.append(chain)
 
     def set_extra(self, key, value):
         self.extra[key] = value
@@ -77,7 +81,7 @@ class DrawPluginTests(unittest.TestCase):
         with patch.object(draw_main.requests, "post", return_value=Response()) as post:
             self.assertEqual(plugin._request_image("draw a cat"), b"png")
 
-        self.assertEqual(post.call_args.kwargs["json"]["model"], "gemini-2.5-flash-image")
+        self.assertEqual(post.call_args.kwargs["json"]["model"], "gemini-3.1-flash-image")
 
     def test_clear_natural_drawing_request_is_supported(self):
         self.assertEqual(parse_draw_command("帮我画一张雨夜城市海报"), "雨夜城市海报")
@@ -112,6 +116,7 @@ class DrawPluginTests(unittest.TestCase):
         plugin._output_root = output_root
         plugin._pro_client = ProClient(db_path)
         plugin._pro_db_path = db_path  # retained for test helpers
+        plugin._usage_file = output_root.parent / "state" / "draw_usage.json"
         plugin._daily_usage = {}
         return plugin
 
@@ -134,12 +139,13 @@ class DrawPluginTests(unittest.TestCase):
                 image = PillowImage.new("RGB", (2, 2), "blue")
                 buffer = io.BytesIO()
                 image.save(buffer, format="PNG")
-                plugin._request_image = lambda _prompt: buffer.getvalue()
+                plugin._request_image = lambda *_args: buffer.getvalue()
 
                 replies = await collect(plugin.on_message(FakeEvent("/draw a cat", "2000000000")))
 
-                self.assertEqual(replies[0], ("plain", "我开始画了，预计 30–90 秒。"))
-                self.assertEqual(replies[-1][0], "chain")
+                self.assertEqual(replies[0], ("plain", "我开始画了（Imagen 3），预计 30–120 秒。"))
+                self.assertEqual(replies[-1][0], "plain")
+                self.assertIn("图片已生成", replies[-1][1])
 
         asyncio.run(scenario())
 
@@ -154,45 +160,47 @@ class DrawPluginTests(unittest.TestCase):
                 image = PillowImage.new("RGB", (2, 2), "blue")
                 buffer = io.BytesIO()
                 image.save(buffer, format="PNG")
-                plugin._request_image = lambda _prompt: buffer.getvalue()
+                plugin._request_image = lambda *_args: buffer.getvalue()
 
                 replies = await collect(plugin.on_message(FakeEvent("/draw a cat", "2000000000")))
 
-                self.assertEqual(replies[0], ("plain", "我开始画了，预计 30–90 秒。"))
-                self.assertEqual(replies[-1][0], "chain")
+                self.assertEqual(replies[0], ("plain", "我开始画了，预计 30–120 秒。"))
+                self.assertEqual(replies[-1][0], "plain")
+                self.assertIn("图片已生成", replies[-1][1])
 
         asyncio.run(scenario())
 
-    def test_ordinary_user_can_draw_with_the_go_weekly_allowance(self):
+    def test_ordinary_user_can_draw_with_the_daily_allowance(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self.build_plugin(Path(tmp))
                 image = PillowImage.new("RGB", (2, 2), "green")
                 buffer = io.BytesIO()
                 image.save(buffer, format="PNG")
-                plugin._request_image = lambda _prompt: buffer.getvalue()
+                plugin._request_image = lambda *_args: buffer.getvalue()
                 event = FakeEvent("/draw a cat", "2000000000")
 
                 replies = await collect(plugin.on_message(event))
 
                 self.assertTrue(event.stopped)
-                self.assertEqual(replies[0], ("plain", "我开始画了，预计 30–90 秒。"))
-                self.assertEqual(replies[-1][0], "chain")
+                self.assertEqual(replies[0], ("plain", "我开始画了，预计 30–120 秒。"))
+                self.assertEqual(replies[-1][0], "plain")
+                self.assertIn("图片已生成", replies[-1][1])
 
         asyncio.run(scenario())
 
-    def test_ordinary_user_uses_the_same_weekly_cap_as_go(self):
+    def test_ordinary_user_uses_the_daily_cap(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self.build_plugin(Path(tmp))
                 sender = "2000000000"
-                year, week_num = time.strftime("%Y"), time.strftime("%W")
-                plugin._daily_usage[f"{sender}:{year}:{week_num}"] = 6
-                plugin._request_image = lambda _prompt: self.fail("quota should stop before proxy")
+                day = time.strftime("%Y%m%d")
+                plugin._daily_usage[f"{sender}:{day}"] = 1
+                plugin._request_image = lambda *_args: self.fail("quota should stop before proxy")
 
                 replies = await collect(plugin.on_message(FakeEvent("/draw a cat", sender)))
 
-                self.assertEqual(replies, [("plain", "本周作图已用 6/6 次。下周自动重置。")])
+                self.assertEqual(replies, [("plain", "作图次数已用完（今日 1/1）。添加小柠为QQ好友获得X资格可享每周6次。")])
 
         asyncio.run(scenario())
 
@@ -232,8 +240,10 @@ class DrawPluginTests(unittest.TestCase):
             path.write_bytes(b"image")
             event = Event()
             plugin = DrawCommand.__new__(DrawCommand)
-            reply = asyncio.run(plugin._deliver_image(event, path))
-            self.assertIn("图片已上传到群文件", reply)
+            plugin._output_root = Path(tmp)
+            delivery = asyncio.run(plugin._deliver_image(event, path))
+            self.assertTrue(delivery.delivered)
+            self.assertEqual(delivery.channel, "group_upload")
             self.assertEqual(event.bot.calls[0][0], "upload_group_file")
             self.assertEqual(event.bot.calls[0][1]["file"], str(path.resolve()))
 
@@ -247,11 +257,11 @@ class DrawPluginTests(unittest.TestCase):
                 buffer = io.BytesIO()
                 image.save(buffer, format="PNG")
                 plugin = self.build_plugin(root)
-                plugin._request_image = lambda _prompt: buffer.getvalue()
+                plugin._request_image = lambda *_args: buffer.getvalue()
                 event = FakeEvent("/draw a cat", "1211000567")
 
                 replies = await collect(plugin.on_message(event))
-                self.assertEqual(replies[0], ("plain", "我开始画了，预计 30–90 秒。"))
+                self.assertEqual(replies[0], ("plain", "我开始画了（Imagen 3），预计 30–120 秒。"))
                 generated = Path(event.get_extra("_pro_draw_output_paths")[0])
                 self.assertTrue(generated.is_file())
                 self.assertEqual(generated.suffix, ".png")

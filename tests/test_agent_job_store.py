@@ -101,6 +101,38 @@ class JobStoreTests(unittest.TestCase):
             self.assertNotIn("scope", records[0])
             self.assertEqual(records[0]["recovery"], "replay_safe")
 
+    def test_active_status_query_is_scoped_and_privacy_safe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp) / "jobs.db")
+            store.start(
+                "a1b2c3d4e5f6",
+                "owner",
+                "private:owner",
+                "private task text",
+                "claude",
+                "",
+                state="delivering",
+                recovery="replay_safe",
+                now=1000,
+            )
+            store.start(
+                "b1b2c3d4e5f6",
+                "other",
+                "private:other",
+                "other private task text",
+                "claude",
+                "",
+                state="delivering",
+                recovery="replay_safe",
+                now=1001,
+            )
+
+            records = store.list_active_for("owner", "private:owner")
+
+            self.assertEqual([item["job_id"] for item in records], ["a1b2c3d4e5f6"])
+            self.assertNotIn("task", records[0])
+            self.assertNotIn("scope", records[0])
+
     def test_delivery_digest_is_validated_and_contains_no_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = JobStore(Path(tmp) / "jobs.db")

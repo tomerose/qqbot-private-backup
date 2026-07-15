@@ -228,6 +228,34 @@ class JobStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_active_for(
+        self,
+        owner_id: str,
+        scope: str = "",
+        *,
+        limit: int = 5,
+    ) -> list[dict]:
+        """Return privacy-safe active metadata visible to one user/session."""
+        clauses = [
+            "owner_fingerprint = ?",
+            "state IN ({})".format(",".join("?" for _ in ACTIVE_STATES | {"interrupted"})),
+        ]
+        params: list[object] = [_digest(owner_id)[:16], *(ACTIVE_STATES | {"interrupted"})]
+        normalized_scope = str(scope or "").strip()
+        if normalized_scope:
+            clauses.append("scope_fingerprint = ?")
+            params.append(_digest(normalized_scope)[:16])
+        params.append(max(1, min(int(limit), 20)))
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""SELECT job_id, backend, state, stage, recovery,
+                    delivery_digest, step_index, step_count, updated_at
+                    FROM jobs WHERE {' AND '.join(clauses)}
+                    ORDER BY updated_at DESC LIMIT ?""",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def record_delivery(
         self,
         job_id: str,

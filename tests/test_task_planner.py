@@ -47,6 +47,10 @@ class TaskPlannerTests(unittest.TestCase):
         plan = plan_task(TaskRequest("job126", "发送报告", "claude"))
         self.assertFalse(plan.steps[0].expected_artifact)
 
+    def test_explicit_target_file_request_requires_an_artifact(self):
+        plan = plan_task(TaskRequest("job123", "整理成一份 PDF 报告", "claude"))
+        self.assertTrue(plan.steps[0].expected_artifact)
+
 
 if __name__ == "__main__":
     unittest.main()

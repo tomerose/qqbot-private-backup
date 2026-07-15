@@ -48,6 +48,7 @@ def assess_step(
     allowed_work_root: Path = DEFAULT_WORK_DIR,
     allowed_output_root: Path = DEFAULT_WORKSPACE,
 ) -> StepDecision:
+    # Unknown local actions are too vague to run without an explicit yes.
     if step.action_class in {ActionClass.HIGH_IMPACT, ActionClass.UNKNOWN}:
         return StepDecision(False, True, step.action_class.value)
     if not _directory_within(work_dir, allowed_work_root):

@@ -12,9 +12,11 @@ from pathlib import Path
 
 try:
     from .action_policy import ActionClass, classify_action
+    from .artifact_staging import expected_artifact_suffixes
     from .delivery_dlp import inspect_deliverable, is_sensitive_name, strip_image_metadata
 except ImportError:  # Direct module loading in unit tests.
     from action_policy import ActionClass, classify_action
+    from artifact_staging import expected_artifact_suffixes
     from delivery_dlp import inspect_deliverable, is_sensitive_name, strip_image_metadata
 
 DEFAULT_WORKSPACE = Path(r"D:\Claudecoda学习\qqbot\claude_workspace")
@@ -309,6 +311,11 @@ def build_process_tree_kill_command(pid: int) -> list[str]:
     return ["taskkill.exe", "/PID", str(value), "/T", "/F"]
 
 
+def _file_upload_path(fpath: str) -> str:
+    """Return a native absolute path for NapCat's file-upload actions."""
+    return str(Path(fpath).resolve(strict=True))
+
+
 async def upload_aiocqhttp_group_file(bot: object, group_id: str, path: Path) -> None:
     """Use OneBot's real group-file upload action instead of a File message segment."""
     group = str(group_id or "").strip()
@@ -325,12 +332,46 @@ async def upload_aiocqhttp_group_file(bot: object, group_id: str, path: Path) ->
     call_action = getattr(bot, "call_action", None)
     if not callable(call_action):
         raise RuntimeError("当前 QQ 适配器不支持群文件上传")
-    await call_action(
+    result = await call_action(
         "upload_group_file",
         group_id=int(group),
-        file=str(resolved),
+        file=_file_upload_path(str(resolved)),
         name=resolved.name,
     )
+    if isinstance(result, dict) and result.get("retcode", 0) != 0:
+        raise RuntimeError(
+            f"upload_group_file: retcode={result.get('retcode')} "
+            + str(result.get("wording", result.get("msg", "")))[:120]
+        )
+
+
+async def upload_aiocqhttp_private_file(bot: object, user_id: str, path: Path) -> None:
+    """Use OneBot's real private-file upload action instead of a File message segment."""
+    user = str(user_id or "").strip()
+    candidate = Path(path)
+    if candidate.is_symlink():
+        raise ValueError("待发送内容不能是链接")
+    resolved = candidate.resolve(strict=True)
+    if not user.isdigit():
+        raise ValueError("用户 QQ 号无效")
+    if not resolved.is_file():
+        raise ValueError("待发送内容不是普通文件")
+    if is_sensitive_deliverable(resolved):
+        raise ValueError("敏感文件禁止发送")
+    call_action = getattr(bot, "call_action", None)
+    if not callable(call_action):
+        raise RuntimeError("当前 QQ 适配器不支持私聊文件上传")
+    result = await call_action(
+        "upload_private_file",
+        user_id=int(user),
+        file=_file_upload_path(str(resolved)),
+        name=resolved.name,
+    )
+    if isinstance(result, dict) and result.get("retcode", 0) != 0:
+        raise RuntimeError(
+            f"upload_private_file: retcode={result.get('retcode')} "
+            + str(result.get("wording", result.get("msg", "")))[:120]
+        )
 
 
 def build_agent_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
@@ -446,8 +487,15 @@ def _system_preamble(output_dir: Path, task: str = "", high_risk_approved: bool 
         if high_risk_approved
         else "本任务未授权执行高风险操作：不得删除数据、对外发送、安装软件、修改系统或读取凭据。"
     )
+    expected_suffixes = expected_artifact_suffixes(task)
     artifact_quality = ""
-    if task and re.search(r"\bdocx\b|\bword\b|Word|文档", task, re.I):
+    if expected_suffixes:
+        formats = "、".join(sorted(expected_suffixes))
+        artifact_quality += (
+            f"用户要求的目标文件格式是 {formats}；必须至少交付一个这些格式的最终成品，"
+            "不能用其他格式冒充。"
+        )
+    if ".docx" in expected_suffixes:
         artifact_quality += (
             "Word 成品必须是可打开的 DOCX：使用标题和分级标题，排版清晰，生成后重新打开检查。"
             "若任务涉及最新信息、调研、GitHub 或事件报告，正文至少 500 字，并在文末提供至少两个可点击的公开来源链接和资料日期。"

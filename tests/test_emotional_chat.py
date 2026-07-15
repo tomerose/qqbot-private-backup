@@ -9,12 +9,15 @@ PLUGINS_DIR = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugin
 sys.path.insert(0, str(PLUGINS_DIR))
 
 from emotional_chat.main import (  # noqa: E402
+    CRISIS_CONTEXT,
     EMOTION_CONTEXT,
     PARTNER_CONTEXT,
     PARTNER_DESCRIPTION,
     PARTNER_NAME,
     PARTNER_QQ,
+    TALK_SYSTEM,
     EmotionalChat,
+    is_crisis_language,
 )
 
 
@@ -29,6 +32,11 @@ class FakeEvent:
 
     def get_sender_id(self):
         return self.sender_id
+
+    def is_private_chat(self):
+        return True
+
+    is_at_or_wake_command = False
 
     def stop_event(self):
         self.stopped = True
@@ -45,6 +53,19 @@ async def collect(generator):
 
 
 class EmotionalChatTests(unittest.TestCase):
+    def test_crisis_language_gets_a_direct_current_safety_check(self):
+        for text in ("我一直在伤害自己", "我有点想自残", "我不想活了"):
+            with self.subTest(text=text):
+                self.assertTrue(is_crisis_language(text))
+        self.assertFalse(is_crisis_language("最近有点累"))
+        self.assertIn("现在是否安全", CRISIS_CONTEXT)
+        self.assertIn("立即联系", CRISIS_CONTEXT)
+
+    def test_long_talk_is_answered_as_one_contextual_reply(self):
+        self.assertIn("一次说了多件事", TALK_SYSTEM)
+        self.assertIn("不设固定句数", TALK_SYSTEM)
+        self.assertIn("不要逐句机械答复", EMOTION_CONTEXT)
+
     def test_partner_description_is_durable_and_privacy_safe(self):
         self.assertIn("长期伴侣", PARTNER_DESCRIPTION)
         self.assertIn(PARTNER_DESCRIPTION, PARTNER_CONTEXT)

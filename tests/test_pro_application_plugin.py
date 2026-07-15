@@ -17,11 +17,22 @@ REVIEWER = "1211000567"
 APPLICANT = "2000000000"
 
 
+class FakeBot:
+    def __init__(self, friends=()):
+        self.friends = {str(item) for item in friends}
+
+    async def call_action(self, action: str):
+        if action != "get_friend_list":
+            raise AssertionError(action)
+        return [{"user_id": item} for item in self.friends]
+
+
 class FakeEvent:
-    def __init__(self, text: str, sender: str, *, private: bool = True):
+    def __init__(self, text: str, sender: str, *, private: bool = True, friends=()):
         self.text = text
         self.sender = sender
         self.private = private
+        self.bot = FakeBot(friends)
         self.unified_msg_origin = f"llbot-test:FriendMessage:{sender}"
         self.stopped = False
 
@@ -78,7 +89,7 @@ class ProApplicationPluginTests(unittest.TestCase):
 
     def test_invite_flow_grants_bound_user_without_exposing_other_status(self):
         created = asyncio.run(
-            collect(self.plugin.on_message(FakeEvent(f"/invite {APPLICANT} go 30", REVIEWER)))
+            collect(self.plugin.on_message(FakeEvent(f"/invite {APPLICANT} x 30", REVIEWER)))
         )
         code = re.search(r"XIAONING-[A-F0-9]+", created[0]).group(0)
 
@@ -93,8 +104,8 @@ class ProApplicationPluginTests(unittest.TestCase):
         )
 
         self.assertIn("与你不同", other[0])
-        self.assertIn("GO", redeemed[0])
-        self.assertIn("当前资格：GO", status[0])
+        self.assertIn("X", redeemed[0])
+        self.assertIn("当前资格：X", status[0])
         self.assertNotIn(APPLICANT, status[0])
 
     def test_only_authenticated_reviewer_can_generate_invites(self):
@@ -127,20 +138,56 @@ class ProApplicationPluginTests(unittest.TestCase):
         )
         self.assertIn("无效", replay[0])
 
-    def test_go_duration_is_clamped_and_management_stays_private(self):
+    def test_x_duration_is_clamped_and_management_stays_private(self):
         group_reply = asyncio.run(
             collect(
                 self.plugin.on_message(
-                    FakeEvent(f"/invite {APPLICANT} go 365", REVIEWER, private=False)
+                    FakeEvent(f"/invite {APPLICANT} x 365", REVIEWER, private=False)
                 )
             )
         )
         private_reply = asyncio.run(
-            collect(self.plugin.on_message(FakeEvent(f"/invite {APPLICANT} go 365", REVIEWER)))
+            collect(self.plugin.on_message(FakeEvent(f"/invite {APPLICANT} x 365", REVIEWER)))
         )
 
         self.assertIn("私聊", group_reply[0])
-        self.assertIn("GO 90 天", private_reply[0])
+        self.assertIn("X 90 天", private_reply[0])
+
+    def test_friend_check_grants_persistent_x_once(self):
+        event = FakeEvent("你好", APPLICANT, friends={APPLICANT})
+        asyncio.run(self.plugin._quick_friend_grant(event, APPLICANT))
+        membership = self.plugin.store.status_for(APPLICANT, now=1_000)
+
+        self.assertEqual(membership.tier, "x")
+        self.assertGreater(membership.pro_expires_at, 1_000 + 365 * 86400)
+
+        asyncio.run(self.plugin._quick_friend_grant(event, APPLICANT))
+        events = self.plugin.store.audit_for(
+            f"FRIEND-X-{APPLICANT}", REVIEWER, now=1_000
+        )
+        self.assertEqual(sum(item.event_type == "claimed_friend_x" for item in events), 1)
+
+    def test_non_friend_is_not_granted_x(self):
+        asyncio.run(self.plugin._quick_friend_grant(FakeEvent("你好", APPLICANT), APPLICANT))
+        self.assertIsNone(self.plugin.store.status_for(APPLICANT, now=1_000))
+
+    def test_friend_check_does_not_replace_existing_pro(self):
+        self.plugin.store.grant(
+            APPLICANT,
+            REVIEWER,
+            30,
+            now=1_000,
+            tier="pro",
+        )
+        asyncio.run(
+            self.plugin._quick_friend_grant(
+                FakeEvent("你好", APPLICANT, friends={APPLICANT}), APPLICANT
+            )
+        )
+        self.assertEqual(
+            self.plugin.store.status_for(APPLICANT, now=1_000).tier,
+            "pro",
+        )
 
 
 if __name__ == "__main__":

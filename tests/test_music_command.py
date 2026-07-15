@@ -91,7 +91,7 @@ class MusicCommandTests(unittest.TestCase):
             plugin = MusicCommand.__new__(MusicCommand)
             await plugin.inject_music_memory(object(), request)
             await plugin.inject_music_memory(object(), request)
-            self.assertEqual(request.system_prompt.count("\u3010\u97f3\u4e50\u80fd\u529b\u3011"), 1)
+            self.assertEqual(request.system_prompt.count("\u3010\u97f3\u4e50\u3011"), 1)
             self.assertIn(MUSIC_MEMORY, request.system_prompt)
 
         import asyncio
@@ -145,6 +145,20 @@ class MusicCommandTests(unittest.TestCase):
             captured["input"],
             [{"type": "text", "text": "an original song"}],
         )
+
+    def test_current_vertex_output_audio_field_is_decoded(self):
+        audio = base64.b64encode(b"current-original-song").decode("ascii")
+        response = SimpleNamespace(
+            output_audio=SimpleNamespace(data=audio, mime_type="audio/mpeg"),
+            outputs=[],
+        )
+        client = SimpleNamespace(
+            interactions=SimpleNamespace(create=lambda **_kwargs: response)
+        )
+        with patch.object(self.proxy.genai, "Client", return_value=client):
+            payload, mime = self.proxy._generate_music("an original song")
+        self.assertEqual(payload, b"current-original-song")
+        self.assertEqual(mime, "audio/mpeg")
 
 
 if __name__ == "__main__":

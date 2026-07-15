@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from pathlib import Path
 
@@ -65,6 +66,20 @@ SYNTH_PROMPT = """你是辩论主持人。以下是 4 位专家对「{topic}」�
 {responses}
 
 请用 200-300 字给出综合结论：各方共识是什么？核心分歧在哪？值得进一步思考的问题是什么？"""
+_NATURAL_DEBATE = re.compile(
+    r"^(?:小柠[，,：:\s]*)?(?:帮我|请|让AI)?(?:开个|来个|进行一场)?"
+    r"(?:圆桌讨论|圆桌辩论|辩论|多角度讨论)(?:一下)?[：:，,\s]*(?P<topic>.+)$",
+    re.I,
+)
+
+
+def parse_debate_topic(text: str) -> str | None:
+    value = str(text or "").strip()
+    if value.startswith(("/debate", "/辩论")):
+        parts = value.split(maxsplit=1)
+        return parts[1].strip() if len(parts) > 1 else ""
+    match = _NATURAL_DEBATE.match(value)
+    return match.group("topic").strip() if match else None
 
 
 def _call_gemini(messages: list[dict], max_tokens: int = 800) -> str:
@@ -92,7 +107,10 @@ class AiDebate(Star):
     @defer_stop_event
     async def on_message(self, event: AstrMessageEvent):
         text = self._msg(event)
-        if not text.startswith("/debate") and not text.startswith("/辩论"):
+        topic = parse_debate_topic(text)
+        if topic is None:
+            return
+        if not (event.is_private_chat() or event.is_at_or_wake_command):
             return
         event.stop_event()
 
@@ -100,7 +118,6 @@ class AiDebate(Star):
         if not sender_id:
             return
 
-        topic = text.split(maxsplit=1)[1] if " " in text else ""
         if not topic or len(topic) < 6:
             yield event.plain_result("用法：/debate <话题>。话题至少 6 个字。")
             return
@@ -110,7 +127,7 @@ class AiDebate(Star):
         tier = get_tier(sender_id, self._pro_db)
         group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
         in_pro_group = bool(group_id) and is_active_pro_group(group_id, self._pro_db)
-        limit = PRO_DAILY if (tier >= Tier.GO or in_pro_group) else FREE_DAILY
+        limit = PRO_DAILY if (tier >= Tier.X or in_pro_group) else FREE_DAILY
         used = self._daily_free.get(key, 0)
         if used >= limit:
             yield event.plain_result(PRO_MSG.format(used=used, limit=limit))

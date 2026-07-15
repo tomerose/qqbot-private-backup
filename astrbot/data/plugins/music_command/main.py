@@ -17,7 +17,6 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import File, Music
 from astrbot.api.star import Context, Star, StarTools
 
-from ..claude_code_agent.agent_core import upload_aiocqhttp_group_file
 from ..draw_command.pro_access import Tier, get_tier
 
 MUSIC_PROXY_URL = "http://127.0.0.1:3000/v1/music/generations"
@@ -27,11 +26,9 @@ PRO_SONG_MESSAGE = "原创歌曲生成是 Pro 专属功能。发送 /pro status 
 _MUSIC_COMMAND = re.compile(r"^\s*(?:/music|/网易云|网易云音乐)\s+(.+?)\s*$", re.I)
 _SING_COMMAND = re.compile(r"^\s*/sing\s+(.+?)\s*$", re.I)
 MUSIC_MEMORY = (
-    "\u3010\u97f3\u4e50\u80fd\u529b\u3011\u4ec5\u5728\u7528\u6237\u660e\u786e\u8bf7\u6c42\u65f6\u8bf4\u660e\u6216\u5f15\u5bfc\u3002"
-    "\u7528\u6237\u8bf4\u201c\u70b9\u6b4c/\u641c\u6b4c/\u653e\u6b4c/\u6765\u4e00\u9996 + \u6b4c\u540d\u201d\u65f6\uff0c\u81ea\u52a8\u641c\u7d22\u7f51\u6613\u4e91\u97f3\u4e50\u5e76\u53d1\u9001\u97f3\u4e50\u5361\u3002"
-    "\u7528\u6237\u8bf4\u201c\u53d1\u9001/\u5206\u4eab\u7f51\u6613\u4e91\u97f3\u4e50 + \u6b4c\u66f2 ID \u6216\u5206\u4eab\u94fe\u63a5\u201d\u65f6\uff0c\u53d1\u9001\u7f51\u6613\u4e91\u97f3\u4e50\u5361\uff0c\u4e0d\u4e0b\u8f7d\u6216\u8f6c\u53d1\u7248\u6743\u97f3\u9891\u3002"
-    "\u7528\u6237\u660e\u786e\u8bf4\u201c\u5531/\u5199/\u521b\u4f5c/\u751f\u6210\u4e00\u9996\u539f\u521b\u6b4c\u201d\u65f6\uff0c\u624d\u89e6\u53d1 Pro \u539f\u521b\u6b4c\u66f2\uff0c\u6bcf\u65e5 1 \u9996\u3002"
-    "\u201c\u627e\u6b4c\u3001\u63a8\u8350\u3001\u64ad\u653e\u67d0\u9996\u6b4c\u3001\u5531\u67d0\u4e2a\u6b4c\u624b\u6216\u5df2\u6709\u6b4c\u66f2\u201d\u4e0d\u89e6\u53d1\u6b4c\u66f2\u751f\u6210\uff1b\u9700\u6e05\u695a\u544a\u77e5\u4ec5\u652f\u6301\u7f51\u6613\u4e91\u97f3\u4e50\u5361\uff08\u53ef\u641c\u6b4c\u540d\uff09\u6216\u539f\u521b\u6b4c\u66f2\u3002"
+    "\u3010\u97f3\u4e50\u3011\u7528\u6237\u8bf4\u300c\u70b9\u6b4c/\u641c\u6b4c/\u653e\u6b4c/\u6765\u4e00\u9996/\u542c\u6b4c/\u6362\u6b4c + \u6b4c\u540d/\u6b4c\u624b\u300d\u2192\u81ea\u52a8\u641c\u7f51\u6613\u4e91\u97f3\u4e50\u5361\u3002"
+    "\u7528\u6237\u8bf4\u300c\u5531/\u5199/\u521b\u4f5c/\u751f\u6210/\u505a\u4e00\u9996\u6b4c\u300d\u2192Pro\u539f\u521b\u6b4c\u66f2(/sing)\u3002"
+    "\u300c\u627e\u6b4c/\u63a8\u8350/\u64ad\u653e\u5df2\u6709\u6b4c\u66f2/\u5531\u6b4c\u624b\u540d\u300d\u2192\u4e0d\u89e6\u53d1\u539f\u521b\u751f\u6210\uff0c\u4ec5\u641c\u7d22\u3002\u4ec5\u652f\u6301\u7f51\u6613\u4e91\u97f3\u4e50\u5361\u3002"
 )
 _NATURAL_NETEASE_COMMAND = re.compile(
     r"^\s*(?:\u5c0f\u67e0[\uff0c,\uff1a:\s]*)?(?:(?:\u5e2e\u6211|\u7ed9\u6211|\u8bf7)[\uff0c,\uff1a:\s]*)?"
@@ -39,16 +36,22 @@ _NATURAL_NETEASE_COMMAND = re.compile(
     re.I,
 )
 _NATURAL_ORIGINAL_SONG = re.compile(
-    r"^\s*(?:\u5c0f\u67e0[\uff0c,\uff1a:\s]*)?(?:(?:\u5e2e\u6211|\u7ed9\u6211|\u8bf7)[\uff0c,\uff1a:\s]*)?"
-    r"(?:\u5531|\u5199|\u521b\u4f5c|\u751f\u6210)(?:\u4e00\u9996|\u9996|\u4e00\u6bb5|\u4e2a)?\s*"
-    r"(?P<prompt>(?=[^\n]*\u539f\u521b)(?=[^\n]*(?:\u6b4c\u66f2|\u97f3\u4e50|\u6b4c)).+?)\s*$",
+    r"^\s*(?:\u5c0f\u67e0[\uff0c,\uff1a:\s]*)?(?:(?:\u5e2e\u6211|\u7ed9\u6211|\u8bf7|\u6211\u60f3|\u6211\u8981)[\uff0c,\uff1a:\s]*)?"
+    r"(?:\u5531|\u5199|\u521b\u4f5c|\u751f\u6210|\u505a)(?:\u4e00\u9996|\u9996|\u4e00\u6bb5|\u4e2a|\u70b9)?\s*"
+    r"(?P<prompt>(?=[^\n]*(?:\u6b4c\u66f2|\u97f3\u4e50|\u6b4c)).+?)\s*$",
     re.I,
 )
 _SONG_SEARCH_COMMAND = re.compile(
-    r"^\s*(?:\u5c0f\u67e0[\uff0c,\uff1a:\s]*)?(?:(?:\u5e2e\u6211|\u7ed9\u6211|\u8bf7)[\uff0c,\uff1a:\s]*)?"
-    r"(?:\u70b9(?:\u9996|\u4e2a|\u4e00\u9996)?\u6b4c|\u641c\u6b4c|\u653e(?:\u9996|\u4e2a|\u4e00\u9996)?\u6b4c|"
-    r"\u6765(?:\u9996|\u4e2a|\u4e00\u9996)?(?:\u6b4c|\u97f3\u4e50)|\u542c(?:\u9996|\u4e2a|\u4e00\u9996)?\u6b4c|"
-    r"\u64ad\u653e(?:\u9996|\u4e2a|\u4e00\u9996)?)"
+    r"^\s*(?:\u5c0f\u67e0[\uff0c,\uff1a:\s]*)?(?:(?:\u5e2e\u6211|\u7ed9\u6211|\u8bf7|\u6211\u60f3|\u6211\u8981|\u6211\u60f3\u542c|\u6211\u60f3\u70b9)[\uff0c,\uff1a:\s]*)?"
+    r"(?:\u70b9(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)?\u6b4c|"
+    r"\u641c(?:\u9996|\u4e2a|\u4e00)?(?:\u6b4c|\u6b4c\u66f2)|"
+    r"\u653e(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
+    r"\u6765(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
+    r"\u542c(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
+    r"\u64ad(?:\u653e)?(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
+    r"\u5531(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
+    r"(?:\u7ed9|\u4e3a)(?:\u6211|\u5927\u5bb6)(?:\u653e|\u70b9|\u64ad|\u6765)(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
+    r"\u6362(?:\u9996|\u4e2a|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?)"
     r"(?:\u6b4c\u66f2|\u97f3\u4e50|\u6b4c)?\s*(?P<query>.+?)\s*$",
     re.I,
 )
@@ -90,8 +93,22 @@ def parse_song_search(text: str) -> str | None:
     return match.group("query").strip() if match else None
 
 
+_PROXY_SEARCH_URL = "http://127.0.0.1:3000/v1/search"
+_song_search_cache: dict[str, tuple[float, dict | None]] = {}
+_SONG_CACHE_TTL = 300
+
+
 def _search_netease_song(query: str) -> dict | None:
-    """Return the first NetEase result without asking an LLM to invent a song id."""
+    """Return the first NetEase result, with cache + proxy fallback."""
+    now = time.time()
+    ck = f"nc:{query}"
+    if ck in _song_search_cache:
+        ts, val = _song_search_cache[ck]
+        if now - ts < _SONG_CACHE_TTL:
+            return val
+
+    result = None
+    # Primary: direct NetEase API
     try:
         response = requests.get(
             _NETEASE_SEARCH_URL,
@@ -105,20 +122,38 @@ def _search_netease_song(query: str) -> dict | None:
         response.raise_for_status()
         songs = (response.json().get("result") or {}).get("songs") or []
         song = next((item for item in songs if isinstance(item, dict) and str(item.get("id", "")).isdigit()), None)
-        if song is None:
-            return None
-        artists = song.get("artists") or []
-        return {
-            "song_id": str(song["id"]),
-            "title": str(song.get("name") or query),
-            "artist": "/".join(
-                str(artist.get("name")) for artist in artists
-                if isinstance(artist, dict) and artist.get("name")
-            ),
-        }
+        if song:
+            artists = song.get("artists") or []
+            result = {
+                "song_id": str(song["id"]),
+                "title": str(song.get("name") or query),
+                "artist": "/".join(
+                    str(artist.get("name")) for artist in artists
+                    if isinstance(artist, dict) and artist.get("name")
+                ),
+            }
     except (requests.RequestException, ValueError, TypeError):
-        logger.debug("[MusicCmd] song search failed for: %s", repr(query))
-    return None
+        pass
+
+    # Fallback: proxy unified search (cache hit there too)
+    if result is None:
+        try:
+            r = requests.post(
+                _PROXY_SEARCH_URL,
+                json={"query": query, "type": "music", "limit": 1},
+                timeout=(5, 20),
+            )
+            r.raise_for_status()
+            music = r.json().get("music")
+            if isinstance(music, dict) and music.get("song_id", "").isdigit():
+                result = music
+        except (requests.RequestException, ValueError, TypeError):
+            pass
+
+    if len(_song_search_cache) > 200:
+        _song_search_cache.pop(next(iter(_song_search_cache)), None)
+    _song_search_cache[ck] = (now, result)
+    return result
 
 
 def netease_music_card(song_id: str) -> Music:
@@ -179,22 +214,33 @@ class MusicCommand(Star):
         return path
 
     async def _deliver_song(self, event: AstrMessageEvent, path: Path):
-        get_group_id = getattr(event, "get_group_id", None)
-        group_id = str(get_group_id() if callable(get_group_id) else "").strip()
-        if group_id and hasattr(event, "bot"):
-            try:
-                await upload_aiocqhttp_group_file(event.bot, group_id, path)
-                return event.plain_result(f"原创歌曲已上传到群文件：{path.name}")
-            except Exception as exc:
-                logger.error("[MusicCmd] group song delivery failed: %s", type(exc).__name__)
-                return event.plain_result("歌曲已生成，但上传到群文件失败，请稍后重试。")
-        return event.chain_result([File(name=path.name, file=str(path))])
+        """Deliver song via group upload or private file, with verified result."""
+        from xiaoning_runtime import ArtifactDeliveryResult, deliver_local_artifact
+        project_root = Path(__file__).resolve().parents[4]
+        output_root = project_root / "claude_workspace" / "pro_music"
+        result = await deliver_local_artifact(
+            event, path, allowed_roots=[output_root], kind="file"
+        )
+        if result.delivered:
+            suffix = {
+                "group_upload": "已上传到群文件",
+                "private_fallback": "群文件上传失败，已私聊发送给你",
+                "private": "已发送到当前私聊",
+                "private_component": "已发送到当前私聊",
+            }.get(result.channel, "已发送")
+            return event.plain_result(f"原创歌曲已生成，{suffix}：{path.name}")
+        retry_note = (
+            "已加入后台重试队列，稍后自动送达。"
+            if result.channel == "queued"
+            else "文件已安全保留，请稍后重试。"
+        )
+        return event.plain_result(f"歌曲已生成，但 QQ 文件尚未交付，任务未完成；{retry_note}")
 
     @filter.on_llm_request(priority=-20)
     async def inject_music_memory(self, event: AstrMessageEvent, req) -> None:
         """Keep the persona's music guidance aligned with the explicit command router."""
         system_prompt = str(getattr(req, "system_prompt", "") or "")
-        if "\u3010\u97f3\u4e50\u80fd\u529b\u3011" not in system_prompt:
+        if "\u3010\u97f3\u4e50\u3011" not in system_prompt:
             req.system_prompt = f"{system_prompt}\n\n{MUSIC_MEMORY}".strip()
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=936)
@@ -245,7 +291,7 @@ class MusicCommand(Star):
             yield event.plain_result(f"今日原创歌曲生成次数已用完（{SONG_DAILY_LIMIT}/{SONG_DAILY_LIMIT}）。")
             event.stop_event()
             return
-        yield event.plain_result("原创歌曲生成中，约需 1-3 分钟，请稍候。")
+        yield event.plain_result("原创歌曲任务已开始，预计 1–3 分钟；QQ 音频文件成功交付后才会标记完成。")
         try:
             payload, mime = await asyncio.to_thread(self._request_song, prompt)
             path = self._save_song(payload, mime)

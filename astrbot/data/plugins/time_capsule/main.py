@@ -55,6 +55,20 @@ def _after_duration(text: str) -> str:
     return re.sub(r"^提醒我[：:]?\s*", "", rest)
 
 
+def parse_capsule_request(text: str) -> tuple[timedelta | None, str] | None:
+    value = str(text or "").strip()
+    command = value.startswith(("/capsule", "/胶囊"))
+    natural = "时间胶囊" in value or "未来的我" in value or "未来的自己" in value
+    if not command and not natural:
+        return None
+    duration = _parse_duration(value)
+    message = _after_duration(value) if duration is not None else ""
+    message = re.sub(
+        r"^(?:的)?(?:时间胶囊|给未来的(?:我|自己))[：:]?\s*", "", message
+    )
+    return duration, message.strip()
+
+
 class TimeCapsule(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config)
@@ -142,7 +156,10 @@ class TimeCapsule(Star):
     @defer_stop_event
     async def on_message(self, event: AstrMessageEvent):
         text = self._msg(event)
-        if not text.startswith("/capsule") and not text.startswith("/胶囊"):
+        request = parse_capsule_request(text)
+        if request is None:
+            return
+        if not (event.is_private_chat() or event.is_at_or_wake_command):
             return
         event.stop_event()
 
@@ -150,24 +167,14 @@ class TimeCapsule(Star):
         if not sender_id:
             return
 
-        # Parse: /capsule 6个月后 提醒我：记得坚持学英语
-        parts = re.split(r"\s+", text, maxsplit=2)
-        if len(parts) < 2:
+        duration, message = request
+        if duration is None:
             active = [c for c in self._capsules if c["sender_id"] == sender_id]
             yield event.plain_result(
                 f"用法：/capsule 6个月后 提醒我：你想对未来自己说的话\n"
                 f"你当前有 {len(active)} 个活跃胶囊。"
             )
             return
-
-        duration = _parse_duration(parts[1] if len(parts) > 1 else "")
-        if duration is None:
-            yield event.plain_result(
-                "时间格式有误。例如：/capsule 6个月后 提醒我：记得学英语"
-            )
-            return
-
-        message = _after_duration(parts[2]) if len(parts) > 2 else parts[1]
         if not message or len(message) < 2:
             yield event.plain_result("胶囊内容太短，请写至少 2 个字。")
             return

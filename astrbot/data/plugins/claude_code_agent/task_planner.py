@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 try:
     from .action_policy import ActionClass, classify_action
     from .agent_core import normalize_backend, validate_task
+    from .artifact_staging import is_artifact_request
 except ImportError:  # Direct module loading in unit tests.
     from action_policy import ActionClass, classify_action
     from agent_core import normalize_backend, validate_task
-
-
-_SEPARATOR = re.compile(r"(?:，?然后|，?再|；|;|\r?\n)+")
-_ARTIFACT_HINT = re.compile(r"生成|创建|导出|写入|编写|制作", re.I)
+    from artifact_staging import is_artifact_request
 
 
 @dataclass(frozen=True)
@@ -55,7 +52,7 @@ def plan_task(request: TaskRequest) -> ExecutionPlan:
             index=0,
             instruction=goal,
             action_class=classify_action(goal).action_class,
-            expected_artifact=bool(_ARTIFACT_HINT.search(goal)),
+            expected_artifact=is_artifact_request(goal),
         ),
     )
     return ExecutionPlan(task_id, backend, steps)

@@ -11,6 +11,7 @@ from draw_command.draw_core import (  # noqa: E402
     DrawRequestError,
     parse_draw_command,
     parse_pro_user_ids,
+    is_dewatermark_request,
 )
 
 
@@ -37,6 +38,12 @@ class DrawCoreTests(unittest.TestCase):
         self.assertEqual(limiter.try_acquire("1211000567"), 45)
         now[0] = 160.1
         self.assertEqual(limiter.try_acquire("1211000567"), 0)
+
+    def test_recognizes_natural_dewatermark_request(self):
+        self.assertTrue(is_dewatermark_request("帮我把右下角那个浅灰色的“@画师”小尾巴彻底抹掉"))
+        self.assertTrue(is_dewatermark_request("消除这张图的 Logo"))
+        self.assertTrue(is_dewatermark_request("去水印"))
+        self.assertFalse(is_dewatermark_request("把右下角的人物抹掉"))
 
 
 if __name__ == "__main__":

@@ -17,6 +17,11 @@ from astrbot.api.message_components import File, Image, Plain
 from astrbot.api.star import Context, Star
 from astrbot.core.workspace import default_workspace_root
 
+try:
+    from xiaoning_runtime import ArtifactDeliveryResult, deliver_local_artifact
+except ImportError:
+    from data.plugins.xiaoning_runtime import ArtifactDeliveryResult, deliver_local_artifact
+
 from .agent_core import (
     ApprovalRegistry,
     BACKEND_CLAUDE,
@@ -39,6 +44,7 @@ from .agent_core import (
     redact_sensitive_text,
     referenced_workspace_files,
     upload_aiocqhttp_group_file,
+    upload_aiocqhttp_private_file,
     validate_task,
     validate_work_dir,
 )
@@ -87,7 +93,6 @@ try:
     from draw_command.pro_access import agent_available, get_tier, Tier, use_agent
 except ImportError:  # AstrBot package import path.
     from data.plugins.draw_command.pro_access import agent_available, get_tier, Tier, use_agent
-
 OWNER_ID = "1211000567"
 MAX_REPLY_CHARS = 3500
 
@@ -157,9 +162,9 @@ class ClaudeCodeAgent(Star):
         )
 
     def _is_public_pro(self, sender_id: str) -> bool:
-        """Return True when *sender_id* holds an active Pro/GO membership."""
+        """Return True when *sender_id* holds an active X/Pro membership."""
         try:
-            return get_tier(sender_id, self._pro_db()) >= Tier.GO
+            return get_tier(sender_id, self._pro_db()) >= Tier.X
         except Exception:
             return False
 
@@ -171,7 +176,7 @@ class ClaudeCodeAgent(Star):
         )
 
     def _check_agent_access(self, sender_id: object) -> tuple[bool, str]:
-        """Returns (allowed, reason). GO: 1x/week, PRO: unlimited."""
+        """Returns (allowed, reason). X: 1x/week, PRO: unlimited."""
         path = self._pro_db()
         available, reason = agent_available(sender_id, path)
         if not available:
@@ -179,9 +184,9 @@ class ClaudeCodeAgent(Star):
         tier = get_tier(sender_id, path)
         if tier >= Tier.PRO:
             return True, ""
-        if tier == Tier.GO:
-            return True, "go"  # "go" signals caller to call use_agent() after success
-        return False, "Agent 功能需要 GO 或 PRO 权限"
+        if tier == Tier.X:
+            return True, "x"  # "x" signals caller to call use_agent() after success
+        return False, "Agent 功能需要 X 或 PRO 资格。添加小柠为QQ好友即可获得X资格。"
 
     def _authorize_agent_task(self, sender_id: object, task: str):
         if self._trusted_policy.is_trusted(sender_id):
@@ -189,7 +194,7 @@ class ClaudeCodeAgent(Star):
                 sender_id, task, self.work_dir, self.recovery_root
             )
         tier = get_tier(sender_id, self._pro_db())
-        if tier >= Tier.GO:
+        if tier >= Tier.X:
             return assess_trusted_task(task, self.work_dir, self.recovery_root)
         return TrustedDecision(TrustedDisposition.DENY, "not_pro")
 
@@ -255,7 +260,7 @@ class ClaudeCodeAgent(Star):
             "/agent cancel\n"
         )
         if not trusted_runtime:
-            return common + "GO 每周 1 次，Pro 不限次数；任务在独立安全工作区运行。"
+            return common + "X 每周 1 次，Pro 不限次数；任务在独立安全工作区运行。"
         return (
             common
             + "/agent use claude|codex|workbuddy\n"
@@ -263,23 +268,63 @@ class ClaudeCodeAgent(Star):
             + f"当前后端：{self.backend}。工作目录已设置，本机路径不在聊天中显示。"
         )
 
-    async def _deliver_file(self, event: AstrMessageEvent, path: Path) -> bool:
-        """Deliver a regular local file, using real OneBot group upload when needed."""
+    def _status_text(self, ctx: Context) -> str:
+        running = self._active_job_id or "无"
+        active = f" · {self._active_backend}" if self._active_backend else ""
+        lines = [
+            f"任务：{running}{active}",
+            f"后端：{self.backend}",
+            "工作目录：已设置（路径已隐藏）",
+        ]
         try:
-            roots = [self.workspace, default_workspace_root(event.unified_msg_origin)]
-            if not is_within_allowed_roots(path, roots):
-                logger.warning("[LocalAgent] blocked local file outside approved roots")
-                return False
-            if event.get_group_id() and hasattr(event, "bot"):
-                await upload_aiocqhttp_group_file(event.bot, event.get_group_id(), path)
-            else:
-                await event.send(MessageChain([File(name=path.name, file=str(path))]))
-            return True
-        except Exception as exc:
-            logger.error(
-                f"[LocalAgent] file delivery failed: {type(exc).__name__}"
+            records = self._job_store.list_active_for(
+                str(ctx.get_sender_id() or ""),
+                self._approval_scope(ctx),
+                limit=5,
             )
-            return False
+            pending = [
+                item for item in records
+                if str(item.get("job_id", "")) != str(self._active_job_id or "")
+            ]
+            if pending:
+                lines.append("待处理：")
+                for item in pending[:5]:
+                    index = int(item.get("step_index", 0)) + 1
+                    count = max(1, int(item.get("step_count", 1)))
+                    state = str(item.get("state", "unknown"))
+                    stage = str(item.get("stage", "") or state)
+                    lines.append(
+                        f"{item['job_id']} · {state}/{stage} · 步骤 {index}/{count}"
+                    )
+        except Exception as exc:
+            logger.debug("[LocalAgent] status ledger skipped: %s", type(exc).__name__)
+        try:
+            from data.plugins.friend_core.delivery_queue import get_queue
+            pending_files = get_queue().pending_count(str(ctx.get_sender_id() or ""))
+        except Exception:
+            pending_files = 0
+        if pending_files:
+            lines.append(f"文件交付：{pending_files} 个后台重试中")
+        return "\n".join(lines)
+
+    async def _deliver_artifact(
+        self, event: AstrMessageEvent, path: Path, *, kind: str = "file"
+    ) -> ArtifactDeliveryResult:
+        roots = [self.workspace, default_workspace_root(event.unified_msg_origin)]
+        if not is_within_allowed_roots(path, roots):
+            logger.warning("[Agent] delivery blocked (outside roots): %s", path.name)
+            return ArtifactDeliveryResult(False, "retained", error="PolicyRejected")
+        logger.info("[Agent] delivery start: %s kind=%s", path.name, kind)
+        result = await deliver_local_artifact(
+            event, path, allowed_roots=roots, kind=kind
+        )
+        logger.info("[Agent] delivery result: %s ok=%s ch=%s err=%s",
+                     path.name, result.delivered, result.channel, result.error)
+        return result
+
+    async def _deliver_file(self, event: AstrMessageEvent, path: Path) -> bool:
+        """Deliver a regular local file through the shared QQ fallback path."""
+        return (await self._deliver_artifact(event, path)).delivered
 
     def _is_declared_plugin_media(self, event: AstrMessageEvent, path: Path) -> bool:
         """Allow only existing media outputs explicitly registered by the media plugins."""
@@ -376,7 +421,9 @@ class ClaudeCodeAgent(Star):
                 continue
             cleaned.append(component)
 
-        if self._is_owner(event):
+        if self._is_owner(event) or self._is_public_pro(
+            str(getattr(event, "get_sender_id", lambda: "")() or "")
+        ):
             already_sent = set(event.get_extra("local_agent_workspace_files_sent") or [])
             try:
                 root = default_workspace_root(event.unified_msg_origin)
@@ -390,9 +437,13 @@ class ClaudeCodeAgent(Star):
                     key = str(item.path.resolve())
                     if key in represented_paths or key in already_sent:
                         continue
+                    # Route ALL media (images included) through the file-transfer
+                    # delivery path. Inline Image components go via send_group_msg,
+                    # which this account's media risk-control blocks; upload_* does not.
                     if item.kind == "image":
-                        cleaned.append(Image.fromFileSystem(str(item.path)))
-                        already_sent.add(key)
+                        result = await self._deliver_artifact(event, item.path, kind="image")
+                        if result.delivered:
+                            already_sent.add(key)
                     elif await self._deliver_file(event, item.path):
                         already_sent.add(key)
                 event.set_extra("local_agent_workspace_files_sent", sorted(already_sent))
@@ -419,8 +470,11 @@ class ClaudeCodeAgent(Star):
             await asyncio.wait_for(proc.wait(), timeout=3)
         except (FileNotFoundError, asyncio.TimeoutError, ProcessLookupError):
             if proc.returncode is None:
-                proc.kill()
-                await proc.wait()
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass  # proc already exited between check and kill
         return True
 
     async def _stop_process(self) -> bool:
@@ -542,6 +596,11 @@ class ClaudeCodeAgent(Star):
                 continue
             quality_checked.append(item)
         deliverables = quality_checked
+        logger.info(
+            "[Agent] _execute job=%s backend=%s deliverables=%d files=%s",
+            job_id, backend, len(deliverables),
+            [d.path.name for d in deliverables] if deliverables else [],
+        )
         result = parse_backend_result(backend, raw)
         if not result and not deliverables:
             logger.error(f"[LocalAgent] backend={backend} job={job_id} empty_result")
@@ -682,36 +741,29 @@ class ClaudeCodeAgent(Star):
         delivered_digests = set(payload.delivery_cursor)
         current_payload = payload
         scope_parts = str(scope or "").rsplit(":", 2)
-        group_target = (
-            (scope_parts[0], scope_parts[2])
-            if len(scope_parts) == 3
-            and scope_parts[1] == "GroupMessage"
-            and scope_parts[2].isdigit()
+        target = (
+            (scope_parts[0], scope_parts[1], scope_parts[2])
+            if len(scope_parts) == 3 and scope_parts[2].isdigit()
             else None
         )
         for item in deliverables:
             digest = self._file_digest(item.path)
             if digest in delivered_digests:
                 continue
-            component = (
-                Image.fromFileSystem(str(item.path))
-                if item.kind == "image"
-                else File(file=str(item.path), name=item.path.name)
-            )
             try:
-                if item.kind != "image" and group_target is not None:
-                    platform = self.context.get_platform_inst(group_target[0])
-                    bot = platform.get_client() if platform is not None else None
-                    await upload_aiocqhttp_group_file(
-                        bot, group_target[1], item.path
-                    )
-                    sent = True
+                if target is None:
+                    logger.warning("[LocalAgent] recovered file delivery has invalid scope")
+                    return False
+                platform = self.context.get_platform_inst(target[0])
+                bot = platform.get_client() if platform is not None else None
+                if target[1] == "GroupMessage":
+                    await upload_aiocqhttp_group_file(bot, target[2], item.path)
+                elif target[1] == "FriendMessage":
+                    await upload_aiocqhttp_private_file(bot, target[2], item.path)
                 else:
-                    sent = bool(
-                        await self.context.send_message(
-                            scope, MessageChain([component])
-                        )
-                    )
+                    logger.warning("[LocalAgent] recovered file delivery has unsupported scope")
+                    return False
+                sent = True
             except Exception as exc:
                 logger.warning(
                     f"[LocalAgent] recovered file delivery failed: {type(exc).__name__}"
@@ -896,11 +948,13 @@ class ClaudeCodeAgent(Star):
                             job_id, self._manifest_digest(deliverables)
                         )
                         self._job_store.transition(job_id, "delivering", "delivering")
-                        text_delivered = await self._send_active_text(
-                            payload.scope, response
-                        )
+                        # Deliver files first, then the response text — avoids
+                        # user seeing "交付文件：xxx" before delivery is confirmed.
                         files_delivered = await self._deliver_recovered_files(
                             payload.scope, job_id, payload, deliverables
+                        )
+                        text_delivered = await self._send_active_text(
+                            payload.scope, response
                         )
                         delivered = text_delivered and files_delivered
                         if delivered:
@@ -991,7 +1045,7 @@ class ClaudeCodeAgent(Star):
                         ctx, Plain("这个任务超出本机安全边界，没有执行。")
                     )
                     return
-                # Tier preflight only. GO is charged after verified execution;
+                # Tier preflight only. X is charged after verified execution;
                 # Pro follows the published unlimited-Agent contract.
                 if not trusted_runtime:
                     available, reason = self._check_agent_access(sender_id)
@@ -1066,7 +1120,7 @@ class ClaudeCodeAgent(Star):
             charge_go_usage = False
             if not self._can_manage_runtime(ctx):
                 tier = get_tier(sender_id, self._pro_db())
-                if tier == Tier.GO:
+                if tier == Tier.X:
                     available, reason = agent_available(sender_id, self._pro_db())
                     if not available:
                         self._job_store.finish(
@@ -1118,9 +1172,21 @@ class ClaudeCodeAgent(Star):
 
             def router(step: TaskStep, attempted: frozenset[str]):
                 if not trusted_runtime:
-                    if BACKEND_CODEX not in available_backends or BACKEND_CODEX in attempted:
-                        return BackendRoute(None, "public_sandbox_unavailable")
-                    return BackendRoute(BACKEND_CODEX, "selected")
+                    # ponytail: prefer Codex sandbox, fall back to Claude if
+                    # unavailable. WorkBuddy is excluded (full host access).
+                    sandbox_backends = available_backends - {"workbuddy"}
+                    if not sandbox_backends:
+                        return BackendRoute(None, "no_sandbox_available")
+                    sandbox_preferred = (
+                        BACKEND_CODEX if BACKEND_CODEX in sandbox_backends
+                        else BACKEND_CLAUDE
+                    )
+                    selected = route_backend(
+                        step, sandbox_preferred, sandbox_backends, attempted,
+                    )
+                    if selected.backend is None:
+                        return BackendRoute(None, "no_sandbox_available")
+                    return selected
                 selected = route_backend(
                     step,
                     plan.preferred_backend,
@@ -1274,7 +1340,7 @@ class ClaudeCodeAgent(Star):
                 return
 
             if charge_go_usage and not use_agent(sender_id, self._pro_db()):
-                logger.warning("[LocalAgent] GO usage record could not be committed")
+                logger.warning("[LocalAgent] X usage record could not be committed")
 
             unique: dict[str, Deliverable] = {}
             for item in outcome.deliverables:
@@ -1295,19 +1361,40 @@ class ClaudeCodeAgent(Star):
             delivered_digests: set[str] = set(payload.delivery_cursor)
             all_delivered = True
             for item in deliverables:
-                delivered = True
-                if item.kind == "image" and not (ctx.get_group_id() and hasattr(ctx, "bot")):
-                    yield self._reply(ctx, Image(file=str(item.path)))
-                elif ctx.get_group_id() and hasattr(ctx, "bot"):
-                    delivered = await self._deliver_file(ctx, item.path)
-                    if delivered:
-                        yield self._reply(ctx, Plain(f"文件已上传到群文件：{item.path.name}"))
-                else:
-                    yield self._reply(ctx, File(file=str(item.path), name=item.path.name))
+                outcome = await self._deliver_artifact(
+                    ctx,
+                    item.path,
+                    kind="image" if item.kind == "image" else "file",
+                )
+                delivered = outcome.delivered
+                if delivered:
+                    if outcome.channel == "group_upload":
+                        detail = f"已上传群文件：{item.path.name}"
+                    elif outcome.channel == "private_fallback":
+                        detail = f"已私聊发送：{item.path.name}（群上传失败，改发私聊）"
+                    elif outcome.channel == "group_image":
+                        detail = f"已发送图片：{item.path.name}"
+                    elif outcome.channel == "private_component":
+                        detail = f"已发送：{item.path.name}"
+                    else:
+                        detail = f"已发送：{item.path.name}"
+                    yield self._reply(ctx, Plain(detail))
                 if delivered:
                     delivered_digests.add(self._file_digest(item.path))
                     payload = self._payload_with_cursor(payload, delivered_digests)
                     self._payload_store.write(job_id, payload)
+                else:
+                    retry_note = (
+                        "已加入后台重试队列，稍后自动送达。"
+                        if outcome.channel == "queued"
+                        else "文件已安全保留；QQ 恢复后可用 /agent recover 重试交付。"
+                    )
+                    yield self._reply(
+                        ctx,
+                        Plain(
+                            f"⚠ {item.path.name} 暂时发送失败，{retry_note}"
+                        ),
+                    )
                 all_delivered = all_delivered and delivered
             if all_delivered:
                 self._job_store.finish(
@@ -1334,7 +1421,7 @@ class ClaudeCodeAgent(Star):
                         ctx,
                         Plain(
                             format_task_reply(
-                                "failed",
+                                "delivery_pending",
                                 "文件未成功交付，已保留恢复记录；服务恢复后只会重试交付，不会重复执行任务。",
                             )
                         ),
@@ -1378,8 +1465,12 @@ class ClaudeCodeAgent(Star):
                 if not self._is_owner(ctx):
                     yield self._reply(
                         ctx,
-                        Plain("Agent 需要 GO 或 Pro 资格。发送 /pro status 查看当前资格。")
+                        Plain("Agent 需要 X 或 PRO 资格。添加小柠为 QQ 好友即可获得 X 资格。")
                     )
+                    return
+                # ── Ambiguity check: ask user when intent overlaps with search/report ──
+                if natural_intent.ambiguous and natural_intent.clarification:
+                    yield self._reply(ctx, Plain(natural_intent.clarification))
                     return
                 if natural_intent.action == "run":
                     message = f"/agent run {natural_intent.task}"
@@ -1394,14 +1485,14 @@ class ClaudeCodeAgent(Star):
 
         if not self._is_owner(ctx):
             yield self._reply(
-                ctx, Plain("Agent 需要 GO 或 Pro 资格。发送 /pro status 查看当前资格。")
+                ctx, Plain("Agent 需要 X 或 PRO 资格。添加小柠为 QQ 好友即可获得 X 资格。")
             )
             return
         if action in {"use", "cwd"} and not self._can_manage_runtime(ctx):
             yield self._reply(ctx, Plain("该管理指令仅限小姚使用。"))
             return
         if action in {"status", "cancel"} and not self._is_owner(ctx):
-            yield self._reply(ctx, Plain("该操作需要 GO 或 Pro 资格。"))
+            yield self._reply(ctx, Plain("该操作需要 X 或 PRO 资格。"))
             return
         if action in {"help", "?"}:
             yield self._reply(
@@ -1439,9 +1530,7 @@ class ClaudeCodeAgent(Star):
             yield self._reply(ctx, Plain("工作目录已切换；绝对路径不会出现在聊天回复中。"))
             return
         if action == "status":
-            running = self._active_job_id or "无"
-            active = f" · {self._active_backend}" if self._active_backend else ""
-            yield self._reply(ctx, Plain(f"任务：{running}{active}\n后端：{self.backend}\n工作目录：已设置（路径已隐藏）"))
+            yield self._reply(ctx, Plain(self._status_text(ctx)))
             return
         if action == "cancel":
             stopped = await self._stop_process()

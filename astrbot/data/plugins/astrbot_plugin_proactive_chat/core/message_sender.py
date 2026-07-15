@@ -389,29 +389,34 @@ class SenderMixin:
         # 先尝试 TTS：成功后是否继续发文本由 always_send_text 控制
         is_tts_sent = False
         if tts_conf.get("enable_tts", True):
-            try:
-                logger.info("[主动消息] 尝试进行手动TTS喵。")
-                tts_provider = self.context.get_using_tts_provider(umo=session_id)
-                if tts_provider:
-                    audio_path = await tts_provider.get_audio(text)
-                    if audio_path:
-                        await self._send_chain_with_hooks(
-                            session_id, [Record(file=audio_path)]
-                        )
-                        is_tts_sent = True
-                        await asyncio.sleep(0.5)
-            except Exception as e:
-                logger.error(f"[主动消息] 手动TTS流程发生异常喵: {e}")
-                if self.telemetry and self.telemetry.enabled:
-                    # TTS 失败不一定意味着文本发送失败，因此单独挂到 tts 子模块下记录。
-                    self._track_task(
-                        asyncio.create_task(
-                            self.telemetry.track_error(
-                                e,
-                                module="core.message_sender._send_proactive_message.tts",
+            # 10% probability for proactive voice — adds natural variety
+            tts_probability = float(tts_conf.get("tts_probability", 0.10))
+            if random.random() >= tts_probability:
+                logger.debug("[主动消息] TTS 概率未命中，跳过语音。")
+            else:
+                try:
+                    logger.info("[主动消息] 尝试TTS语音输出。")
+                    tts_provider = self.context.get_using_tts_provider(umo=session_id)
+                    if tts_provider:
+                        audio_path = await tts_provider.get_audio(text)
+                        if audio_path:
+                            await self._send_chain_with_hooks(
+                                session_id, [Record(file=audio_path)]
+                            )
+                            is_tts_sent = True
+                            await asyncio.sleep(0.5)
+                except Exception as e:
+                    logger.error(f"[主动消息] TTS流程发生异常: {e}")
+                    if self.telemetry and self.telemetry.enabled:
+                        # TTS 失败不一定意味着文本发送失败，因此单独挂到 tts 子模块下记录。
+                        self._track_task(
+                            asyncio.create_task(
+                                self.telemetry.track_error(
+                                    e,
+                                    module="core.message_sender._send_proactive_message.tts",
+                                )
                             )
                         )
-                    )
 
         # 是否继续发送文本：未发出 TTS 或配置要求始终发文本
         should_send_text = not is_tts_sent or tts_conf.get("always_send_text", True)

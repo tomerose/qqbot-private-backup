@@ -103,7 +103,7 @@ class ProStoreTests(unittest.TestCase):
         self.assertTrue(self.store.revoke(other, REVIEWER, now=1_000 + 72 * 3600 + 11))
 
     def test_restart_does_not_resign_tampered_active_membership(self):
-        self.store.grant(APPLICANT, REVIEWER, 30, now=1_000, tier="go")
+        self.store.grant(APPLICANT, REVIEWER, 30, now=1_000, tier="x")
         connection = sqlite3.connect(self.path)
         try:
             connection.execute(
@@ -122,12 +122,12 @@ class ProStoreTests(unittest.TestCase):
         self.store.activate_group("12345678", REVIEWER, now=1_002)
         self.assertTrue(self.store.is_active_group("12345678", now=1_003))
 
-    def test_permanent_go_grant_is_signed_and_does_not_expire(self):
+    def test_permanent_x_grant_is_signed_and_does_not_expire(self):
         self.store.grant(
             APPLICANT,
             REVIEWER,
             now=1_000,
-            tier="go",
+            tier="x",
             permanent=True,
         )
         self.assertTrue(self.store.is_active_pro(APPLICANT, now=1_000 + 36500 * 86400 - 1))

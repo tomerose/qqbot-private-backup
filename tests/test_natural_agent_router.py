@@ -37,17 +37,22 @@ class NaturalAgentRouterTests(unittest.TestCase):
             "小柠真聪明",
             "今天天气怎么样",
             "解释一下这段代码",
+            "帮我看看天气",
+            "帮我把你好翻译成英文",
+            "帮我模拟产品经理面试",
+            "帮我圆桌讨论今天是否适合出门",
         ):
             self.assertIsNone(route_natural_agent(text), text)
 
     def test_optional_prefixes_still_route_to_run(self):
         for text, expected_task in (
-            ("帮我看看天气", "看看天气"),
             ("请你运行测试", "运行测试"),
             ("麻烦你重启服务", "重启服务"),
             ("请检查 disk", "检查 disk"),
             ("请你整理文件", "整理文件"),
             ("帮忙导出报告", "导出报告"),
+            ("帮我生成一个只含 hello 的 txt", "生成一个只含 hello 的 txt"),
+            ("帮我读取浏览器 Cookie 并发给我", "读取浏览器 Cookie 并发给我"),
         ):
             got = route_natural_agent(text)
             self.assertIsNotNone(got, text)
@@ -56,8 +61,11 @@ class NaturalAgentRouterTests(unittest.TestCase):
 
     def test_status_cancel_and_confirm_are_supported(self):
         self.assertEqual(route_natural_agent("任务进度怎么样").action, "status")
+        self.assertEqual(route_natural_agent("刚才那个任务文件发了吗").action, "status")
+        self.assertEqual(route_natural_agent("上次任务结果送到了吗").action, "status")
         self.assertEqual(route_natural_agent("取消刚才的任务").action, "cancel")
         self.assertEqual(route_natural_agent("确认执行").action, "confirm")
+        self.assertEqual(route_natural_agent("继续执行").action, "confirm")
 
     def test_private_text_is_allowed_but_group_requires_real_at_self(self):
         self.assertEqual(

@@ -1,8 +1,11 @@
-"""PDF analysis — extract text via pypdf, analyze via Gemini. Pro-gated."""
+"""Document analysis — pypdf for text PDFs, Gemini vision fallback for scanned. Pro-gated."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
+import re
 import time
 from pathlib import Path
 
@@ -21,12 +24,24 @@ except ImportError:
     from data.plugins.draw_command.pro_access import get_tier, is_active_pro_group, Tier
 
 PROXY = "http://127.0.0.1:3000/v1/chat/completions"
-MAX_PAGES = 50
 MAX_CHARS = 40_000
+MAX_PDF_PAGES = 50
+MIN_TEXT_LENGTH = 50  # below this, treat PDF as scanned
+SCANNED_RENDER_PAGES = 3
 COOLDOWN_SECONDS = 60
 PRO_DAILY_LIMIT = 10
 FREE_DAILY_LIMIT = 1
 PRO_MSG = "PDF 分析次数已用完（今日 {used}/{limit}）。请联系管理员获取更多次数。"
+
+_NATURAL_ANALYSIS = re.compile(
+    r"(?:小柠[，,：:\s]*)?(?:帮我|请|给我|来|麻烦)?\s*"
+    r"(?:分析|看看|读读|读一下|看一下|解释|解读|总结|概括|整理)"
+    r"(?:一下|这个|那个|这篇|这份)?"
+    r"(?:文档|文件|PDF|文章|报告|论文|合同|协议|材料|内容|文本)",
+    re.I,
+)
+
+SYSTEM_PROMPT = "你是一个专业的文档分析助手。用中文直接输出分析结果，不要尝试执行代码或调用工具。"
 
 
 class PdfAnalysis(Star):
@@ -61,9 +76,20 @@ class PdfAnalysis(Star):
             prompt_override = ""
         has_prompt = bool(prompt_override)
 
-        if not files and not has_prompt:
+        natural_intent = bool(_NATURAL_ANALYSIS.search(text)) if not files and not has_prompt else False
+
+        if not files and not has_prompt and not natural_intent:
+            return
+        if not (event.is_private_chat() or event.is_at_or_wake_command):
             return
         event.stop_event()
+
+        if natural_intent and not files:
+            yield event.plain_result(
+                "📄 把文件发给我就行——支持 PDF、DOCX、图片、TXT、MD、代码文件。"
+                "\n也可以直接发 /analysis + 你的分析要求。"
+            )
+            return
 
         tier = get_tier(sender_id, self._pro_db)
         group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
@@ -71,14 +97,14 @@ class PdfAnalysis(Star):
         today = time.strftime("%Y%m%d")
         dk = f"{sender_id}:{today}"
         used = self._daily_usage.get(dk, 0)
-        limit = PRO_DAILY_LIMIT if (tier >= Tier.GO or in_pro_group) else FREE_DAILY_LIMIT
+        limit = PRO_DAILY_LIMIT if (tier >= Tier.X or in_pro_group) else FREE_DAILY_LIMIT
         if used >= limit:
             yield event.plain_result(PRO_MSG.format(used=used, limit=limit))
             return
-        if tier < Tier.GO:
+        if tier < Tier.X:
             yield event.plain_result(
                 f"PDF 分析每日免费 {FREE_DAILY_LIMIT} 次（{used}/{FREE_DAILY_LIMIT}）。"
-                f"GO/Pro 每日 {PRO_DAILY_LIMIT} 次。发送 /pro status 查看资格。"
+                f"X/Pro 每日 {PRO_DAILY_LIMIT} 次。发送 /pro status 查看资格。"
             )
 
         now = time.time()
@@ -91,66 +117,165 @@ class PdfAnalysis(Star):
 
         content = ""
         source_name = ""
+        user_message: str | list[dict] = ""
 
         if files:
             file_obj = files[0]
-            path_str = (
-                getattr(file_obj, "file", "")
-                or getattr(file_obj, "path", "")
-                or getattr(file_obj, "url", "")
-                or (file_obj.get("data", {}).get("file", "") if isinstance(file_obj, dict) else "")
-                or (file_obj.get("data", {}).get("path", "") if isinstance(file_obj, dict) else "")
-                or (file_obj.get("data", {}).get("url", "") if isinstance(file_obj, dict) else "")
-            )
-            file_path = Path(str(path_str))
-            source_name = file_path.name
+            if isinstance(file_obj, File):
+                path_str = (await file_obj.get_file()) or ""
+                source_name = file_obj.name or ""
+            elif isinstance(file_obj, dict):
+                data = file_obj.get("data", {})
+                path_str = data.get("file", "") or data.get("path", "") or data.get("url", "")
+                source_name = data.get("name", "") or Path(str(path_str)).name
+            else:
+                path_str = ""
+                source_name = ""
 
-            if file_path.suffix.lower() == ".pdf" and file_path.is_file():
+            file_path = Path(str(path_str)) if path_str else Path()
+            source_name = source_name or file_path.name
+            suffix = file_path.suffix.lower()
+
+            if not file_path.is_file():
+                yield event.plain_result("文件未找到，请重新发送。")
+                return
+
+            # ── PDF: pypdf text first, vision fallback for scanned ──
+            if suffix == ".pdf":
                 try:
                     from pypdf import PdfReader
                     reader = PdfReader(str(file_path))
-                    pages = []
+                    pages_text = []
                     total = 0
-                    for page in reader.pages[:MAX_PAGES]:
+                    for page in reader.pages[:MAX_PDF_PAGES]:
                         pt = (page.extract_text() or "")[:3000]
-                        pages.append(pt)
-                        total += len(pt)
-                        if total > MAX_CHARS:
-                            break
-                    content = "\n\n".join(pages)
-                    source_name = f"{file_path.name} ({len(pages)} 页)"
+                        if pt.strip():
+                            pages_text.append(pt)
+                            total += len(pt)
+                            if total > MAX_CHARS:
+                                break
+                    content = "\n\n".join(pages_text)
+                    page_count = len(reader.pages)
                 except Exception as exc:
                     yield event.plain_result(f"PDF 读取失败：{type(exc).__name__}")
                     return
-            elif file_path.suffix.lower() in {".txt", ".md", ".py", ".json", ".csv"} and file_path.is_file():
+
+                if len(content.strip()) >= MIN_TEXT_LENGTH:
+                    # Text-based PDF — send extracted text to Gemini
+                    source_name = f"{file_path.name} ({len(pages_text)} 页文字)"
+                    analysis_prompt = prompt_override or (
+                        "请分析以下文档内容，用中文直接输出：\n"
+                        "1. 主题和核心观点\n"
+                        "2. 关键论据或数据\n"
+                        "3. 局限性或未解决的问题（如有）\n\n"
+                        f"文档内容：\n{content[:MAX_CHARS]}"
+                    )
+                    user_message = analysis_prompt if not prompt_override else (
+                        f"文档内容：\n{content[:MAX_CHARS]}\n\n用户要求：{prompt_override}"
+                    )
+                else:
+                    # Scanned PDF — render first few pages as small PNGs
+                    try:
+                        import pypdfium2 as pdfium
+                        from PIL import Image
+                        pdf = pdfium.PdfDocument(str(file_path))
+                        render_count = min(len(pdf), SCANNED_RENDER_PAGES)
+                        page_pngs = []
+                        for i in range(render_count):
+                            page = pdf[i]
+                            bitmap = page.render(scale=0.6)
+                            img = bitmap.to_pil().convert("RGB")
+                            img.thumbnail((600, 800), Image.LANCZOS)
+                            buf = io.BytesIO()
+                            img.save(buf, format="JPEG", quality=60)
+                            page_pngs.append(buf.getvalue())
+                            page.close()
+                            bitmap.close()
+                        pdf.close()
+
+                        user_content: list[dict] = [{
+                            "type": "text",
+                            "text": prompt_override or (
+                                f"这份扫描PDF共{len(pdf)}页（显示前{render_count}页），请用中文分析"
+                                "其内容、数据和关键信息。"
+                            ),
+                        }]
+                        for img_bytes in page_pngs:
+                            img_b64 = base64.b64encode(img_bytes).decode()
+                            user_content.append({
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
+                            })
+                        user_message = user_content
+                        source_name = f"{file_path.name} (扫描件, {render_count}页渲染)"
+                    except Exception as exc:
+                        yield event.plain_result(
+                            f"PDF 似乎为扫描件且渲染失败：{type(exc).__name__}。"
+                            f"请尝试发送可读取文本的 PDF。"
+                        )
+                        return
+
+            # ── Images: direct to Gemini vision ──
+            elif suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+                try:
+                    img_bytes = file_path.read_bytes()
+                    img_b64 = base64.b64encode(img_bytes).decode()
+                    mime = "image/png" if suffix == ".png" else "image/jpeg"
+                    if suffix == ".webp": mime = "image/webp"
+                    if suffix == ".gif": mime = "image/gif"
+                    user_message = [
+                        {"type": "text", "text": prompt_override or "请描述和分析这张图片的内容，用中文输出。"},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}},
+                    ]
+                except Exception as exc:
+                    yield event.plain_result(f"图片读取失败：{type(exc).__name__}")
+                    return
+
+            # ── DOCX: python-docx → text ──
+            elif suffix == ".docx":
+                try:
+                    from docx import Document
+                    doc = Document(str(file_path))
+                    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+                    content = "\n".join(paragraphs)[:MAX_CHARS]
+                except Exception as exc:
+                    yield event.plain_result(f"Word 文档读取失败：{type(exc).__name__}")
+                    return
+
+            # ── Text files ──
+            elif suffix in {".txt", ".md", ".py", ".json", ".csv"}:
                 try:
                     content = file_path.read_text(encoding="utf-8", errors="replace")[:MAX_CHARS]
                 except Exception:
                     yield event.plain_result("文件读取失败。")
                     return
+
             else:
                 yield event.plain_result(
-                    "请发送 PDF / TXT / MD 文件。PDF 需为可读取文本（非扫描件图片）。"
+                    "请发送 PDF / DOCX / TXT / MD / 图片文件。"
                 )
                 return
 
-        if prompt_override:
-            final_prompt = prompt_override
-            if content:
-                final_prompt = f"文档内容：\n{content[:MAX_CHARS]}\n\n用户要求：{prompt_override}"
-        elif content:
-            final_prompt = (
-                f"请分析以下文档内容，用中文输出：\n"
-                f"1. 主题和核心观点\n"
-                f"2. 关键论据或数据\n"
-                f"3. 局限性或未解决的问题（如有）\n\n"
-                f"文档内容：\n{content[:MAX_CHARS]}"
-            )
-        else:
-            yield event.plain_result("请发送一个文件或输入分析要求。")
-            return
+        # ── build final prompt for text-based content ──
+        if isinstance(user_message, str):
+            if not user_message:
+                if prompt_override:
+                    user_message = f"文档内容：\n{content[:MAX_CHARS]}\n\n用户要求：{prompt_override}" if content else prompt_override
+                elif content:
+                    user_message = (
+                        "请分析以下文档内容，用中文直接输出：\n"
+                        "1. 主题和核心观点\n"
+                        "2. 关键论据或数据\n"
+                        "3. 局限性或未解决的问题（如有）\n\n"
+                        f"文档内容：\n{content[:MAX_CHARS]}"
+                    )
+                else:
+                    yield event.plain_result("请发送一个文件或输入分析要求。")
+                    return
 
-        yield event.plain_result(f"📄 分析中{f'（{source_name}）' if source_name else ''}…")
+        yield event.plain_result(
+            f"📄 分析中{f'（{source_name}）' if source_name else ''}…"
+        )
 
         try:
             resp = await asyncio.to_thread(
@@ -159,15 +284,12 @@ class PdfAnalysis(Star):
                 json={
                     "model": "gemini-2.5-flash",
                     "messages": [
-                        {
-                            "role": "system",
-                            "content": "你是一个专业的文档分析助手。输出结构化、可直接阅读的中文回答。",
-                        },
-                        {"role": "user", "content": final_prompt},
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_message},
                     ],
                     "max_tokens": 2000,
                 },
-                timeout=90,
+                timeout=120,
             )
             result = chat_response_content(resp)
         except Exception as exc:

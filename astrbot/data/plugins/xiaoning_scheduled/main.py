@@ -9,15 +9,31 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import feedparser
 import requests
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star, StarTools
 
+try:
+    from draw_command.pro_access import Tier, get_tier
+except ImportError:
+    from data.plugins.draw_command.pro_access import Tier, get_tier
+
 PROXY_CHAT = "http://127.0.0.1:3000/v1/chat/completions"
 PROXY_IMAGE = "http://127.0.0.1:3000/v1/images/generations"
+DEEPSEEK_CHAT = "https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_KEY = "sk-991ee2d8b710420abe434f541a26164b"
 PLUGIN_DIR = Path(__file__).resolve().parent
+
+# RSS 源 — HN(稳定)+AI垂直媒体+Google AI生态
+RSS_FEEDS = [
+    "https://hnrss.org/frontpage?count=10&points=5",
+    "https://www.artificialintelligence-news.com/feed/",
+    "https://blog.google/technology/ai/rss/",
+    "https://blog.research.google/feeds/posts/default?alt=rss&max-results=8",
+]
 
 DEFAULT_CONFIG = {
     "github_trending_enabled": False,
@@ -31,6 +47,12 @@ DEFAULT_CONFIG = {
     "weather_time": "07:00",
     "weather_groups": [],
     "owner_id": "1211000567",
+    "group_summary_enabled": True,
+    "group_summary_time": "22:00",
+    "group_summary_group": "1075963106",
+    "group_summary_target": "1211000567",
+    "ai_news_enabled": True,
+    "ai_news_time": "07:00",
 }
 
 
@@ -42,6 +64,11 @@ class XiaoningScheduled(Star):
         data_dir.mkdir(parents=True, exist_ok=True)
         self._runtime_file = data_dir / "runtime.json"
         self._runtime = self._load_json(self._runtime_file)
+        self._opt_in_file = data_dir / "ai_news_opt_in.json"
+        self._pro_db = (
+            Path(__file__).resolve().parents[4]
+            / "astrbot" / "data" / "plugin_data" / "xiaoning_pro" / "pro_members.db"
+        )
         self.config.update(self._runtime.get("overrides", {}))
         self._bot = None
         self._loop: asyncio.Task | None = None
@@ -75,14 +102,39 @@ class XiaoningScheduled(Star):
         today = now.strftime("%Y-%m-%d")
         current = now.strftime("%H:%M")
 
+        # ponytail: 手动触发文件，用于立即推送
+        trigger = self._opt_in_file.parent / "trigger_ainews"
+        if trigger.exists():
+            logger.info("[小柠定时] 手动触发 AI 早报")
+            if await self._push_ai_news() is False:
+                return
+            trigger.unlink(missing_ok=True)
+            self._runtime["ainews"] = today
+            self._save_json(self._runtime_file, self._runtime)
+            return
+
+        # ponytail: 手动触发文件，用于立即推送
+        trigger = self._opt_in_file.parent / "trigger_ainews"
+        if trigger.exists():
+            logger.info("[小柠定时] 手动触发 AI 早报")
+            if await self._push_ai_news() is False:
+                return
+            trigger.unlink(missing_ok=True)
+            self._runtime["ainews"] = today
+            self._save_json(self._runtime_file, self._runtime)
+            return
+
         tasks = [
             (self.config["github_trending_enabled"], self.config["github_trending_time"], "gh", self._push_github_trending),
             (self.config["morning_post_enabled"], self.config["morning_time"], "morning", self._push_morning_post),
             (self.config["weather_enabled"], self.config["weather_time"], "weather", self._push_weather),
+            (self.config["group_summary_enabled"], self.config["group_summary_time"], "summary", self._push_group_summary),
+            (self.config["ai_news_enabled"], self.config["ai_news_time"], "ainews", self._push_ai_news),
         ]
         for enabled, time_str, last_key, handler in tasks:
             if enabled and current == time_str and self._runtime.get(last_key) != today:
-                await handler()
+                if await handler() is False:
+                    continue
                 self._runtime[last_key] = today
                 self._save_json(self._runtime_file, self._runtime)
 
@@ -220,7 +272,7 @@ class XiaoningScheduled(Star):
             resp = requests.post(
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-2.5-flash",
+                    "model": "gemini-3.5-flash",
                     "messages": [
                         {
                             "role": "system",
@@ -253,7 +305,7 @@ class XiaoningScheduled(Star):
                         "soft pastel colors, suitable for a morning greeting card. "
                         "No text or letters in the image."
                     ),
-                    "model": "gemini-2.5-flash-image",
+                    "model": "gemini-3.1-flash-image",
                     "size": "1024x1024",
                 },
                 timeout=(30, 180),
@@ -310,6 +362,233 @@ class XiaoningScheduled(Star):
         logger.info("[小柠定时] 天气播报")
         text = await asyncio.to_thread(self._fetch_weather)
         await self._send_text(self.config["weather_groups"], text)
+
+    # ── push: group summary ───────────────────────────────────────
+
+    async def _push_group_summary(self):
+        logger.info("[小柠定时] 群聊总结")
+        bot = await self._get_bot()
+        if not bot:
+            logger.warning("[小柠定时] 群聊总结失败: 无 bot 客户端")
+            return
+        group_id = int(self.config["group_summary_group"])
+        target_qq = int(self.config["group_summary_target"])
+        summary = await self._fetch_group_summary(bot, group_id)
+        if not summary:
+            return
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        try:
+            await bot.send_private_msg(
+                user_id=target_qq,
+                message=f"【群 {group_id} 今日总结 · {date_str}】\n\n{summary}",
+            )
+        except Exception as e:
+            logger.warning(f"[小柠定时] 私聊发送总结失败: {e}")
+
+    async def _fetch_group_summary(self, bot, group_id: int) -> str:
+        try:
+            result = await bot.api.call_action(
+                "get_group_msg_history",
+                group_id=group_id,
+                message_seq=0,
+                count=200,
+            )
+        except Exception as e:
+            logger.warning(f"[小柠定时] 获取群聊历史失败: {e}")
+            return ""
+        messages = result.get("messages", [])
+        if not messages:
+            return "今日暂无群聊消息。"
+        lines = []
+        for msg in reversed(messages):
+            sender_data = msg.get("sender", {})
+            sender = sender_data.get("nickname", sender_data.get("user_id", "?"))
+            text_segments = [
+                seg["data"]["text"]
+                for seg in msg.get("message", [])
+                if seg.get("type") == "text"
+            ]
+            text = "".join(text_segments).strip()
+            if text:
+                lines.append(f"{sender}：{text}")
+        if not lines:
+            return "今日暂无文字消息。"
+        context = "\n".join(lines)
+        try:
+            resp = await asyncio.to_thread(
+                requests.post,
+                PROXY_CHAT,
+                json={
+                    "model": "gemini-3.5-flash",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "你是群聊总结助手。用简洁中文总结今日群聊要点："
+                                "讨论了什么话题、有什么决定或结论、亮点或待办。"
+                                "控制在300字以内。不要编造没有的内容。"
+                            ),
+                        },
+                        {"role": "user", "content": f"今日群聊记录：\n{context}"},
+                    ],
+                    "max_tokens": 600,
+                },
+                timeout=30,
+            )
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            logger.warning(f"[小柠定时] LLM 总结失败: {e}")
+            return ""
+
+    # ── push: AI news ────────────────────────────────────────────
+
+    def _load_opt_ins(self) -> set[str]:
+        return set(self._load_json(self._opt_in_file).get("opted_in", []))
+
+    def _save_opt_ins(self, opted_in: set[str]):
+        self._save_json(self._opt_in_file, {"opted_in": list(opted_in)})
+
+    def _get_eligible_news_subscribers(self) -> list[str]:
+        """Return opted-in QQ IDs that are currently active Pro/X."""
+        opted_in = self._load_opt_ins()
+        if not opted_in:
+            return []
+        eligible = []
+        for qq_id in opted_in:
+            tier = get_tier(qq_id, self._pro_db)
+            if tier >= Tier.X:
+                eligible.append(qq_id)
+        return eligible
+
+    async def _push_ai_news(self):
+        logger.info("[小柠定时] AI 早报")
+        subscribers = self._get_eligible_news_subscribers()
+        if not subscribers:
+            logger.info("[小柠定时] AI 早报: 无订阅用户")
+            return
+        bot = await self._get_bot()
+        if not bot:
+            logger.warning("[小柠定时] AI 早报失败: 无 bot 客户端")
+            return False
+        news_text = await asyncio.to_thread(self._fetch_ai_news)
+        if not news_text:
+            return False
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        sent = 0
+        for qq_id in subscribers:
+            try:
+                await bot.send_private_msg(
+                    user_id=int(qq_id),
+                    message=f"🤖【小柠 AI 早报 · {date_str}】\n\n{news_text}",
+                )
+                sent += 1
+                await asyncio.sleep(0.8)
+            except Exception as e:
+                logger.warning(f"[小柠定时] AI 早报→{qq_id} 失败: {e}")
+        return sent > 0
+
+    def _scrape_rss(self) -> list[str]:
+        """拉取 RSS 头条，返回标题+摘要列表。失败返回空。"""
+        items = []
+        for url in RSS_FEEDS:
+            try:
+                feed = feedparser.parse(url)
+                for entry in feed.entries[:8]:
+                    title = entry.get("title", "").strip()
+                    link = entry.get("link", "").strip()
+                    summary = re.sub(r"<[^>]+>", "", entry.get("summary", "") or "")[:200]
+                    if title:
+                        items.append(f"- {title}\n  {link}\n  {summary}")
+            except Exception as e:
+                logger.debug(f"[小柠定时] RSS 拉取失败 {url[:50]}: {e}")
+        return items[:25]
+
+    @staticmethod
+    def _rss_fallback(headlines: list[str]) -> str:
+        terms = (
+            "ai", "artificial intelligence", "agent", "claude", "gemini",
+            "openai", "model", "llm", "机器学习", "人工智能", "大模型",
+        )
+        selected = [item for item in headlines if any(term in item.lower() for term in terms)]
+        if len(selected) < 3:
+            selected.extend(item for item in headlines if item not in selected)
+        lines = ["📡 今日 AI 资讯（公开 RSS 标题速览）"]
+        for item in selected[:5]:
+            parts = [part.strip() for part in item.splitlines() if part.strip()]
+            title = parts[0].removeprefix("- ")
+            link = next((part for part in parts[1:] if part.startswith(("http://", "https://"))), "")
+            lines.append(f"• {title}" + (f"\n  {link}" if link else ""))
+        lines.append("\n上游摘要暂不可用，以上标题来自实时 RSS，请点来源核对详情。")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _validate_llm_response(resp: requests.Response) -> str | None:
+        """验证 LLM 响应并提取 content，失败返回 None。"""
+        try:
+            body = resp.json()
+        except Exception:
+            return None
+        if "error" in body:
+            logger.debug(f"[小柠定时] LLM API 错误: {body['error']}")
+            return None
+        try:
+            return body["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError, TypeError):
+            return None
+
+    def _fetch_ai_news(self) -> str:
+        headlines = self._scrape_rss()
+        if headlines:
+            source_text = "\n".join(headlines)
+            user_msg = (
+                f"以下是今日科技/AI 领域真实头条：\n\n{source_text}\n\n"
+                "请从以上素材中选取 3-5 条最重要的 AI 相关内容，按格式生成中文早报。"
+                "只选取 AI 相关的，不要编造素材中没有的事实。"
+            )
+        else:
+            user_msg = f"今日日期: {datetime.now().strftime('%Y-%m-%d')}。请生成今日AI早报。"
+
+        # 优先用 DeepSeek API（长文本中文可靠），不可用时回退 Gemini proxy
+        for name, url, model, key in (
+            ("DeepSeek", DEEPSEEK_CHAT, "deepseek-v4-flash", DEEPSEEK_KEY),
+            ("Gemini", PROXY_CHAT, "gemini-3.5-flash", "sk-gemini-vertex"),
+        ):
+            try:
+                headers = {"Authorization": f"Bearer {key}"} if key else {}
+                resp = requests.post(
+                    url,
+                    json={
+                        "model": model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "你是AI领域资深编辑。用户订阅了每日AI早报。"
+                                    "请生成今日AI领域最重要的3-5条资讯简报，每条80字以内。"
+                                    "覆盖：大模型发布、开源动态、AI政策、重要论文、产品更新。"
+                                    "用中文，格式清晰，每条前面加emoji标识类别。"
+                                    "末尾附一句话洞见。总字数控制在400字以内。"
+                                    "不要编造任何你没有把握的新闻，不确定的标[待核实]。"
+                                ),
+                            },
+                            {"role": "user", "content": user_msg},
+                        ],
+                        "max_tokens": 800,
+                    },
+                    headers=headers,
+                    timeout=30,
+                )
+                content = self._validate_llm_response(resp)
+                if content:
+                    return content
+                logger.warning(f"[小柠定时] AI 早报 {name} 响应无效，尝试下一个")
+            except Exception as e:
+                logger.warning(f"[小柠定时] AI 早报 {name} 请求失败: {e}")
+
+        logger.warning("[小柠定时] AI 早报所有 LLM 源均失败，使用 RSS 回退")
+        return self._rss_fallback(headlines) if headlines else ""
+
+    # ── cleanup ───────────────────────────────────────────────────
 
     async def _cleanup_image(self, path: Path, delay: int = 120):
         await asyncio.sleep(delay)
@@ -405,6 +684,8 @@ class XiaoningScheduled(Star):
                 ("GitHub 趋势", "github_trending_time", "github_trending_enabled"),
                 ("早安推送", "morning_time", "morning_post_enabled"),
                 ("天气播报", "weather_time", "weather_enabled"),
+                ("AI 早报", "ai_news_time", "ai_news_enabled"),
+                ("群聊总结", "group_summary_time", "group_summary_enabled"),
             ]:
                 h, m = map(int, self.config[tkey].split(":"))
                 nt = now.replace(hour=h, minute=m, second=0, microsecond=0)
@@ -447,3 +728,50 @@ class XiaoningScheduled(Star):
             )
 
         event.stop_event()
+
+    @filter.command("早报")
+    async def cmd_ai_news(self, event: AstrMessageEvent):
+        """AI 早报订阅: /早报 开启|关闭|状态"""
+        parts = self._msg_text(event).strip().split()
+        sub = parts[1].strip() if len(parts) > 1 else "状态"
+        event.stop_event()
+        yield event.plain_result(self._ai_news_subscription_reply(event, sub))
+
+    @staticmethod
+    def _compact_news_action(text: str) -> str | None:
+        raw = str(text or "").strip()
+        if raw.startswith("/早报 "):
+            return None
+        value = "".join(raw.split()).lstrip("/")
+        return {
+            "早报开启": "开启", "开启早报": "开启",
+            "早报关闭": "关闭", "关闭早报": "关闭",
+            "早报状态": "状态", "查看早报": "状态",
+        }.get(value)
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=990)
+    async def on_compact_ai_news_command(self, event: AstrMessageEvent):
+        action = self._compact_news_action(self._msg_text(event))
+        if action is None:
+            return
+        event.stop_event()
+        yield event.plain_result(self._ai_news_subscription_reply(event, action))
+
+    def _ai_news_subscription_reply(self, event: AstrMessageEvent, sub: str) -> str:
+        sender = self._sender_id(event)
+        tier = get_tier(sender, self._pro_db)
+        if tier < Tier.X:
+            return "AI 早报仅限 X/PRO 用户订阅。添加小柠为QQ好友即可获得X资格。"
+
+        opted_in = self._load_opt_ins()
+
+        if sub in ("开启", "on", "start"):
+            opted_in.add(sender)
+            self._save_opt_ins(opted_in)
+            return "✅ AI 早报已开启。每天早上 7:00 私聊推送。"
+        elif sub in ("关闭", "off", "stop"):
+            opted_in.discard(sender)
+            self._save_opt_ins(opted_in)
+            return "❌ AI 早报已关闭。"
+        status = "已订阅 ✅" if sender in opted_in else "未订阅 ❌"
+        return f"AI 早报状态: {status}\n\n命令: /早报 开启 | /早报 关闭"

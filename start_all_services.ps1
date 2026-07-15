@@ -1,5 +1,6 @@
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
+$env:ASTRBOT_ROOT = Join-Path $Root "astrbot"
 
 function Test-LocalPort([int]$Port) {
     return [bool](Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
@@ -36,8 +37,9 @@ if (-not (Test-LocalPort 6185)) {
     Start-Sleep -Seconds 12
 }
 
+$napcatEntry = Join-Path $Root "napcat-runtime\napcat\napcat.mjs"
 $napcat = Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
-    Where-Object { $_.CommandLine -like "*$Root\napcat-runtime*index.js*" }
+    Where-Object { $_.CommandLine -match [regex]::Escape($napcatEntry) }
 if (-not $napcat) {
     Start-Process powershell.exe `
         -ArgumentList "-NoProfile -Command Set-Location -LiteralPath `"$Root\napcat-runtime`"; node index.js" `

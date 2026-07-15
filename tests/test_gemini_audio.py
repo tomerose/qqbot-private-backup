@@ -44,7 +44,11 @@ class GeminiAudioTests(unittest.TestCase):
                 json={"messages": [{"role": "user", "content": "hello"}]},
             )
         self.assertEqual(response.status_code, 502)
-        self.assertEqual(response.json()["error"]["message"], "upstream busy")
+        self.assertEqual(
+            response.json()["error"]["message"],
+            MODULE.CHAT_UPSTREAM_ERROR,
+        )
+        self.assertNotIn("upstream busy", response.text)
 
 
 if __name__ == "__main__":

@@ -1,16 +1,19 @@
 import asyncio
 import sys
+import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 PLUGINS = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugins"
 sys.path.insert(0, str(PLUGINS))
 
 from ai_interview import main as interview_module  # noqa: E402
+from ai_debate.main import parse_debate_topic  # noqa: E402
+from smart_translate.main import parse_translate_request  # noqa: E402
 from welcome_card.main import WelcomeCard  # noqa: E402
-from time_capsule.main import TimeCapsule  # noqa: E402
+from time_capsule.main import TimeCapsule, parse_capsule_request  # noqa: E402
 from xiaoning_scheduled.main import XiaoningScheduled  # noqa: E402
 
 
@@ -45,6 +48,26 @@ class FakeEvent:
 
 
 class NewFeaturePluginTests(unittest.TestCase):
+    def test_natural_feature_phrases_route_to_their_own_plugins(self):
+        self.assertEqual(
+            parse_translate_request("帮我把你好翻译成英文"), ("en", "你好")
+        )
+        self.assertEqual(
+            interview_module.parse_interview_start("帮我模拟产品经理面试"), "产品经理"
+        )
+        self.assertEqual(
+            parse_debate_topic("圆桌讨论一下人工智能是否提高生产力"),
+            "人工智能是否提高生产力",
+        )
+        capsule = parse_capsule_request("帮我写一个6个月后的时间胶囊：继续学英语")
+        self.assertIsNotNone(capsule)
+        self.assertEqual(capsule[1], "继续学英语")
+        self.assertEqual(XiaoningScheduled._compact_news_action("早报开启"), "开启")
+        self.assertEqual(XiaoningScheduled._compact_news_action("/早报开启"), "开启")
+        self.assertEqual(XiaoningScheduled._compact_news_action("关闭早报"), "关闭")
+        self.assertIsNone(XiaoningScheduled._compact_news_action("/早报 开启"))
+        self.assertIsNone(XiaoningScheduled._compact_news_action("今天早报讲什么"))
+
     def test_interview_starts_and_end_command_reaches_end_branch(self):
         plugin = interview_module.AiInterview.__new__(interview_module.AiInterview)
         plugin._pro_db = Path("unused.db")
@@ -52,7 +75,7 @@ class NewFeaturePluginTests(unittest.TestCase):
         plugin._daily_usage = {}
 
         async def scenario():
-            with patch.object(interview_module, "get_tier", return_value=interview_module.Tier.GO), patch.object(
+            with patch.object(interview_module, "get_tier", return_value=interview_module.Tier.X), patch.object(
                 interview_module, "_call", return_value="请介绍一个代表项目"
             ):
                 started = await collect(plugin.on_message(FakeEvent("/interview 产品经理")))
@@ -107,6 +130,35 @@ class NewFeaturePluginTests(unittest.TestCase):
         plugin = XiaoningScheduled.__new__(XiaoningScheduled)
         self.assertEqual(asyncio.run(plugin._resolve_groups([])), [])
         self.assertEqual(asyncio.run(plugin._resolve_groups("")), [])
+
+    def test_ai_news_falls_back_to_real_rss_and_retries_failed_trigger(self):
+        plugin = XiaoningScheduled.__new__(XiaoningScheduled)
+        headlines = [
+            "- OpenAI ships an AI update\n  https://example.com/ai\n  summary",
+            "- Gemini research news\n  https://example.com/gemini\n  summary",
+            "- Claude agent release\n  https://example.com/claude\n  summary",
+        ]
+        plugin._scrape_rss = lambda: headlines
+        with patch("xiaoning_scheduled.main.requests.post", side_effect=RuntimeError("offline")):
+            news = plugin._fetch_ai_news()
+        self.assertIn("公开 RSS 标题速览", news)
+        self.assertIn("https://example.com/ai", news)
+        self.assertNotIn("早报生成失败", news)
+
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                plugin._opt_in_file = root / "ai_news_opt_in.json"
+                plugin._runtime_file = root / "runtime.json"
+                plugin._runtime = {}
+                plugin._push_ai_news = AsyncMock(return_value=False)
+                trigger = root / "trigger_ainews"
+                trigger.touch()
+                await plugin._check_and_fire()
+                self.assertTrue(trigger.exists())
+                self.assertNotIn("ainews", plugin._runtime)
+
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ from data.plugins.video_command.main import (  # noqa: E402
     _parse_duration,
     _parse_video_command,
 )
+from data.plugins.video_agent.main import _parse_agent_command  # noqa: E402
 
 
 def _load_proxy():
@@ -38,12 +39,26 @@ class VideoCommandTests(unittest.TestCase):
 
     def test_natural_video_prompt_has_a_real_capture_group(self):
         self.assertEqual(_parse_video_command("帮我生成视频 一只猫 4秒"), "一只猫 4秒")
+        self.assertEqual(_parse_video_command("生成sp一只猫"), "一只猫")
+        self.assertEqual(_parse_video_command("生成视频一只猫"), "一只猫")
         self.assertEqual(_parse_video_command("帮我生成一个视频"), "")
-        self.assertEqual(_parse_video_command("帮我生成一只猫的视频"), "一只猫的")
+        self.assertEqual(_parse_video_command("帮我生成一只猫的视频"), "一只猫")
         self.assertIsNone(_parse_video_command("你能做视频吗"))
         self.assertIsNone(_parse_video_command("小柠支持生成视频吗"))
         self.assertIsNone(_parse_video_command("生成视频很难"))
         self.assertIsNone(_parse_video_command("我觉得做视频不太靠谱"))
+
+    def test_real_qq_video_wording_reaches_the_right_video_route(self):
+        self.assertEqual(
+            _parse_agent_command("使用视频agent给我生成一段如何关于成为博主的视频"),
+            "如何成为博主",
+        )
+        self.assertEqual(
+            _parse_agent_command("做一段如何成为博主的视频"),
+            "如何成为博主",
+        )
+        self.assertEqual(_parse_video_command("用ai做一个未来视频"), "未来")
+        self.assertIsNone(_parse_agent_command("视频agent怎么用"))
 
     def test_duration_parsing_keeps_generation_boundary_explicit(self):
         self.assertEqual(_parse_duration("一只猫 4s"), 4)
@@ -85,7 +100,7 @@ class VideoCommandTests(unittest.TestCase):
             event.stopped = False
             with patch("data.plugins.video_command.main.get_tier", return_value=Tier.ORDINARY):
                 replies = [reply async for reply in plugin.on_message(event)]
-            self.assertEqual(replies[0], "搜索视频中…")
+            self.assertEqual(replies[0], "正在搜索 B 站和抖音公开视频，预计 5–15 秒…")
             self.assertIn("https://example.com/mbappe", replies[1])
             self.assertTrue(event.stopped)
 
@@ -103,12 +118,10 @@ class VideoCommandTests(unittest.TestCase):
                 return self.body
 
         plugin = VideoCommand.__new__(VideoCommand)
-        with (
-            patch(
-                "data.plugins.video_command.main.requests.get",
-                return_value=Response(
-                    {"data": {"result": [{"bvid": "BV1test", "title": "<em>姆巴佩</em> 集锦"}]}}
-                ),
+        with patch.object(VideoCommand, "_search_douyin", return_value=("", [])), patch(
+            "data.plugins.video_command.main.requests.get",
+            return_value=Response(
+                {"data": {"result": [{"bvid": "BV1test", "title": "<em>姆巴佩</em> 集锦"}]}}
             ),
         ):
             text, urls = plugin._search_videos("姆巴佩")
@@ -129,7 +142,7 @@ class VideoCommandTests(unittest.TestCase):
                 return self.body
 
         plugin = VideoCommand.__new__(VideoCommand)
-        with patch(
+        with patch.object(VideoCommand, "_search_douyin", return_value=("", [])), patch(
             "data.plugins.video_command.main.requests.get",
             side_effect=[
                 Response({"code": -412}, 412),
@@ -181,7 +194,7 @@ class VideoCommandTests(unittest.TestCase):
             _, urls = plugin._search_bilibili_all("姆巴佩踢球")
         self.assertEqual(urls, [])
 
-    def test_search_page_url_is_resolved_and_video_is_delivered(self):
+    def test_search_returns_links_without_blocking_on_platform_downloads(self):
         class Event:
             is_at_or_wake_command = False
 
@@ -197,9 +210,6 @@ class VideoCommandTests(unittest.TestCase):
             def plain_result(self, text):
                 return text
 
-            def set_extra(self, key, value):
-                self.extra = (key, value)
-
             def stop_event(self):
                 self.stopped = True
 
@@ -212,17 +222,12 @@ class VideoCommandTests(unittest.TestCase):
                     "https://www.bilibili.com/video/BV2test",
                 ],
             )
-            attempted = []
-            plugin._try_download_video = lambda url: attempted.append(url) or (b"video", "video/mp4")
-            plugin._save_video = lambda payload, ext: Path("mbappe.mp4")
-            plugin._deliver_video = AsyncMock(return_value="视频文件")
             event = Event()
             event.stopped = False
             with patch("data.plugins.video_command.main.get_tier", return_value=Tier.ORDINARY):
                 replies = [reply async for reply in plugin.on_message(event)]
-            self.assertEqual(attempted, ["https://www.bilibili.com/video/BV1test"])
-            self.assertEqual(replies[1], "视频文件")
-            self.assertIn("更多相关视频", replies[2])
+            self.assertIn("https://www.bilibili.com/video/BV1test", replies[1])
+            self.assertEqual(len(replies), 2)
             self.assertTrue(event.stopped)
 
         asyncio.run(scenario())
@@ -251,7 +256,14 @@ class VideoCommandTests(unittest.TestCase):
             event = Event()
             with patch("data.plugins.video_command.main.get_tier", return_value=Tier.ORDINARY):
                 replies = [reply async for reply in plugin.on_message(event)]
-            self.assertEqual(replies, ["视频生成是 Pro 专属功能。发送 /pro status 查看资格。"])
+            self.assertEqual(
+                replies,
+                [
+                    "🎬 AI 视频生成需要 X 或 Pro 资格。\n"
+                    "添加小柠为 QQ 好友即可自动获得 X资格。\n"
+                    "也可以免费使用 /做视频 <主题> — 自动脚本+素材+配音+字幕合成完整短片。"
+                ],
+            )
 
         asyncio.run(scenario())
 
@@ -325,8 +337,10 @@ class VideoCommandTests(unittest.TestCase):
             path.write_bytes(b"video")
             event = Event()
             plugin = VideoCommand.__new__(VideoCommand)
-            reply = asyncio.run(plugin._deliver_video(event, path))
-            self.assertIn("视频已上传到群文件", reply)
+            plugin._output_root = Path(tmp)
+            delivery = asyncio.run(plugin._deliver_video(event, path))
+            self.assertTrue(delivery.delivered)
+            self.assertEqual(delivery.channel, "group_upload")
             self.assertEqual(event.bot.calls[0][0], "upload_group_file")
             self.assertEqual(event.bot.calls[0][1]["file"], str(path.resolve()))
 

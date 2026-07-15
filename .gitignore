@@ -14,6 +14,7 @@ node_modules/
 *.gz
 *.tmp
 *.bak
+*.pid
 *.db
 *.db-shm
 *.db-wal
@@ -45,7 +46,5 @@ napcat/config/
 napcat-runtime/
 
 # Local agent task records and delivery artifacts
-claude_workspace/state/
-claude_workspace/jobs/
-claude_workspace/**/*.log
+claude_workspace/
 services/local_tts/tts_audio/

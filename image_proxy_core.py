@@ -6,9 +6,14 @@ import base64
 from dataclasses import dataclass
 
 
-IMAGE_MODEL_PRIMARY = "gemini-2.5-flash-image"
-IMAGE_MODEL_FALLBACK = "gemini-2.5-flash-image"
+IMAGE_MODEL_PRIMARY = "gemini-3-pro-image"      # X/Pro — best quality, Pro-tier composition
+IMAGE_MODEL_FALLBACK = "gemini-3.1-flash-image"  # fallback — faster, still good
+IMAGE_MODEL_PREMIUM = "gemini-3-pro-image"       # kept for backward compat
+IMAGE_MODEL_ULTRA   = "gemini-3-pro-image"
 IMAGE_MODELS = frozenset({IMAGE_MODEL_PRIMARY, IMAGE_MODEL_FALLBACK})
+# ponytail: Imagen disabled — project solar-modem-496213-f5 has no Imagen quota.
+# Enable via GCP console before re-adding imagen-3.0/imagen-4.0 to this set.
+IMAGEN_MODELS: frozenset[str] = frozenset()  # empty → all draws use Gemini path
 MAX_IMAGE_PROMPT_CHARS = 500
 _SIZE_TO_ASPECT_RATIO = {
     "512x512": "1:1",
@@ -32,7 +37,14 @@ class ImageRequest:
 
 
 def image_model_attempts(model: str) -> tuple[str, ...]:
-    """Return each configured model at most once."""
+    """Return each configured model at most once, with appropriate fallback."""
+    if model in IMAGEN_MODELS:
+        # Imagen 4 → Imagen 3 → stop; don't cross to Gemini models
+        chain = [model]
+        if model != IMAGE_MODEL_PREMIUM:
+            chain.append(IMAGE_MODEL_PREMIUM)
+        return tuple(dict.fromkeys(chain))
+    # Gemini image: primary → 2.5 flash-image fallback
     return tuple(dict.fromkeys((model, IMAGE_MODEL_FALLBACK)))
 
 

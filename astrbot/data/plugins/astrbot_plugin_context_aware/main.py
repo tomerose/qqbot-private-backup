@@ -74,7 +74,7 @@ from typing import TYPE_CHECKING, Any, Final, final
 from astrbot import logger
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import At, AtAll, Image, Plain, Reply
+from astrbot.api.message_components import At, AtAll, Face, Image, Plain, Reply
 from astrbot.api.provider import LLMResponse, Provider, ProviderRequest
 from astrbot.core.agent.message import TextPart
 
@@ -284,6 +284,37 @@ def _looks_like_image_outline(text: str) -> bool:
 
 
 _GIF_BASE64_PREFIXES: Final[tuple[str, str]] = ("R0lGODlh", "R0lGODdh")
+
+_QQ_FACE_LABELS: Final[dict[str, str]] = {
+    "0": "惊讶", "1": "撇嘴", "2": "色", "3": "发呆", "4": "得意",
+    "5": "流泪", "6": "害羞", "7": "闭嘴", "8": "睡", "9": "大哭",
+    "10": "尴尬", "11": "发怒", "12": "调皮", "13": "呲牙", "14": "微笑",
+    "15": "难过", "16": "酷", "17": "抓狂", "18": "吐", "19": "偷笑",
+    "20": "可爱", "21": "白眼", "22": "傲慢", "23": "饥饿", "24": "困",
+    "25": "惊恐", "26": "流汗", "27": "憨笑", "28": "悠闲", "29": "奋斗",
+    "30": "咒骂", "31": "疑问", "32": "嘘", "33": "晕", "34": "折磨",
+    "35": "衰", "36": "骷髅", "37": "敲打", "38": "再见", "39": "擦汗",
+    "40": "抠鼻", "41": "鼓掌", "42": "糗大了", "43": "坏笑", "44": "左哼哼",
+    "45": "右哼哼", "46": "哈欠", "47": "鄙视", "48": "委屈", "49": "快哭了",
+    "50": "阴险", "51": "亲亲", "52": "吓", "53": "可怜",
+}
+
+
+def _qq_face_summary(component: object) -> str:
+    """Turn NapCat/AstrBot QQ face components into promptable meaning."""
+    is_face = isinstance(component, Face)
+    if not is_face:
+        kind = f"{type(component).__name__} {getattr(component, 'type', '')}".lower()
+        is_face = any(token in kind for token in ("face", "emoji", "emoticon"))
+    if not is_face:
+        return ""
+    face_id = str(getattr(component, "id", getattr(component, "face_id", "")) or "")
+    label = _QQ_FACE_LABELS.get(face_id, "未识别表情")
+    return f"[QQ表情:{label}]"
+
+
+def _is_at_bot(component: object, bot_id: str) -> bool:
+    return isinstance(component, At) and str(getattr(component, "qq", "")) == str(bot_id)
 
 
 def _image_ref_looks_like_gif(image_ref: str) -> bool:
@@ -768,16 +799,18 @@ class SceneAnalyzer:
         sender_id = event.get_sender_id()
         message_outline = _event_message_outline(event)
         voice_transcript = _event_voice_transcript(event)
+        components = event.get_messages()
         image_count = 0
         gif_count = 0
         has_plain_text = False
+        face_summaries = [summary for comp in components if (summary := _qq_face_summary(comp))]
 
         # 提取消息内容，拼接所有文本和图片描述
         content = voice_transcript or event.message_str or ""
         if not content:
             # message_str 为空时，从消息组件中拼接
             parts: list[str] = []
-            for comp in event.get_messages():
+            for comp in components:
                 if isinstance(comp, Plain) and comp.text:
                     has_plain_text = True
                     parts.append(comp.text)
@@ -786,14 +819,21 @@ class SceneAnalyzer:
                     if _image_ref_looks_like_gif(self._image_ref_from_component(comp)):
                         gif_count += 1
                     parts.append("[图片]")
-            content = "".join(parts) if parts else (message_outline or "[消息]")
+            parts.extend(face_summaries)
+            content = "".join(parts) if parts else message_outline
         else:
             has_plain_text = True
-            for comp in event.get_messages():
+            for comp in components:
                 if isinstance(comp, Image):
                     image_count += 1
                     if _image_ref_looks_like_gif(self._image_ref_from_component(comp)):
                         gif_count += 1
+            if face_summaries:
+                content += "".join(face_summaries)
+        if not content and any(_is_at_bot(comp, self._bot_id) for comp in components):
+            content = "[用户只@了你，未附文字]"
+        if not content:
+            content = "[消息]"
         has_image = image_count > 0 or (not has_plain_text and _looks_like_image_outline(message_outline))
 
         msg = MessageRecord(
@@ -810,7 +850,7 @@ class SceneAnalyzer:
             gif_count=gif_count,
         )
 
-        for comp in event.get_messages():
+        for comp in components:
             if isinstance(comp, At):
                 qq_str = str(comp.qq)
                 msg.at_targets.append(
@@ -1097,9 +1137,10 @@ class SceneGenerator:
             multi_target_bot_label="你",
         )
 
+        sender_id_attr = f' id="{esc(current.sender_id)}"' if current.sender_id else ""
         parts.append(
             f'  <current_message>'
-            f'\n    <sender>{esc(current.sender_name)}</sender>'
+            f'\n    <sender{sender_id_attr}>{esc(current.sender_name)}</sender>'
             f'\n    <talking_to>{esc(addressee_desc)}</talking_to>'
             f'\n    <content>{esc(current.content[:80])}</content>'
             f'\n  </current_message>'
@@ -1255,8 +1296,9 @@ class SceneGenerator:
                 )
 
             # A 在和 B 说话，Bot 主动插话
+            sid = f"({msg.sender_id})" if msg.sender_id else ""
             return (
-                f"【重要】你是主动加入对话的！{msg.sender_name} 正在和 {msg.talking_to_name} 对话，不是在问你。"
+                f"【重要】你是主动加入对话的！{msg.sender_name}{sid} 正在和 {msg.talking_to_name} 对话，不是在问你。"
                 f"不要把别人的对话当成问你的。"
                 f"合适的做法：1)以旁观者身份补充 2)等待被问到再回答 3)保持沉默。"
             )
@@ -1276,8 +1318,9 @@ class SceneGenerator:
                     "在不确定的情况下，建议保持沉默或仅在有价值时简短补充。"
                 )
             
+            sid = f"({msg.sender_id})" if msg.sender_id else ""
             return (
-                f"【注意】触发原因不明确。{msg.sender_name} 似乎在和 {msg.talking_to_name} 对话。"
+                f"【注意】触发原因不明确。{msg.sender_name}{sid} 似乎在和 {msg.talking_to_name} 对话。"
                 f"在不确定的情况下，建议保持沉默，避免误入他人对话。"
             )
 
@@ -1700,6 +1743,7 @@ class Main(star.Star):
         parts: list[str] = []
         message_outline = _event_message_outline(event)
         voice_transcript = _event_voice_transcript(event)
+        components = event.get_messages()
         image_count = 0
         gif_count = 0
         has_plain_text = False
@@ -1709,7 +1753,7 @@ class Main(star.Star):
             has_plain_text = True
 
         # 提取消息内容
-        for comp in event.get_messages():
+        for comp in components:
             if isinstance(comp, Plain) and comp.text and not voice_transcript:
                 has_plain_text = True
                 parts.append(comp.text)
@@ -1733,9 +1777,17 @@ class Main(star.Star):
                         parts.append("[图片]")
                 else:
                     parts.append("[图片]")
+            else:
+                summary = _qq_face_summary(comp)
+                if summary:
+                    parts.append(summary)
 
         has_image = image_count > 0 or (not has_plain_text and _looks_like_image_outline(message_outline))
-        content = "".join(parts) if parts else (message_outline or "[消息]")
+        content = "".join(parts) if parts else message_outline
+        if not content and any(_is_at_bot(comp, self._analyzer.bot_id) for comp in components):
+            content = "[用户只@了你，未附文字]"
+        if not content:
+            content = "[消息]"
         if has_image and image_count == 0 and "[图片" not in content:
             content = f"[图片] {content}".strip()
 
@@ -1754,7 +1806,7 @@ class Main(star.Star):
         )
 
         # 提取 @ 和回复信息
-        for comp in event.get_messages():
+        for comp in components:
             if isinstance(comp, At):
                 qq_str = str(comp.qq)
                 msg.at_targets.append(
@@ -1780,18 +1832,24 @@ class Main(star.Star):
         if not self._should_process(event):
             return
 
-        message_outline = _event_message_outline(event)
-        messages = event.get_messages()
-        has_content = any(isinstance(c, (Plain, Image)) for c in messages)
-        has_content = has_content or _looks_like_image_outline(message_outline)
-        has_content = has_content or bool(_event_voice_transcript(event))
-        if not has_content:
-            return
-
         if not self._ensure_initialized(event):
             return
 
         assert self._analyzer is not None
+
+        message_outline = _event_message_outline(event)
+        messages = event.get_messages()
+        has_content = any(
+            isinstance(c, (Plain, Image, Face)) or bool(_qq_face_summary(c))
+            for c in messages
+        )
+        has_content = has_content or any(
+            _is_at_bot(c, self._analyzer.bot_id) for c in messages
+        )
+        has_content = has_content or _looks_like_image_outline(message_outline)
+        has_content = has_content or bool(_event_voice_transcript(event))
+        if not has_content:
+            return
 
         # 使用支持图像转述的方法提取消息
         msg = await self._extract_message_with_caption(event)

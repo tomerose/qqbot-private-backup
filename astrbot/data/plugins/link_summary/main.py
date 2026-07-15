@@ -21,7 +21,17 @@ except ImportError:
     from data.plugins.draw_command.pro_access import is_active_pro_group
 
 URL_RE = re.compile(r"https?://[^\s一-鿿，。；！？、]+")
+_NL_SUMMARY = re.compile(
+    r"(?:帮我|请|给我|麻烦)?\s*(?:总结|概括|摘要|读一下|看看|分析|看一下)"
+    r"(?:一下|这个|那个|这篇|这份)?\s*(?:链接|网址|url|网页)",
+    re.I,
+)
 PROXY = "http://127.0.0.1:3000/v1/chat/completions"
+_PUBLIC_READ_COMMANDS = ("/summary", "/摘要", "/browse", "/浏览")
+
+
+def _is_public_read_command(text: str) -> bool:
+    return str(text or "").lstrip().lower().startswith(_PUBLIC_READ_COMMANDS)
 
 
 class LinkSummary(Star):
@@ -39,18 +49,30 @@ class LinkSummary(Star):
     async def on_message(self, event: AstrMessageEvent):
         text = self._msg(event)
 
-        # Group chat: require @mention, /summary, or Pro group
-        if not event.is_private_chat():
+        # Group chat: require @mention, /summary, NL, or Pro group
+        is_private = event.is_private_chat()
+        has_nl = bool(_NL_SUMMARY.search(text))
+        if not is_private:
             is_at = getattr(event, "is_at_or_wake_command", False)
-            has_cmd = text.startswith("/summary") or text.startswith("/摘要")
+            has_cmd = _is_public_read_command(text)
             group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
             in_pro_group = bool(group_id) and is_active_pro_group(group_id, self._pro_db)
-            if not is_at and not has_cmd and not in_pro_group:
+            if not is_at and not has_cmd and not has_nl and not in_pro_group:
                 return
 
         urls = URL_RE.findall(text)
         if not urls:
-            return
+            # NL trigger but no URL in this message — check reply for URL
+            if has_nl or _is_public_read_command(text):
+                reply = getattr(event, "get_reply_obj", None)
+                if reply is not None:
+                    reply_text = str(getattr(reply, "message", "") or "")
+                    urls = URL_RE.findall(reply_text)
+            if not urls:
+                if has_nl or _is_public_read_command(text):
+                    yield event.plain_result('把公开链接一起发来，或回复链接消息后说“总结一下”。/browse 只阅读公开网页，不登录、不填写表单。')
+                    event.stop_event()
+                return
         event.stop_event()
 
         url = urls[0]

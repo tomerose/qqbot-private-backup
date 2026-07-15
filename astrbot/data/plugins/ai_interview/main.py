@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from pathlib import Path
 
@@ -22,10 +23,25 @@ except ImportError:
 
 PROXY = "http://127.0.0.1:3000/v1/chat/completions"
 PRO_DAILY = 5
-PRO_REQUIRED_MSG = "AI 面试需要 GO 或 Pro 资格。发送 /pro status 查看当前资格。"
+PRO_REQUIRED_MSG = "AI 面试需要 X 或 Pro 资格。添加小柠为 QQ 好友即可获得 X 资格。"
 PRO_LIMIT_MSG = "AI 面试次数已用完（今日 {used}/{limit}）。明天自动重置。"
 ROUNDS = 5
 SESSION_TTL = 600  # 10 minutes
+_NATURAL_INTERVIEW = re.compile(
+    r"^(?:小柠[，,：:\s]*)?(?:帮我|请|我想)?"
+    r"(?:开始|进行|模拟|来一场|做一次)\s*"
+    r"(?P<role>.{1,80}?)(?:岗位|职位)?(?:的)?(?:模拟)?面试[。！!？?]?$",
+    re.I,
+)
+
+
+def parse_interview_start(text: str) -> str | None:
+    value = str(text or "").strip()
+    if value.startswith(("/interview", "/面试")):
+        parts = value.split(maxsplit=1)
+        return parts[1].strip() if len(parts) > 1 else "产品经理"
+    match = _NATURAL_INTERVIEW.match(value)
+    return match.group("role").strip() if match else None
 
 
 def _call(messages: list[dict], max_tokens: int = 600) -> str:
@@ -61,18 +77,23 @@ class AiInterview(Star):
         session_key = str(getattr(event, "unified_msg_origin", "") or sender_id)
 
         # End must be checked before the broader start prefix.
-        if text.strip().lower() in {"/interview end", "/面试 end", "/面试 结束"}:
+        if text.strip().lower() in {"/interview end", "/面试 end", "/面试 结束", "结束面试", "停止面试"}:
             event.stop_event()
             session = self._sessions.pop(session_key, None)
             yield event.plain_result("面试已结束。" if session else "没有进行中的面试。")
             return
 
         # Start interview
-        if text.startswith("/interview") or text.startswith("/面试"):
+        role = parse_interview_start(text)
+        if role is not None:
+            is_private = bool(getattr(event, "is_private_chat", lambda: False)())
+            is_wake = bool(getattr(event, "is_at_or_wake_command", False))
+            if not (is_private or is_wake):
+                return
             event.stop_event()
             group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
             in_pro_group = bool(group_id) and is_active_pro_group(group_id, self._pro_db)
-            if get_tier(sender_id, self._pro_db) < Tier.GO and not in_pro_group:
+            if get_tier(sender_id, self._pro_db) < Tier.X and not in_pro_group:
                 yield event.plain_result(PRO_REQUIRED_MSG)
                 return
 
@@ -83,8 +104,6 @@ class AiInterview(Star):
                 yield event.plain_result(PRO_LIMIT_MSG.format(used=used, limit=PRO_DAILY))
                 return
 
-            parts = text.split(maxsplit=1)
-            role = parts[1].strip() if len(parts) > 1 else "产品经理"
             if not role or len(role) > 80:
                 yield event.plain_result("岗位名称需在 1-80 个字符之间。")
                 return

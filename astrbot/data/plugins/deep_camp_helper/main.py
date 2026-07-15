@@ -10,6 +10,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Plain
 
 DEEP_GROUP = "820762428"
+DEEP_WHITELIST = {"2641419881", "3424575956", "943560334", "1211000567"}
 DEEP_COMMANDS = {
     "/tasks", "/任务", "/deadline", "/ddl", "/截止",
     "/status", "/状态", "/submit", "/提交",
@@ -83,7 +84,10 @@ class DeepCampHelper(Star):
     async def on_message(self, event: AstrMessageEvent):
         ctx = _LegacyEventAdapter(event)
         gid = ctx.get_group_id()
-        if gid != DEEP_GROUP:
+        sender_id = str(getattr(event, "get_sender_id", lambda: "")() or "")
+        is_deep_group = (gid == DEEP_GROUP)
+        is_whitelisted_pm = (not gid and sender_id in DEEP_WHITELIST)
+        if not (is_deep_group or is_whitelisted_pm):
             return
 
         msg = ctx.get_message_text().strip().lower()
@@ -161,9 +165,14 @@ class DeepCampHelper(Star):
     @filter.on_llm_request(priority=-15)
     async def inject_deep_context(self, event: AstrMessageEvent, req) -> None:
         group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
+        sender_id = str(getattr(event, "get_sender_id", lambda: "")() or "")
         message = str(getattr(event, "get_message_str", lambda: "")() or "").lower()
+        is_deep_group = (group_id == DEEP_GROUP)
+        is_whitelisted_pm = (not group_id and sender_id in DEEP_WHITELIST)
+        if not (is_deep_group or is_whitelisted_pm):
+            return
         keywords = ("任务", "考核", "评分", "deadline", "ddl", "结营", "deep", "夜枭", "壁垒", "提交")
         marker = "\u3010DEEP \u8425\u5730\u77e5\u8bc6\u3011"
-        if group_id == DEEP_GROUP and any(word in message for word in keywords):
+        if (is_deep_group or is_whitelisted_pm) and any(word in message for word in keywords):
             if marker not in str(getattr(req, "system_prompt", "") or ""):
                 req.system_prompt = f"{req.system_prompt or ''}\n\n{marker}\n{DEEP_KB}".strip()

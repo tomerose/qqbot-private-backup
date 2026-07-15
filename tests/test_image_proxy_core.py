@@ -19,8 +19,11 @@ from image_proxy_core import (  # noqa: E402
 
 class ImageProxyCoreTests(unittest.TestCase):
     def test_uses_the_current_vertex_image_model(self):
-        self.assertEqual(IMAGE_MODEL_PRIMARY, "gemini-2.5-flash-image")
-        self.assertEqual(image_model_attempts(IMAGE_MODEL_PRIMARY), (IMAGE_MODEL_PRIMARY,))
+        self.assertEqual(IMAGE_MODEL_PRIMARY, "gemini-3-pro-image")
+        self.assertEqual(
+            image_model_attempts(IMAGE_MODEL_PRIMARY),
+            (IMAGE_MODEL_PRIMARY, IMAGE_MODEL_FALLBACK),
+        )
 
     def test_normalizes_only_allowlisted_image_models_and_aspect_ratios(self):
         normalized = normalize_image_request(

@@ -136,7 +136,7 @@ def verify_step(
     if step.expected_artifact and not deliverables:
         return VerificationEvidence(False, "artifact_missing")
     expected_suffixes = expected_artifact_suffixes(step.instruction)
-    if step.expected_artifact and expected_suffixes:
+    if step.expected_artifact and expected_suffixes and deliverables:
         delivered_suffixes = {
             Path(getattr(item, "path", "")).suffix.lower() for item in deliverables
         }

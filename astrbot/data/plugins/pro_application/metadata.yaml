@@ -1,5 +1,5 @@
 name: pro_application
 display_name: 小柠 Pro 申请
-desc: 人工审核、QQ 验证的受限 Pro 开通流程；不提供本机 Agent 授权。
-version: 1.0.0
+desc: 添加小柠 QQ 好友自动获得 X；签名邀请码开通 Pro。
+version: 1.1.0
 author: xiaoning

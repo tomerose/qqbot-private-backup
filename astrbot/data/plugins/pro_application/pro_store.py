@@ -101,6 +101,7 @@ class ProStore:
         self._signing_key = _load_signing_key(self.path)
         self._initialize()
         self._harden_files()
+        self._firestore = None  # lazy init
 
     # ── Passphrase verification (constant-time, env-var only) ──────
 
@@ -191,6 +192,35 @@ class ProStore:
             connection.execute(
                 "UPDATE applications SET tier = 'pro' WHERE tier IS NULL OR tier = ''"
             )
+            # Migration: GO → X (2026-07-15 membership restructure)
+            go_migrated = connection.execute(
+                "SELECT COUNT(*) as cnt FROM applications WHERE tier = 'go'"
+            ).fetchone()["cnt"]
+            if go_migrated > 0:
+                connection.execute(
+                    "UPDATE applications SET tier = 'x' WHERE tier = 'go'"
+                )
+                connection.execute(
+                    "UPDATE applications SET application_id = REPLACE(application_id, 'FRIEND-GO-', 'FRIEND-X-')"
+                    " WHERE application_id LIKE 'FRIEND-GO-%'"
+                )
+                # Re-sign all active rows (tier changed → signatures invalidated)
+                if self._signing_key is not None:
+                    rows = connection.execute(
+                        """SELECT application_id, qq_id, state, pro_expires_at, tier FROM applications
+                           WHERE state = 'active' AND pro_expires_at IS NOT NULL"""
+                    ).fetchall()
+                    for row in rows:
+                        connection.execute(
+                            "UPDATE applications SET membership_signature = ? WHERE application_id = ?",
+                            (
+                                self._membership_signature(
+                                    row["application_id"], row["qq_id"], row["state"],
+                                    row["pro_expires_at"], row["tier"],
+                                ),
+                                row["application_id"],
+                            ),
+                        )
             # One-time legacy migration only. Re-signing every active row on
             # startup would legitimize database tampering.
             if tier_added and self._signing_key is not None:
@@ -756,14 +786,14 @@ class ProStore:
             self._event(connection, row["application_id"], "revoked", now)
             return True
 
-    # ponytail: GO tier constants — shorter max days, fewer priviledges
-    GO_MAX_DAYS = 90
+    # ponytail: X tier constants — shorter max days, fewer priviledges
+    X_MAX_DAYS = 90
 
     def grant(
         self, qq_id: str, reviewer_id: str, days: int = DEFAULT_PRO_DAYS, *,
         now: float, tier: str = "pro", permanent: bool = False,
     ) -> str:
-        """直接授予 Pro 或 GO，跳过申请流程。仅 reviewer 可调用。
+        """直接授予 Pro 或 X，跳过申请流程。仅 reviewer 可调用。
 
         ``permanent`` 使用与永久所有者相同的约 100 年有效期定义，
         但仍保留正常的签名、撤销和审计流程；不暴露给普通用户命令。
@@ -772,11 +802,11 @@ class ProStore:
             raise ProStoreError("reviewer_required")
         identity = self._valid_qq_id(qq_id)
         tier = str(tier or "pro").strip().lower()
-        if tier not in ("pro", "go"):
+        if tier not in ("pro", "x"):
             raise ProStoreError("tier_invalid")
         duration = OWNER_PRO_DAYS if permanent else int(days)
         max_d = OWNER_PRO_DAYS if permanent else (
-            self.GO_MAX_DAYS if tier == "go" else MAX_DIRECT_PRO_DAYS
+            self.X_MAX_DAYS if tier == "x" else MAX_DIRECT_PRO_DAYS
         )
         min_d = 1
         if not min_d <= duration <= max_d:
@@ -813,7 +843,94 @@ class ProStore:
             )
             event_name = f"granted_{tier}_permanent" if permanent else f"granted_{tier}"
             self._event(connection, app_id, event_name, now)
+            self._sync_firestore_membership(identity, tier, expires_at)
             return app_id
+
+    def claim_friend_x(self, qq_id: str, *, now: float) -> tuple[str, float | None]:
+        """Grant X资格 to a QQ friend (auto-detected from friend list).
+
+        Idempotent per QQ — if they already have X or PRO, no change.
+        X资格 is permanent as long as the user remains a QQ friend.
+        Uses OWNER_PRO_DAYS (~100 years) as the practical "permanent" duration
+        since the actual revocation is driven by friend-list sync, not expiry.
+        """
+        identity = self._valid_qq_id(qq_id)
+        claim_id = f"FRIEND-X-{identity}"
+        with self._transaction() as connection:
+            self._cleanup(connection, now)
+            if connection.execute(
+                "SELECT 1 FROM applications WHERE application_id = ?", (claim_id,)
+            ).fetchone() is not None:
+                return "already_x", None
+            if connection.execute(
+                """SELECT 1 FROM applications
+                   WHERE qq_id = ? AND state = 'active' AND pro_expires_at >= ?""",
+                (identity, float(now)),
+            ).fetchone() is not None:
+                return "already_member", None
+            expires_at = float(now) + OWNER_PRO_DAYS * 86400
+            signature = self._membership_signature(
+                claim_id, identity, "active", expires_at, "x"
+            )
+            connection.execute(
+                """INSERT INTO applications(
+                    application_id, qq_id, state, created_at, application_expires_at,
+                    approved_days, pro_expires_at, membership_signature, tier
+                ) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, 'x')""",
+                (
+                    claim_id,
+                    identity,
+                    float(now),
+                    expires_at + 86400,
+                    OWNER_PRO_DAYS,
+                    expires_at,
+                    signature,
+                ),
+            )
+            self._event(connection, claim_id, "claimed_friend_x", now)
+            self._sync_firestore_membership(identity, "x", expires_at)
+            return "granted", expires_at
+
+    def revoke_friend_x(self, qq_id: str, *, now: float) -> bool:
+        """Revoke X资格 for a QQ that is no longer a friend."""
+        identity = self._valid_qq_id(qq_id)
+        claim_id = f"FRIEND-X-{identity}"
+        with self._transaction() as connection:
+            self._cleanup(connection, now)
+            row = connection.execute(
+                """SELECT application_id FROM applications
+                   WHERE application_id = ? AND tier = 'x' AND state = 'active'""",
+                (claim_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            connection.execute(
+                """UPDATE applications
+                   SET state = 'revoked', membership_signature = NULL
+                   WHERE application_id = ?""",
+                (row["application_id"],),
+            )
+            self._event(connection, row["application_id"], "revoked_friend_x", now)
+            self._sync_firestore_membership(identity, None, None)
+            return True
+
+    def _sync_firestore_membership(self, qq_id: str, tier: str | None, expires_at: float | None):
+        """Sync membership status to Firestore for fast Google-ecosystem lookups."""
+        try:
+            if self._firestore is None:
+                from google.cloud import firestore as fs
+                self._firestore = fs.Client(project="solar-modem-496213-f5", database="qqbot")
+            doc_ref = self._firestore.collection("users").document(qq_id).collection("profile").document("membership")
+            if tier is None:
+                doc_ref.set({"tier": "ordinary", "synced_at": __import__("time").time()}, merge=True)
+            else:
+                doc_ref.set({
+                    "tier": tier,
+                    "expires_at": expires_at,
+                    "synced_at": __import__("time").time(),
+                }, merge=True)
+        except Exception:
+            pass  # non-critical — SQLite is source of truth
 
     def list_active_pro_qqs(self, *, now: float) -> list[str]:
         """返回所有当前有效 Pro 的 QQ 号列表。"""

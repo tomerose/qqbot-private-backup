@@ -1,4 +1,4 @@
-"""Werewolf/Mafia host. Ordinary groups get 3 games/day; GO/Pro get unlimited AI narration."""
+"""Werewolf/Mafia host. Ordinary groups get 3 games/day; X/Pro get unlimited AI narration."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ except ImportError:
     from data.plugins.draw_command.pro_access import get_tier, is_active_pro_group, Tier
 
 PROXY = "http://127.0.0.1:3000/v1/chat/completions"
-PRO_MSG = "普通版每日 3 局。GO/Pro 不限局数并启用 AI 旁白。发送 /pro status 查看资格。"
+PRO_MSG = "普通版每日 3 局。X/Pro 不限局数并启用 AI 旁白。发送 /pro status 查看资格。"
 
 ROLES_8 = ["狼人", "狼人", "预言家", "女巫", "猎人", "村民", "村民", "村民"]
 VOTE_SECONDS = 90
@@ -68,7 +68,7 @@ class WerewolfGame(Star):
             # Daily free limit — skip if personal Pro or Pro group
             tier = get_tier(sender_id, self._pro_db)
             in_pro_group = bool(group_id) and is_active_pro_group(group_id, self._pro_db)
-            if tier < Tier.GO and not in_pro_group:
+            if tier < Tier.X and not in_pro_group:
                 today = time.strftime("%Y%m%d")
                 key = f"{group_id}:{today}"
                 used = self._daily_free.get(key, 0)
@@ -86,7 +86,7 @@ class WerewolfGame(Star):
                 "round": 0,
                 "witch_has_antidote": True,
                 "witch_has_poison": True,
-                "narrator_pro": tier >= Tier.GO or in_pro_group,
+                "narrator_pro": tier >= Tier.X or in_pro_group,
                 "started_at": time.time(),
                 "player_count": player_count,
             }

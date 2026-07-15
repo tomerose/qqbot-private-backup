@@ -158,7 +158,7 @@ class ProClient:
             if not hmac.compare_digest(str(row["membership_signature"] or ""), expected):
                 return None
             tier = str(row["tier"] or "").strip().lower()
-            return tier if tier in {"go", "pro"} else None
+            return tier if tier in {"x", "pro"} else None
         except (KeyError, TypeError, ValueError):
             return None
         finally:
