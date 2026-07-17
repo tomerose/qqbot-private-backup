@@ -13,6 +13,7 @@ sys.path.insert(0, str(PLUGINS_DIR))
 from contact_pro_info.main import (  # noqa: E402
     CONTACT_REPLY,
     CAPABILITY_MEMORY,
+    CAPABILITY_CATALOG_MEMORY,
     CONVERSATIONAL_HELP_REPLY,
     ContactProInfo,
     contact_reply_for,
@@ -79,6 +80,8 @@ class ContactProInfoTests(unittest.TestCase):
         for text in (
             "帮我深度研究今年大学生就业趋势",
             "帮我查资料，Python 怎么用",
+            "能帮我查资料 Python 怎么用吗",
+            "请问帮我查资料，Python 怎么用",
             "帮我做一个记账网页",
             "帮我画一只猫",
             "帮我生成一段猫的视频",
@@ -160,6 +163,11 @@ class ContactProInfoTests(unittest.TestCase):
         self.assertIn("最直接的帮助方式", CAPABILITY_MEMORY)
         self.assertIn("先看完用户这一轮的全部内容", CAPABILITY_MEMORY)
         self.assertIn("接住并推进对应功能", CAPABILITY_MEMORY)
+        self.assertIn("【可执行能力目录】", CAPABILITY_CATALOG_MEMORY)
+        self.assertIn(
+            "成品=.docx,.pdf,.pptx,.xlsx,.csv,.md，必须QQ交付",
+            CAPABILITY_CATALOG_MEMORY,
+        )
         self.assertIn("一次说几件事", USER_GUIDE)
         self.assertNotIn("白名单 QQ", USER_GUIDE)
         self.assertNotIn("/添加提醒", USER_GUIDE)
@@ -170,6 +178,7 @@ class ContactProInfoTests(unittest.TestCase):
             req = type("Req", (), {"system_prompt": "persona"})()
             await plugin.inject_capability_memory(FakeEvent(""), req)
             self.assertIn(CAPABILITY_MEMORY, req.system_prompt)
+            self.assertIn(CAPABILITY_CATALOG_MEMORY, req.system_prompt)
 
         asyncio.run(scenario())
 

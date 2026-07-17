@@ -25,15 +25,23 @@ from astrbot.api.star import Context, Star, StarTools
 
 from ..draw_command.pro_access import get_tier, Tier
 try:
-    from xiaoning_runtime import ArtifactDeliveryResult, deliver_local_artifact
+    from xiaoning_runtime import (
+        ArtifactDeliveryResult,
+        deliver_local_artifact,
+        mirror_runtime_task_status,
+    )
 except ImportError:
-    from data.plugins.xiaoning_runtime import ArtifactDeliveryResult, deliver_local_artifact
+    from data.plugins.xiaoning_runtime import (
+        ArtifactDeliveryResult,
+        deliver_local_artifact,
+        mirror_runtime_task_status,
+    )
 
 VIDEO_PROXY_URL = "http://127.0.0.1:3000/v1/videos/generations"
 VIDEO_DOWNLOAD_URL = "http://127.0.0.1:3000/v1/videos/download"
 SEARCH_PROXY_URL = "http://127.0.0.1:3000/v1/chat/completions"
 MAX_VIDEO_BYTES = 50 * 1024 * 1024
-VIDEO_X_DAILY = 3
+VIDEO_X_DAILY = 1
 VIDEO_PRO_DAILY = 5
 VIDEO_COOLDOWN = 180
 VIDEO_MAX_GEN_SECS = 4  # Veo Lite max
@@ -61,6 +69,13 @@ _AI_VIDEO_RE = re.compile(
 # means a short Veo clip; "做/制作" is left to video_agent for a full edit.
 _AI_GENERATION_VERB_RE = re.compile(r"(?:生成|创建|画).{0,12}(?:视频|短片|动画|sp|vid|video)", re.I)
 _EXPLICIT_VEO_COMMANDS = ("/video", "/生成视频", "/vid", "/生成sp", "/视频")
+_FULL_PRODUCTION_REQUEST_RE = re.compile(
+    r"^(?:小柠[，,\s]*)?(?:帮我|请|给我|帮忙|来|想|想要?|要)?"
+    r"(?:做|制作|弄|搞|整).{0,80}(?:视频|短片)"
+    r"|^(?:小柠[，,\s]*)?(?:帮我|请|给我|帮忙|来|想|想要?|要)?"
+    r"(?:做|制作|弄|搞|整)(?:一段|一个|个|段|一下|下)?(?:视频|短片).*$",
+    re.I,
+)
 
 
 def _is_seconds_unit(unit_str: str) -> bool:
@@ -256,9 +271,11 @@ def _parse_video_command(text: str) -> str | None:
     lowered = raw.lower()
     if _VIDEO_CAPABILITY_QUERY_RE.match(raw):
         return None
+    if lowered.startswith(("/做视频", "/制作视频", "/视频制作")):
+        return None
 
     # /command style
-    for prefix in ("/video", "/生成视频", "/做视频", "/vid", "/生成sp", "/视频",
+    for prefix in ("/video", "/生成视频", "/vid", "/生成sp", "/视频",
                    "/findvideo", "/findvid", "/搜视频", "/找视频"):
         if lowered.startswith(prefix):
             parts = raw.split(maxsplit=1)
@@ -275,6 +292,8 @@ def _parse_video_command(text: str) -> str | None:
         raw,
         re.I,
     )
+    if ai_prefix is None and _FULL_PRODUCTION_REQUEST_RE.match(raw):
+        return None
     natural_raw = raw[ai_prefix.end():].strip() if ai_prefix else raw
 
     # split pattern: verb ... content ... noun
@@ -566,10 +585,22 @@ class VideoCommand(Star):
         return target
 
     async def _deliver_video(
-        self, event: AstrMessageEvent, path: Path, *, kind: str = "file"
+        self,
+        event: AstrMessageEvent,
+        path: Path,
+        *,
+        kind: str = "file",
+        task_id: str = "",
+        task_desc: str = "",
     ) -> ArtifactDeliveryResult:
         return await deliver_local_artifact(
-            event, path, allowed_roots=[self._output_root], kind=kind
+            event,
+            path,
+            allowed_roots=[self._output_root],
+            kind=kind,
+            task_id=task_id,
+            task_desc=task_desc,
+            task_owner="video" if task_id else "",
         )
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=935)
@@ -716,6 +747,11 @@ class VideoCommand(Star):
             return
 
         self._cooldowns[sender_id] = now + VIDEO_COOLDOWN
+        task_id = uuid.uuid4().hex[:12]
+        task_desc = f"生成视频：{clean_prompt[:140]}"
+        await mirror_runtime_task_status(
+            sender_id, task_id, task_desc, "in_progress", "veo_started", owner="video"
+        )
         yield event.plain_result(GENERATING_MSG_PRO if tier >= Tier.PRO else GENERATING_MSG_X)
 
         try:
@@ -730,6 +766,9 @@ class VideoCommand(Star):
         except Exception as exc:
             logger.warning("[VideoCmd] generation failed: %s", type(exc).__name__)
             self._cooldowns.pop(sender_id, None)
+            await mirror_runtime_task_status(
+                sender_id, task_id, task_desc, "failed", type(exc).__name__, owner="video"
+            )
             yield event.plain_result(
                 f"Veo AI 视频生成失败（{type(exc).__name__}），请稍后再试。\n"
                 f"💡 可以试试免费的 /做视频 {clean_prompt[:30]} — 素材拼接+配音合成，同样出片。"
@@ -744,9 +783,16 @@ class VideoCommand(Star):
         except OSError:
             logger.warning("[VideoCmd] usage persistence failed")
         delivery = await self._deliver_video(
-            event, output_path, kind="image" if ext == ".gif" else "file"
+            event,
+            output_path,
+            kind="image" if ext == ".gif" else "file",
+            task_id=task_id,
+            task_desc=task_desc,
         )
         if delivery.delivered:
+            await mirror_runtime_task_status(
+                sender_id, task_id, task_desc, "done", f"qq:{delivery.channel}", owner="video"
+            )
             event.set_extra("_pro_video_output_paths", [str(output_path)])
             suffix = {
                 "group_upload": "已上传到群文件",
@@ -758,6 +804,9 @@ class VideoCommand(Star):
             audio_note = "（含音频）" if tier >= Tier.PRO else ""
             yield event.plain_result(f"视频{audio_note}已生成，{suffix}：{output_path.name}")
         else:
+            await mirror_runtime_task_status(
+                sender_id, task_id, task_desc, "delivery_pending", delivery.channel, owner="video"
+            )
             retry_note = (
                 "已加入后台重试队列，稍后自动送达。"
                 if delivery.channel == "queued"

@@ -29,7 +29,7 @@ _EDGE_CANDIDATES = (
 _SHELL_CSP = (
     "default-src 'none'; img-src data: blob:; media-src data: blob:; "
     "font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
-    "connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; "
+    "connect-src 'none'; frame-src 'self'; child-src 'none'; worker-src blob:; "
     "object-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
 )
 
@@ -60,7 +60,7 @@ html,body{{width:100%;height:100%;margin:0;background:#f8fafc;overflow:hidden}}
 border:1px solid #d9e2ec;border-radius:10px;background:#f8fafcee;color:#52606d;
 font:12px/1.4 system-ui,sans-serif;pointer-events:none;box-shadow:0 4px 16px #0f172a14}}
 </style></head><body>
-<iframe id="app" sandbox="allow-scripts allow-forms" title="小柠生成的网页工具"></iframe>
+<iframe id="app" sandbox="allow-scripts allow-forms allow-downloads" allow="clipboard-write; fullscreen" allowfullscreen title="小柠生成的网页工具"></iframe>
 <aside id="xiaoning-shell-mark">小柠网页工坊 · 隔离运行 · 请勿输入隐私或支付信息</aside>
 <script>
 (() => {{
@@ -111,7 +111,7 @@ font:12px/1.4 system-ui,sans-serif;pointer-events:none;box-shadow:0 4px 16px #0f
     "for(const name of ['fetch','XMLHttpRequest','WebSocket','EventSource'])try{{Object.defineProperty(window,name,{{value:blocked,writable:false,configurable:false}})}}catch{{}};" +
     "try{{Object.defineProperty(window,'open',{{value:blocked,writable:false,configurable:false}})}}catch{{}};" +
     "try{{Object.defineProperty(navigator,'sendBeacon',{{value:blocked,writable:false,configurable:false}})}}catch{{}};" +
-    "addEventListener('click',e=>{{const a=e.target&&e.target.closest?e.target.closest('a'):null;if(a&&a.getAttribute('href')&&!a.getAttribute('href').startsWith('#'))e.preventDefault()}},true);" +
+    "addEventListener('click',e=>{{const a=e.target&&e.target.closest?e.target.closest('a'):null;if(!a)return;const href=a.getAttribute('href')||'';const active=!navigator.userActivation||navigator.userActivation.isActive;const localDownload=active&&a.hasAttribute('download')&&(href.startsWith('blob:')||href.startsWith('data:text/plain')||href.startsWith('data:text/csv')||href.startsWith('data:text/json')||href.startsWith('data:application/json'));if(href&&!href.startsWith('#')&&!localDownload)e.preventDefault()}},true);" +
     "addEventListener('submit',e=>e.preventDefault(),true);" +
     "try{{navigation.addEventListener('navigate',e=>e.preventDefault())}}catch{{}};" +
   '}})();</scr' + 'ipt>';
@@ -318,7 +318,8 @@ class FirebasePublisher:
                 "--hide-scrollbars",
                 "--no-first-run",
                 f"--user-data-dir={profile}",
-                "--window-size=1280,800",
+                "--window-size=1440,900",
+                "--force-device-scale-factor=1.5",
                 f"--screenshot={output.resolve()}",
                 html_path.as_uri(),
             ]

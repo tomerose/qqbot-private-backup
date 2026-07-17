@@ -1,10 +1,11 @@
 """定制图 — PRO 1次/天。需求转发给管理员，管理员回复图片后自动转发给原用户。
 
-ponytail: single-file, no DB — in-memory req_id→user mapping. Lost on restart (acceptable)."""
+待交付请求和当日额度会持久化，插件重启不会丢任务。"""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 import uuid
@@ -13,13 +14,18 @@ from pathlib import Path
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain
-from astrbot.api.star import Context, Star
+from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.message.message_event_result import MessageChain
 
 try:
     from draw_command.pro_access import get_tier, Tier
 except ImportError:
     from data.plugins.draw_command.pro_access import get_tier, Tier
+
+try:
+    from xiaoning_runtime import mirror_runtime_task_status
+except ImportError:
+    from data.plugins.xiaoning_runtime import mirror_runtime_task_status
 
 REVIEWER_ID = "1211000567"
 CUSTOM_DRAW_DAILY = 1
@@ -34,12 +40,60 @@ class CustomDraw(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config)
         self._daily_usage: dict[str, int] = {}
-        # In-memory pending requests: req_id → (original_qq, description, timestamp)
+        data_dir = Path(StarTools.get_data_dir("custom_draw"))
+        data_dir.mkdir(parents=True, exist_ok=True)
+        self._state_file = data_dir / "state.json"
+        # Pending requests: req_id → (original_qq, description, timestamp).
+        # The JSON snapshot survives AstrBot/plugin restarts.
         self._pending: dict[str, tuple[str, str, float]] = {}
         self._pro_db = (
             Path(__file__).resolve().parents[2]
             / "plugin_data" / "xiaoning_pro" / "pro_members.db"
         )
+        self._load_state()
+
+    def _load_state(self) -> None:
+        try:
+            raw = json.loads(self._state_file.read_text(encoding="utf-8"))
+            today = time.strftime("%Y%m%d")
+            usage = raw.get("daily_usage", {})
+            pending = raw.get("pending", {})
+            if isinstance(usage, dict):
+                self._daily_usage = {
+                    str(key): int(value)
+                    for key, value in usage.items()
+                    if str(key).endswith(f":{today}")
+                    and isinstance(value, int)
+                    and value >= 0
+                }
+            if isinstance(pending, dict):
+                for req_id, item in pending.items():
+                    if not re.fullmatch(r"[A-Z0-9]{8}", str(req_id)):
+                        continue
+                    if not isinstance(item, list) or len(item) != 3:
+                        continue
+                    qq_id, desc, created_at = item
+                    if str(qq_id).isdigit() and isinstance(desc, str):
+                        self._pending[str(req_id)] = (
+                            str(qq_id), desc[:1000], float(created_at)
+                        )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            self._daily_usage = {}
+            self._pending = {}
+
+    def _save_state(self) -> bool:
+        payload = {
+            "daily_usage": self._daily_usage,
+            "pending": {key: list(value) for key, value in self._pending.items()},
+        }
+        tmp = self._state_file.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(self._state_file)
+            return True
+        except OSError as exc:
+            logger.warning("[CustomDraw] state save failed: %s", type(exc).__name__)
+            return False
 
     @staticmethod
     def _sender(event: AstrMessageEvent) -> str:
@@ -129,14 +183,26 @@ class CustomDraw(Star):
             f"→ 回复此消息并附上图片即可交付给用户。"
         )])
         try:
+            if not self._save_state():
+                raise OSError("custom draw state unavailable")
             await self.context.send_message(session, msg)
             self._daily_usage[dk] = used + 1
+            self._save_state()
+            await mirror_runtime_task_status(
+                sender, req_id.lower(), f"定制图：{desc[:80]}", "in_progress",
+                "submitted_to_reviewer", owner="custom_draw",
+            )
             yield event.plain_result(
                 f"定制图需求已提交（#{req_id}），人工绘制中，请耐心等待。\n"
                 f"今日剩余：{CUSTOM_DRAW_DAILY - used - 1} 次。"
             )
         except Exception:
             self._pending.pop(req_id, None)
+            self._save_state()
+            await mirror_runtime_task_status(
+                sender, req_id.lower(), f"定制图：{desc[:80]}", "failed",
+                "reviewer_submit_failed", owner="custom_draw",
+            )
             yield event.plain_result("定制图提交失败，请稍后重试。")
         event.stop_event()
 
@@ -179,7 +245,7 @@ class CustomDraw(Star):
         if req_id not in self._pending:
             return
 
-        original_qq, desc, _ = self._pending.pop(req_id)
+        original_qq, desc, _ = self._pending[req_id]
 
         # Check for images in the reviewer's reply
         message_chain = getattr(event, "message_chain", None)
@@ -192,8 +258,6 @@ class CustomDraw(Star):
         if not images:
             yield event.plain_result(f"未检测到图片（#{req_id}），请回复时附上图片。")
             event.stop_event()
-            # Put back the pending request
-            self._pending[req_id] = (original_qq, desc, time.time())
             return
 
         # Forward images to original user
@@ -208,12 +272,21 @@ class CustomDraw(Star):
         try:
             forward = MessageChain([Plain("【定制图交付】\n")] + images)
             await self.context.send_message(session, forward)
+            self._pending.pop(req_id, None)
+            self._save_state()
+            await mirror_runtime_task_status(
+                original_qq, req_id.lower(), f"定制图：{desc[:80]}", "done",
+                "qq:context_send", owner="custom_draw",
+            )
             yield event.plain_result(f"已交付给用户（#{req_id}）。")
             logger.info("[CustomDraw] delivered #%s to %s", req_id, original_qq)
         except Exception as exc:
             logger.warning("[CustomDraw] forward failed #%s: %s", req_id, exc)
             yield event.plain_result(f"交付失败（#{req_id}）：{exc}")
-            self._pending[req_id] = (original_qq, desc, time.time())
+            await mirror_runtime_task_status(
+                original_qq, req_id.lower(), f"定制图：{desc[:80]}", "delivery_pending",
+                type(exc).__name__, owner="custom_draw",
+            )
         event.stop_event()
 
     # ── Cleanup stale pending requests ─────────────────────────────
@@ -231,4 +304,10 @@ class CustomDraw(Star):
             if now - ts > 86400  # 24h
         ]
         for rid in stale:
-            self._pending.pop(rid, None)
+            original_qq, desc, _ = self._pending.pop(rid)
+            await mirror_runtime_task_status(
+                original_qq, rid.lower(), f"定制图：{desc[:80]}", "failed",
+                "expired_after_24h", owner="custom_draw",
+            )
+        if stale:
+            self._save_state()

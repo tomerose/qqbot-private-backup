@@ -65,6 +65,8 @@ class LinkSummary(Star):
             # NL trigger but no URL in this message — check reply for URL
             if has_nl or _is_public_read_command(text):
                 reply = getattr(event, "get_reply_obj", None)
+                if callable(reply):
+                    reply = reply()
                 if reply is not None:
                     reply_text = str(getattr(reply, "message", "") or "")
                     urls = URL_RE.findall(reply_text)
@@ -83,27 +85,27 @@ class LinkSummary(Star):
                 requests.post,
                 PROXY,
                 json={
-                    "model": "gemini-2.5-flash-search",
+                    "model": "gemini-3.5-flash",
+                    "url_context": True,
                     "google_search": True,
                     "messages": [
                         {
                             "role": "system",
                             "content": (
-                                "You are a helpful assistant. The user gives you a URL. "
-                                "If you can read the page content, summarize it in 200 "
-                                "Chinese characters: key topic, main argument, and one "
-                                "key takeaway. If you cannot access the URL, say so "
-                                "honestly and suggest the user paste the relevant text."
+                                "你是链接摘要助手。用户给你一个URL，你需要先尝试读取该网页内容，"
+                                "然后用中文200字以内总结：主题、主要观点、一个关键要点。"
+                                "如果无法访问该URL，诚实说明原因，建议用户粘贴原文。"
+                                "不要编造内容，只总结实际读到的信息。"
                             ),
                         },
                         {
                             "role": "user",
-                            "content": f"Please summarize this URL: {url}",
+                            "content": f"请阅读并总结这个链接的内容：{url}",
                         },
                     ],
-                    "max_tokens": 600,
+                    "max_tokens": 800,
                 },
-                timeout=30,
+                timeout=(15, 60),
             )
             result = chat_response_content(resp)
         except Exception as exc:

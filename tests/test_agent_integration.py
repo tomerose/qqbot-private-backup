@@ -1,5 +1,7 @@
 import asyncio
+import contextlib
 import hashlib
+import importlib
 import os
 import sys
 import tempfile
@@ -7,6 +9,7 @@ import types
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 _PROJ_ROOT = Path(__file__).resolve().parents[1]
 os.environ["ASTRBOT_ROOT"] = str(_PROJ_ROOT / "astrbot")
@@ -32,6 +35,7 @@ from claude_code_agent.task_planner import TaskRequest, plan_task  # noqa: E402
 from claude_code_agent.progress_policy import ProgressPolicy  # noqa: E402
 from claude_code_agent.access_policy import AccessPolicy  # noqa: E402
 from claude_code_agent.trusted_policy import TrustedPolicy  # noqa: E402
+from claude_code_agent import file_cache  # noqa: E402
 
 
 class FakeBackendHealth:
@@ -169,6 +173,83 @@ async def _collect(generator):
 
 
 class AgentIntegrationTests(unittest.TestCase):
+    def test_agent_job_status_mirror_uses_injected_tracker(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                calls = []
+                plugin._task_tracker = lambda *args: calls.append(args)
+                await plugin._track_cross_dialog_job(
+                    "1211000567", "abc123", "制作报告", "delivery_pending", "not delivered"
+                )
+                self.assertEqual(
+                    calls,
+                    [("1211000567", "abc123", "制作报告", "delivery_pending", "not delivered")],
+                )
+
+        asyncio.run(scenario())
+
+    def test_delivery_pending_survives_restart_for_queue_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = self._plugin(Path(tmp))
+            job_id = "aabbccddeeff"
+            plugin._job_store.start(
+                job_id,
+                "1211000567",
+                "aiocqhttp:FriendMessage:1211000567",
+                "生成报告",
+                "claude",
+                "",
+                state="delivery_pending",
+                recovery="replay_safe",
+            )
+
+            self.assertEqual(plugin._job_store.recover_interrupted(), 0)
+            self.assertEqual(plugin._job_store.get(job_id)["state"], "delivery_pending")
+
+    def test_queue_success_completes_agent_ledger_and_deletes_payload(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                job_id = "aabbccddeeff"
+                artifact = plugin.workspace / "jobs" / job_id / "outputs" / "report.txt"
+                artifact.parent.mkdir(parents=True)
+                artifact.write_text("report", encoding="utf-8")
+                plugin._job_store.start(
+                    job_id,
+                    "1211000567",
+                    "aiocqhttp:FriendMessage:1211000567",
+                    "生成报告",
+                    "claude",
+                    "",
+                    state="delivery_pending",
+                    recovery="replay_safe",
+                )
+                plugin._payload_store.write(
+                    job_id,
+                    EncryptedJobPayload(
+                        "生成报告",
+                        "aiocqhttp:FriendMessage:1211000567",
+                        "claude",
+                        "project",
+                        "replay_safe",
+                    ),
+                )
+                entry = types.SimpleNamespace(
+                    job_id=job_id, task_owner="agent", local_path=str(artifact)
+                )
+
+                await plugin._on_queued_delivery_outcome(
+                    entry, "done", "qq:retry_queue"
+                )
+
+                record = plugin._job_store.get(job_id)
+                self.assertEqual(record["state"], "completed")
+                self.assertEqual(record["deliverable_count"], 1)
+                self.assertFalse(plugin._payload_store.exists(job_id))
+
+        asyncio.run(scenario())
+
     def test_declared_gif_video_is_not_mistaken_for_an_untrusted_local_image(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
@@ -207,6 +288,39 @@ class AgentIntegrationTests(unittest.TestCase):
                 )
 
                 self.assertEqual(len(plugin.executed), 1)
+
+        asyncio.run(scenario())
+
+    def test_cached_file_request_delivers_without_starting_agent(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                cached = plugin.workspace / "jobs" / "old" / "outputs" / "report.txt"
+                cached.parent.mkdir(parents=True)
+                cached.write_text("report", encoding="utf-8")
+                cache_path = Path(tmp) / "file_cache.json"
+                with patch.object(file_cache, "_CACHE_PATH", cache_path):
+                    file_cache.record_file(
+                        "生成报告", str(cached), sender_id="1211000567", job_id="old"
+                    )
+                    replies = await _collect(
+                        plugin.on_message(FakeEvent("把刚才那个报告文件再发我一下"))
+                    )
+
+                self.assertEqual(plugin.executed, [])
+                self.assertTrue(any("已发送" in text for text in _plain_texts(replies)))
+
+        asyncio.run(scenario())
+
+    def test_invalid_agent_command_returns_help_instead_of_type_error(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+
+                replies = await _collect(plugin.on_message(FakeEvent("/agent run")))
+
+                self.assertEqual(plugin.executed, [])
+                self.assertTrue(any("Agent 任务" in text for text in _plain_texts(replies)))
 
         asyncio.run(scenario())
 
@@ -369,6 +483,33 @@ class AgentIntegrationTests(unittest.TestCase):
                 )
                 self.assertEqual(len(quarantines), 1)
                 self.assertTrue((quarantines[0] / "partial.txt").is_file())
+
+        asyncio.run(scenario())
+
+    def test_empty_backend_result_finishes_failed_instead_of_hanging(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                plugin._backend_health = FakeBackendHealth(("claude", "codex"))
+                backends = []
+                job_ids = []
+
+                async def empty_execute(
+                    this, job_id, job_dir, task, backend, high_risk_approved
+                ):
+                    backends.append(backend)
+                    job_ids.append(job_id)
+                    return "", [], "failed", 0, "empty_result"
+
+                plugin._execute = types.MethodType(empty_execute, plugin)
+
+                await _collect(plugin.on_message(FakeEvent("/agent run 生成 result.txt")))
+
+                self.assertEqual(backends, ["claude", "codex"])
+                record = plugin._job_store.get(job_ids[0])
+                self.assertEqual(record["state"], "failed")
+                self.assertEqual(record["stage"], "failed")
+                self.assertEqual(record["error_code"], "empty_result")
 
         asyncio.run(scenario())
 
@@ -877,7 +1018,23 @@ class AgentIntegrationTests(unittest.TestCase):
                 )
                 event.bot = FakeOneBot(fail_upload=True, fail_private=True)
 
-                replies = await _collect(plugin.on_message(event))
+                queue_modules = []
+                for name in (
+                    "data.plugins.friend_core.delivery_queue",
+                    "friend_core.delivery_queue",
+                ):
+                    try:
+                        queue_modules.append(importlib.import_module(name))
+                    except ImportError:
+                        pass
+                with contextlib.ExitStack() as stack:
+                    patched = [
+                        stack.enter_context(patch.object(module, "get_queue"))
+                        for module in queue_modules
+                    ]
+                    for get_queue in patched:
+                        get_queue.return_value.enqueue.return_value = None
+                    replies = await _collect(plugin.on_message(event))
                 texts = _plain_texts(replies)
                 job_id = plugin.executed[0][0]
 

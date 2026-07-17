@@ -1,4 +1,4 @@
-"""Smart translation — Gemini for X/Pro, DeepSeek for ordinary users."""
+"""Smart translation through the authenticated local model gateway."""
 
 from __future__ import annotations
 
@@ -21,8 +21,6 @@ except ImportError:
     from data.plugins.draw_command.pro_access import get_tier, Tier
 
 GEMINI_PROXY = "http://127.0.0.1:3000/v1/chat/completions"
-DEEPSEEK_API = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_KEY = "sk-991ee2d8b710420abe434f541a26164b"
 LANG_NAMES: dict[str, str] = {
     "en": "English", "zh": "中文", "ja": "日本語", "ko": "한국어",
     "fr": "Français", "de": "Deutsch", "es": "Español", "ru": "Русский",
@@ -84,7 +82,7 @@ class SmartTranslate(Star):
                 return GEMINI_PROXY, "sk-gemini-vertex", "gemini-2.5-flash"
         except Exception:
             pass
-        return DEEPSEEK_API, DEEPSEEK_KEY, "deepseek-chat"
+        return GEMINI_PROXY, "local-proxy", "gemini-2.5-flash-lite"
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=980)
     @defer_stop_event

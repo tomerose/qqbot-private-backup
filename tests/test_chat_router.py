@@ -26,16 +26,12 @@ def load_router():
 
     star.Context = object
     star.Star = Star
-    access = types.ModuleType("draw_command.pro_access")
-    access.Tier = types.SimpleNamespace(PRO="pro", X="x")
-    access.get_tier = lambda *_: "ordinary"
     api = types.ModuleType("astrbot.api")
     api.logger = types.SimpleNamespace(warning=lambda *_args, **_kwargs: None)
     replacements = {
         "astrbot": types.ModuleType("astrbot"), "astrbot.api": api,
         "astrbot.api.event": event, "astrbot.api.provider": provider,
-        "astrbot.api.star": star, "draw_command": types.ModuleType("draw_command"),
-        "draw_command.pro_access": access,
+        "astrbot.api.star": star,
     }
     previous = {name: sys.modules.get(name) for name in replacements}
     try:
@@ -53,7 +49,7 @@ def load_router():
 
 
 class ChatRouterTests(unittest.TestCase):
-    def test_only_private_pro_uses_gemini(self):
+    def test_every_group_and_private_chat_use_gemini_flash(self):
         module = load_router()
         calls = []
         async def set_provider(provider, *_):
@@ -68,14 +64,123 @@ class ChatRouterTests(unittest.TestCase):
             def get_group_id(self): return self.group
             def get_sender_id(self): return self.sender
 
-        module.get_tier = lambda sender, _: {
-            "pro": module.Tier.PRO, "x": module.Tier.X,
-        }.get(sender, "ordinary")
-        asyncio.run(router.route_provider(Event("group", "pro")))
+        asyncio.run(router.route_provider(Event("group-a", "pro")))
+        router._routes.clear()
+        asyncio.run(router.route_provider(Event("group-b", "x")))
+        router._routes.clear()
+        asyncio.run(router.route_provider(Event("group-c", "ordinary")))
+        router._routes.clear()
         asyncio.run(router.route_provider(Event("", "ordinary")))
-        asyncio.run(router.route_provider(Event("", "go")))
-        asyncio.run(router.route_provider(Event("", "pro")))
-        self.assertEqual(calls, ["deepseek-chat", "gemini-2.5-flash"])
+        self.assertEqual(
+            calls,
+            [
+                "gemini-2.5-flash",
+                "gemini-2.5-flash",
+                "gemini-2.5-flash",
+                "gemini-2.5-flash",
+            ],
+        )
+
+    def test_concurrent_first_messages_write_one_session_route(self):
+        module = load_router()
+        calls = []
+
+        async def set_provider(provider, *_):
+            calls.append(provider)
+            await asyncio.sleep(0)
+
+        context = types.SimpleNamespace(provider_manager=types.SimpleNamespace(set_provider=set_provider))
+        router = module.ChatRouter(context)
+
+        class Event:
+            unified_msg_origin = "same-session"
+
+            def get_group_id(self):
+                return "group-a"
+
+        async def run():
+            await asyncio.gather(router.route_provider(Event()), router.route_provider(Event()))
+
+        asyncio.run(run())
+        self.assertEqual(calls, ["gemini-2.5-flash"])
+
+    def test_short_same_speaker_followup_is_coalesced(self):
+        module = load_router()
+        module._REPLY_COALESCE_DELAY_SECONDS = 0.01
+        router = module.ChatRouter(types.SimpleNamespace())
+
+        class Event:
+            def __init__(self, text):
+                self.unified_msg_origin = "same-session"
+                self.message_str = text
+                self.message_obj = types.SimpleNamespace(message_str=text)
+                # AstrBot sets this for ordinary private messages too.  They
+                # must remain eligible for the brief follow-up window.
+                self.is_at_or_wake_command = True
+                self.stopped = False
+
+            def get_sender_id(self):
+                return "1211000567"
+
+            def is_private_chat(self):
+                return True
+
+            def get_message_str(self):
+                return self.message_str
+
+            def get_messages(self):
+                return []
+
+            def stop_event(self):
+                self.stopped = True
+
+            def set_extra(self, *_args):
+                pass
+
+        async def run():
+            first = Event("我刚想说")
+            second = Event("还有件事")
+            first_task = asyncio.create_task(router.coalesce_followup_messages(first))
+            await asyncio.sleep(0)
+            await router.coalesce_followup_messages(second)
+            await first_task
+            return first, second
+
+        first, second = asyncio.run(run())
+        self.assertEqual(first.message_str, "我刚想说\n还有件事")
+        self.assertEqual(first.message_obj.message_str, first.message_str)
+        self.assertTrue(second.stopped)
+
+    def test_command_and_urgent_message_skip_coalescing(self):
+        module = load_router()
+        router = module.ChatRouter(types.SimpleNamespace())
+
+        class Event:
+            is_at_or_wake_command = False
+
+            def __init__(self, text):
+                self.text = text
+
+            def get_message_str(self):
+                return self.text
+
+        self.assertEqual(router._reply_coalesce_text(Event("/help")), "")
+        self.assertEqual(router._reply_coalesce_text(Event("我不想活了")), "")
+
+    def test_group_wake_message_skips_coalescing(self):
+        module = load_router()
+        router = module.ChatRouter(types.SimpleNamespace())
+
+        class Event:
+            is_at_or_wake_command = True
+
+            def get_message_str(self):
+                return "小柠在吗"
+
+            def is_private_chat(self):
+                return False
+
+        self.assertEqual(router._reply_coalesce_text(Event()), "")
 
 
 if __name__ == "__main__":

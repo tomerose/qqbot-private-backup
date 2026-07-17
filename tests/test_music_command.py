@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "astrbot"))
 from data.plugins.music_command.main import (  # noqa: E402
     MUSIC_MEMORY,
     MusicCommand,
+    _song_delivery_text,
     _search_netease_song,
     parse_netease_song_id,
     parse_original_song_prompt,
@@ -65,6 +66,9 @@ class MusicCommandTests(unittest.TestCase):
 
     def test_song_name_search_is_narrow_and_returns_a_real_netease_id(self):
         self.assertEqual(parse_song_search("小柠，帮我点歌 稻香 周杰伦"), "稻香 周杰伦")
+        for text in ("唱一首青花瓷", "唱首青花瓷", "给我唱一首青花瓷"):
+            with self.subTest(text=text):
+                self.assertIsNone(parse_song_search(text))
         self.assertIsNone(parse_song_search("推荐一些适合学习的音乐"))
 
         response = SimpleNamespace(
@@ -159,6 +163,15 @@ class MusicCommandTests(unittest.TestCase):
             payload, mime = self.proxy._generate_music("an original song")
         self.assertEqual(payload, b"current-original-song")
         self.assertEqual(mime, "audio/mpeg")
+
+    def test_failed_song_delivery_is_not_completed_or_cleaned_up(self):
+        pending = _song_delivery_text(
+            Path("song.mp3"),
+            SimpleNamespace(delivered=False, channel="queued"),
+        )
+        self.assertIn("QQ 文件尚未交付", pending)
+        self.assertIn("本次次数不计", pending)
+        self.assertNotIn("已发送到", pending)
 
 
 if __name__ == "__main__":

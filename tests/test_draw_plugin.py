@@ -1,11 +1,12 @@
 import asyncio
+import base64
 import io
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from PIL import Image as PillowImage
 
@@ -15,9 +16,11 @@ sys.path.insert(0, str(PLUGINS_DIR))
 
 from draw_command.draw_core import DrawRateLimiter, parse_draw_command  # noqa: E402
 from draw_command.main import DRAW_MEMORY, DrawCommand  # noqa: E402
+from draw_command.edit_sessions import ImageEditSessionStore  # noqa: E402
 from draw_command.pro_client import ProClient  # noqa: E402
 from draw_command import main as draw_main  # noqa: E402
 from pro_application.pro_store import ProStore  # noqa: E402
+from xiaoning_runtime import ArtifactDeliveryResult  # noqa: E402
 
 
 class FakeEvent:
@@ -32,6 +35,9 @@ class FakeEvent:
 
     def get_message_str(self):
         return self.text
+
+    def get_messages(self):
+        return getattr(self, "message_chain", [])
 
     def get_sender_id(self):
         return self.sender
@@ -67,6 +73,11 @@ class DrawPluginTests(unittest.TestCase):
         # ponytail: clear cached ProClients so each test has clean isolation
         from draw_command.pro_access import _clients
         _clients.clear()
+        task_mirror = patch.object(
+            draw_main, "mirror_runtime_task_status", new=AsyncMock()
+        )
+        task_mirror.start()
+        self.addCleanup(task_mirror.stop)
 
     def test_proxy_request_uses_current_vertex_image_model(self):
         plugin = DrawCommand.__new__(DrawCommand)
@@ -89,6 +100,186 @@ class DrawPluginTests(unittest.TestCase):
         self.assertIsNone(parse_draw_command("帮我生成一份 Word 报告"))
         self.assertEqual(parse_draw_command("生成图片"), "一张适合分享的高质量图片")
 
+    def test_qq_cdn_reference_image_is_loaded_for_editing(self):
+        image = PillowImage.new("RGB", (2, 2), "white")
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+
+        class Response:
+            content = buffer.getvalue()
+
+            def raise_for_status(self):
+                return None
+
+        class Segment:
+            type = "image"
+            file = "reference.png"
+            url = "https://multimedia.nt.qq.com.cn/download?fileid=test"
+
+        class MessageObject:
+            message = [Segment()]
+
+        event = FakeEvent("重画", "1211000567")
+        event.message_obj = MessageObject()
+        with patch.object(draw_main.requests, "get", return_value=Response()) as get:
+            encoded = DrawCommand._get_referenced_image_base64(event)
+
+        self.assertTrue(encoded)
+        get.assert_called_once()
+
+    def test_redraw_without_reference_is_stopped_before_normal_chat(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self.build_plugin(Path(tmp) / "draws")
+                event = FakeEvent("重画", "1211000567")
+
+                replies = await collect(plugin.on_message(event))
+
+                self.assertTrue(event.stopped)
+                self.assertEqual(
+                    replies,
+                    [("plain", "已记住修改要求。请把原图发来，或回复那张图；收到图片后才会开始处理。")],
+                )
+
+        asyncio.run(scenario())
+
+    def test_image_first_short_confirmation_does_not_start_dewatermark(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self.build_plugin(Path(tmp) / "draws")
+                image = PillowImage.new("RGB", (8, 8), "white")
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+                plugin._request_edit = lambda *_args: self.fail("short confirmation must not edit")
+                plugin._deliver_image = AsyncMock()
+                image_event = FakeEvent("", "1211000567")
+                with patch.object(plugin, "_get_referenced_image_base64", return_value=encoded):
+                    self.assertEqual(await collect(plugin.on_message(image_event)), [])
+
+                confirm_event = FakeEvent("需要", "1211000567")
+                with patch.object(plugin, "_get_referenced_image_base64", return_value=None):
+                    replies = await collect(plugin.on_message(confirm_event))
+
+                self.assertFalse(confirm_event.stopped)
+                self.assertEqual(replies, [])
+                plugin._deliver_image.assert_not_awaited()
+
+        asyncio.run(scenario())
+
+    def test_same_turn_typoed_dewatermark_runs_tool_and_delivers(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self.build_plugin(Path(tmp) / "draws")
+                image = PillowImage.new("RGB", (8, 8), "white")
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+                plugin._request_edit = lambda image_b64, prompt: buffer.getvalue()
+                plugin._deliver_image = AsyncMock(
+                    return_value=ArtifactDeliveryResult(True, "private_component")
+                )
+                event = FakeEvent("去s水印", "1211000567")
+
+                with patch.object(plugin, "_get_referenced_image_base64", return_value=encoded):
+                    replies = await collect(plugin.on_message(event))
+
+                self.assertTrue(event.stopped)
+                self.assertIn("去水印任务已开始", replies[0][1])
+                self.assertIn("文件已交付", replies[-1][1])
+                plugin._deliver_image.assert_awaited_once()
+
+        asyncio.run(scenario())
+
+    def test_same_turn_dewatermark_reads_image_from_event_messages(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self.build_plugin(Path(tmp) / "draws")
+                image = PillowImage.new("RGB", (8, 8), "white")
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+                seen = {}
+
+                def edit(image_b64, _prompt):
+                    seen["image_b64"] = image_b64
+                    return buffer.getvalue()
+
+                plugin._request_edit = edit
+                plugin._deliver_image = AsyncMock(
+                    return_value=ArtifactDeliveryResult(True, "private_component")
+                )
+                event = FakeEvent("\u53bb\u6c34\u5370", "1211000567")
+                event.message_chain = [
+                    type(
+                        "ImageSeg",
+                        (),
+                        {"type": "image", "data": {"url": "base64://" + encoded}},
+                    )()
+                ]
+
+                replies = await collect(plugin.on_message(event))
+
+                self.assertTrue(event.stopped)
+                self.assertEqual(seen["image_b64"], encoded)
+                self.assertGreaterEqual(len(replies), 2)
+                plugin._deliver_image.assert_awaited_once()
+
+        asyncio.run(scenario())
+
+    def test_image_first_then_explicit_dewatermark_runs_tool(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self.build_plugin(Path(tmp) / "draws")
+                image = PillowImage.new("RGB", (8, 8), "white")
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+                plugin._request_edit = lambda image_b64, prompt: buffer.getvalue()
+                plugin._deliver_image = AsyncMock(
+                    return_value=ArtifactDeliveryResult(True, "private_component")
+                )
+                image_event = FakeEvent("", "1211000567")
+                with patch.object(plugin, "_get_referenced_image_base64", return_value=encoded):
+                    self.assertEqual(await collect(plugin.on_message(image_event)), [])
+
+                intent_event = FakeEvent("去水印", "1211000567")
+                with patch.object(plugin, "_get_referenced_image_base64", return_value=None):
+                    replies = await collect(plugin.on_message(intent_event))
+
+                self.assertTrue(intent_event.stopped)
+                self.assertIn("去水印任务已开始", replies[0][1])
+                self.assertIn("文件已交付", replies[-1][1])
+
+        asyncio.run(scenario())
+
+    def test_intent_first_then_image_executes_without_another_confirmation(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self.build_plugin(Path(tmp) / "draws")
+                image = PillowImage.new("RGB", (8, 8), "blue")
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+                plugin._request_edit = lambda image_b64, prompt: buffer.getvalue()
+
+                async def delivered(_event, _path, **_kwargs):
+                    return ArtifactDeliveryResult(True, "private_component")
+
+                plugin._deliver_image = delivered
+                intent_event = FakeEvent("去水印", "1211000567")
+                with patch.object(plugin, "_get_referenced_image_base64", return_value=None):
+                    waiting = await collect(plugin.on_message(intent_event))
+                self.assertIn("已记住去水印要求", waiting[0][1])
+
+                image_event = FakeEvent("", "1211000567")
+                with patch.object(plugin, "_get_referenced_image_base64", return_value=encoded):
+                    replies = await collect(plugin.on_message(image_event))
+                self.assertIn("去水印任务已开始", replies[0][1])
+                self.assertIn("文件已交付", replies[-1][1])
+
+        asyncio.run(scenario())
+
     def test_draw_memory_exposes_the_same_limit_to_ordinary_and_go(self):
         class Request:
             system_prompt = "原始人设"
@@ -102,6 +293,12 @@ class DrawPluginTests(unittest.TestCase):
             self.assertEqual(request.system_prompt.count("【作图能力】"), 1)
 
         asyncio.run(scenario())
+
+    def test_group_edit_session_is_isolated_by_sender(self):
+        first = FakeEvent("", "2000000001", private=False, wake=True)
+        second = FakeEvent("", "2000000002", private=False, wake=True)
+        first.unified_msg_origin = second.unified_msg_origin = "llbot:GroupMessage:945598390"
+        self.assertNotEqual(DrawCommand._edit_scope(first), DrawCommand._edit_scope(second))
 
     @staticmethod
     def build_plugin(output_root: Path) -> DrawCommand:
@@ -118,6 +315,7 @@ class DrawPluginTests(unittest.TestCase):
         plugin._pro_db_path = db_path  # retained for test helpers
         plugin._usage_file = output_root.parent / "state" / "draw_usage.json"
         plugin._daily_usage = {}
+        plugin._edit_sessions = ImageEditSessionStore(output_root.parent / "edit_sessions")
         return plugin
 
     @staticmethod
@@ -200,7 +398,22 @@ class DrawPluginTests(unittest.TestCase):
 
                 replies = await collect(plugin.on_message(FakeEvent("/draw a cat", sender)))
 
-                self.assertEqual(replies, [("plain", "作图次数已用完（今日 1/1）。添加小柠为QQ好友获得X资格可享每周6次。")])
+                self.assertEqual(replies, [("plain", "作图次数已用完（今日 1/1）。添加小柠为QQ好友获得X资格可享每天1次。")])
+
+        asyncio.run(scenario())
+
+    def test_generation_failure_returns_without_delivery_crash(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self.build_plugin(Path(tmp))
+
+                def fail_request(*_args):
+                    raise RuntimeError("proxy down")
+
+                plugin._request_image = fail_request
+                replies = await collect(plugin.on_message(FakeEvent("/draw a cat", "2000000000")))
+
+                self.assertEqual(replies[-1], ("plain", "画图没成功，我换个方式帮你。"))
 
         asyncio.run(scenario())
 
@@ -237,7 +450,8 @@ class DrawPluginTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "draw.png"
-            path.write_bytes(b"image")
+            image = PillowImage.new("RGB", (2, 2), "red")
+            image.save(path, format="PNG")
             event = Event()
             plugin = DrawCommand.__new__(DrawCommand)
             plugin._output_root = Path(tmp)

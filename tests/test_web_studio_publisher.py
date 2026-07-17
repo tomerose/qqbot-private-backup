@@ -33,8 +33,10 @@ class FirebasePublisherTests(unittest.TestCase):
         self.assertEqual(headers["source"], "/x/**")
         values = {item["key"]: item["value"] for item in headers["headers"]}
         self.assertIn("connect-src 'none'", values["Content-Security-Policy"])
-        self.assertIn("frame-src 'none'", values["Content-Security-Policy"])
-        self.assertIn("worker-src 'none'", values["Content-Security-Policy"])
+        # The managed shell must be allowed to load its own opaque srcdoc frame.
+        # Generated app HTML receives a separate CSP with frame-src 'none'.
+        self.assertIn("frame-src 'self'", values["Content-Security-Policy"])
+        self.assertIn("worker-src blob:", values["Content-Security-Policy"])
         self.assertEqual(values["X-Frame-Options"], "DENY")
         self.assertIn("no-store", values["Cache-Control"])
 
@@ -63,13 +65,17 @@ class FirebasePublisherTests(unittest.TestCase):
         shell = path.read_text(encoding="utf-8")
         self.assertEqual(self.publisher.read_app(page_id), app)
         self.assertNotIn(app, shell)
-        self.assertIn('sandbox="allow-scripts allow-forms"', shell)
+        self.assertIn('sandbox="allow-scripts allow-forms allow-downloads"', shell)
+        self.assertIn('allow="clipboard-write; fullscreen"', shell)
+        self.assertIn("fullscreen", shell)
         self.assertIn("xiaoning-shell-mark", shell)
         self.assertNotIn("allow-same-origin", shell)
         self.assertNotIn("allow-top-navigation", shell)
         self.assertIn("const PAGE_ID = '0123456789';", shell)
         self.assertIn("'xn:web:' + PAGE_ID", shell)
         self.assertIn("event.source !== frame.contentWindow", shell)
+        self.assertIn("frame-src 'self'", shell)
+        self.assertIn("data:text/json", shell)
 
         other = self.publisher.stage("abcdef0123", app).read_text(encoding="utf-8")
         self.assertIn("const PAGE_ID = 'abcdef0123';", other)
@@ -99,8 +105,10 @@ class FirebasePublisherTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertTrue(command[-1].startswith("file:///"))
         self.assertIn("--headless", command)
+        self.assertIn("--window-size=1440,900", command)
+        self.assertIn("--force-device-scale-factor=1.5", command)
         self.assertIn("--host-resolver-rules=MAP * ~NOTFOUND", command)
-        self.assertIn('sandbox="allow-scripts allow-forms"', self.publisher.page_path(page_id).read_text(encoding="utf-8"))
+        self.assertIn('sandbox="allow-scripts allow-forms allow-downloads"', self.publisher.page_path(page_id).read_text(encoding="utf-8"))
 
     @patch("data.plugins.web_studio.publisher.subprocess.run")
     @patch("data.plugins.web_studio.publisher._EDGE_CANDIDATES")

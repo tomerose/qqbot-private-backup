@@ -13,6 +13,10 @@ from pathlib import Path
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
+try:
+    from friend_core.relationship_state import get_snapshot, load_state
+except ImportError:
+    from data.plugins.friend_core.relationship_state import get_snapshot, load_state
 
 
 
@@ -34,9 +38,12 @@ class CommunityFlywheel(Star):
         super().__init__(context, config)
         data_dir = Path(StarTools.get_data_dir("community_flywheel"))
         data_dir.mkdir(parents=True, exist_ok=True)
-        self._state_file = data_dir / "flywheel_state.json"
+        self._legacy_state_file = data_dir / "flywheel_state.json"
+        relationship_dir = Path(StarTools.get_data_dir("proactive_behavior"))
+        relationship_dir.mkdir(parents=True, exist_ok=True)
+        self._state_file = relationship_dir / "relationship_state.json"
         self._slang_file = data_dir / "slang_dict.json"
-        self._state = _load_json(self._state_file, {})
+        self._state = load_state(self._state_file, [self._legacy_state_file])
         self._slang = _load_json(self._slang_file, {})
 
     # ── /认识 — 关系可视化 ──────────────────────────────
@@ -49,7 +56,7 @@ class CommunityFlywheel(Star):
             event.stop_event()
             return
 
-        entry = self._state.get(sender, {})
+        entry = get_snapshot(self._state, sender)
         first_seen = entry.get("first_seen_ts", 0)
         msg_count = entry.get("message_count", 0)
 
@@ -134,15 +141,17 @@ class CommunityFlywheel(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=979)
     async def on_message_track(self, event: AstrMessageEvent):
+        """Record interaction for relationship tracking."""
         sender = _sender_id(event)
         if not sender or not sender.isdigit():
             return
-        entry = self._state.get(sender, {})
-        if not entry.get("first_seen_ts"):
-            entry["first_seen_ts"] = time.time()
-        entry["message_count"] = entry.get("message_count", 0) + 1
-        entry["last_message_ts"] = time.time()
-        self._state[sender] = entry
+        try:
+            from friend_core.relationship_state import record_interaction, save_state
+            entry = record_interaction(self._state, sender)
+            if entry.get("message_count", 0) % 50 == 0:
+                save_state(self._state_file, self._state)
+        except Exception:
+            pass
 
     # ── 注入学到的 slang 到 LLM ─────────────────────────
 
@@ -175,13 +184,7 @@ class CommunityFlywheel(Star):
     # ── 定期落盘 ───────────────────────────────────────
 
     async def _save_loop(self):
-        import asyncio as _asyncio
-        while True:
-            await _asyncio.sleep(600)
-            try:
-                _save_json(self._state_file, self._state)
-            except Exception:
-                pass
+        return
 
 
 def _sender_id(event: AstrMessageEvent) -> str:

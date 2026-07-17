@@ -1,6 +1,9 @@
 # Python and local tooling
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .venv/
 venv/
 node_modules/
@@ -18,6 +21,9 @@ node_modules/
 *.db
 *.db-shm
 *.db-wal
+/_lyrics.txt
+/_song_*.wav
+/_uplifting_song.wav
 
 # Credentials and local environment
 .env
@@ -33,6 +39,7 @@ astrbot/data/vertex-key.json
 data/cmd_config.json
 # AstrBot private runtime data
 astrbot/astrbot.log
+astrbot/plugin_data/
 astrbot/data/attachments/
 astrbot/data/config/
 astrbot/data/knowledge_base/

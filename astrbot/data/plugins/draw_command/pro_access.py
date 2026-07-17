@@ -1,8 +1,8 @@
 """Unified tier-based membership lookups. Replaces binary is_active_pro checks.
 
 Tier flow: ORDINARY < X < PRO. Each tier inherits all lower-tier capabilities.
-Ordinary: Draw 6x/week (Gemini). X: Draw 6x/week (Imagen 4), Video 3x/day, Agent 1x/week.
-PRO: owner-granted, time-limited (direct grants ≤520 days), no artificial caps.
+Ordinary: Draw 1x/day (Gemini Flash). X: Draw 6x/week (Gemini Pro), Video 3x/day, Agent 1x/week.
+PRO: owner-granted, time-limited (direct grants ≤520 days), no artificial caps, 4K drawing.
 """
 
 from __future__ import annotations

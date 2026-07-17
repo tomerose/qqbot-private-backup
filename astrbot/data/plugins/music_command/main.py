@@ -19,6 +19,11 @@ from astrbot.api.star import Context, Star, StarTools
 
 from ..draw_command.pro_access import Tier, get_tier
 
+try:
+    from xiaoning_runtime import mirror_runtime_task_status
+except ImportError:
+    from data.plugins.xiaoning_runtime import mirror_runtime_task_status
+
 MUSIC_PROXY_URL = "http://127.0.0.1:3000/v1/music/generations"
 MAX_SONG_BYTES = 20 * 1024 * 1024
 SONG_DAILY_LIMIT = 1
@@ -28,7 +33,7 @@ _SING_COMMAND = re.compile(r"^\s*/sing\s+(.+?)\s*$", re.I)
 MUSIC_MEMORY = (
     "\u3010\u97f3\u4e50\u3011\u7528\u6237\u8bf4\u300c\u70b9\u6b4c/\u641c\u6b4c/\u653e\u6b4c/\u6765\u4e00\u9996/\u542c\u6b4c/\u6362\u6b4c + \u6b4c\u540d/\u6b4c\u624b\u300d\u2192\u81ea\u52a8\u641c\u7f51\u6613\u4e91\u97f3\u4e50\u5361\u3002"
     "\u7528\u6237\u8bf4\u300c\u5531/\u5199/\u521b\u4f5c/\u751f\u6210/\u505a\u4e00\u9996\u6b4c\u300d\u2192Pro\u539f\u521b\u6b4c\u66f2(/sing)\u3002"
-    "\u300c\u627e\u6b4c/\u63a8\u8350/\u64ad\u653e\u5df2\u6709\u6b4c\u66f2/\u5531\u6b4c\u624b\u540d\u300d\u2192\u4e0d\u89e6\u53d1\u539f\u521b\u751f\u6210\uff0c\u4ec5\u641c\u7d22\u3002\u4ec5\u652f\u6301\u7f51\u6613\u4e91\u97f3\u4e50\u5361\u3002"
+    "\u300c\u627e\u6b4c/\u63a8\u8350/\u64ad\u653e\u5df2\u6709\u6b4c\u66f2/\u6b4c\u540d\u6216\u6b4c\u624b\u641c\u7d22\u300d\u2192\u4e0d\u89e6\u53d1\u539f\u521b\u751f\u6210\uff0c\u4ec5\u641c\u7d22\u3002\u4ec5\u652f\u6301\u7f51\u6613\u4e91\u97f3\u4e50\u5361\u3002"
 )
 _NATURAL_NETEASE_COMMAND = re.compile(
     r"^\s*(?:\u5c0f\u67e0[\uff0c,\uff1a:\s]*)?(?:(?:\u5e2e\u6211|\u7ed9\u6211|\u8bf7)[\uff0c,\uff1a:\s]*)?"
@@ -49,7 +54,6 @@ _SONG_SEARCH_COMMAND = re.compile(
     r"\u6765(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
     r"\u542c(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
     r"\u64ad(?:\u653e)?(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
-    r"\u5531(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
     r"(?:\u7ed9|\u4e3a)(?:\u6211|\u5927\u5bb6)(?:\u653e|\u70b9|\u64ad|\u6765)(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
     r"\u6362(?:\u9996|\u4e2a|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?)"
     r"(?:\u6b4c\u66f2|\u97f3\u4e50|\u6b4c)?\s*(?P<query>.+?)\s*$",
@@ -91,6 +95,23 @@ def parse_song_search(text: str) -> str | None:
     value_text = str(text or "")
     match = _SONG_SEARCH_COMMAND.match(value_text)
     return match.group("query").strip() if match else None
+
+
+def _song_delivery_text(path: Path, result) -> str:
+    if result.delivered:
+        suffix = {
+            "group_upload": "已上传到群文件",
+            "private_fallback": "群文件上传失败，已私聊发送给你",
+            "private": "已发送到当前私聊",
+            "private_component": "已发送到当前私聊",
+        }.get(result.channel, "已发送")
+        return f"原创歌曲已生成，{suffix}：{path.name}"
+    retry_note = (
+        "已加入后台重试队列，稍后自动送达。"
+        if result.channel == "queued"
+        else "文件已安全保留，请稍后重试。"
+    )
+    return f"歌曲已生成，但 QQ 文件尚未交付，任务未完成；{retry_note}本次次数不计。"
 
 
 _PROXY_SEARCH_URL = "http://127.0.0.1:3000/v1/search"
@@ -213,28 +234,22 @@ class MusicCommand(Star):
         path.write_bytes(payload)
         return path
 
-    async def _deliver_song(self, event: AstrMessageEvent, path: Path):
+    async def _deliver_song(
+        self, event: AstrMessageEvent, path: Path, *, task_id: str = "", task_desc: str = ""
+    ):
         """Deliver song via group upload or private file, with verified result."""
-        from xiaoning_runtime import ArtifactDeliveryResult, deliver_local_artifact
+        from xiaoning_runtime import deliver_local_artifact
         project_root = Path(__file__).resolve().parents[4]
         output_root = project_root / "claude_workspace" / "pro_music"
-        result = await deliver_local_artifact(
-            event, path, allowed_roots=[output_root], kind="file"
+        return await deliver_local_artifact(
+            event,
+            path,
+            allowed_roots=[output_root],
+            kind="file",
+            task_id=task_id,
+            task_desc=task_desc,
+            task_owner="music" if task_id else "",
         )
-        if result.delivered:
-            suffix = {
-                "group_upload": "已上传到群文件",
-                "private_fallback": "群文件上传失败，已私聊发送给你",
-                "private": "已发送到当前私聊",
-                "private_component": "已发送到当前私聊",
-            }.get(result.channel, "已发送")
-            return event.plain_result(f"原创歌曲已生成，{suffix}：{path.name}")
-        retry_note = (
-            "已加入后台重试队列，稍后自动送达。"
-            if result.channel == "queued"
-            else "文件已安全保留，请稍后重试。"
-        )
-        return event.plain_result(f"歌曲已生成，但 QQ 文件尚未交付，任务未完成；{retry_note}")
 
     @filter.on_llm_request(priority=-20)
     async def inject_music_memory(self, event: AstrMessageEvent, req) -> None:
@@ -291,22 +306,41 @@ class MusicCommand(Star):
             yield event.plain_result(f"今日原创歌曲生成次数已用完（{SONG_DAILY_LIMIT}/{SONG_DAILY_LIMIT}）。")
             event.stop_event()
             return
+        task_id = uuid.uuid4().hex[:12]
+        task_desc = f"生成原创歌曲：{prompt[:140]}"
+        await mirror_runtime_task_status(
+            sender_id, task_id, task_desc, "in_progress", "music_started", owner="music"
+        )
         yield event.plain_result("原创歌曲任务已开始，预计 1–3 分钟；QQ 音频文件成功交付后才会标记完成。")
         try:
             payload, mime = await asyncio.to_thread(self._request_song, prompt)
             path = self._save_song(payload, mime)
         except Exception as exc:
             logger.warning("[MusicCmd] song generation failed: %s", type(exc).__name__)
+            await mirror_runtime_task_status(
+                sender_id, task_id, task_desc, "failed", type(exc).__name__, owner="music"
+            )
             yield event.plain_result("原创歌曲生成失败，请稍后重试。")
             event.stop_event()
             return
-        self._daily_usage[usage_key] = self._daily_usage.get(usage_key, 0) + 1
-        try:
-            self._save_usage()
-        except OSError:
-            logger.warning("[MusicCmd] usage persistence failed")
-        event.set_extra("_pro_music_output_paths", [str(path)])
-        yield await self._deliver_song(event, path)
+        delivery = await self._deliver_song(
+            event, path, task_id=task_id, task_desc=task_desc
+        )
+        if delivery.delivered:
+            await mirror_runtime_task_status(
+                sender_id, task_id, task_desc, "done", f"qq:{delivery.channel}", owner="music"
+            )
+            self._daily_usage[usage_key] = self._daily_usage.get(usage_key, 0) + 1
+            try:
+                self._save_usage()
+            except OSError:
+                logger.warning("[MusicCmd] usage persistence failed")
+            event.set_extra("_pro_music_output_paths", [str(path)])
+        else:
+            await mirror_runtime_task_status(
+                sender_id, task_id, task_desc, "delivery_pending", delivery.channel, owner="music"
+            )
+        yield event.plain_result(_song_delivery_text(path, delivery))
         event.stop_event()
 
     @filter.after_message_sent(priority=-1000)

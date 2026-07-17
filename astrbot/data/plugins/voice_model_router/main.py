@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 import uuid
 from pathlib import Path
@@ -135,20 +136,27 @@ class VoiceModelRouter(Star):
         # in the normal AstrBot request pipeline. Do not start a second,
         # racing transcription request against the same event.
 
+    # ponytail: per-user default voice reply — these QQs always get spoken output.
+    _DEFAULT_VOICE_QQS = frozenset({"2641419881"})
+
     @filter.on_decorating_result(priority=-10000)
     async def synthesize_voice_reply(self, event: AstrMessageEvent) -> None:
+        sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
         requested = bool(event.get_extra("voice_reply_requested", False)) or wants_voice_reply(
             str(event.get_extra("_gemini_stt_transcript", "")
                 or event.get_extra("_gemini_stt_raw_text", "")
                 or "")
         )
+        # Per-user default: always voice for configured QQs
+        if not requested and sender in self._DEFAULT_VOICE_QQS:
+            requested = True
+            event.set_extra("voice_reply_requested", True)
+        if not requested and not event.is_private_chat() and random.random() < 0.10:
+            requested = True
+            event.set_extra("voice_reply_requested", True)
+            logger.debug("[Voice] 10%% group voice reply triggered")
         if not requested:
-            # 10% chance of voice reply in group chats for variety
-            if not event.is_private_chat() and random.random() < 0.10:
-                requested = True
-                logger.debug("[Voice] 10%% random voice triggered")
-            else:
-                return
+            return
         result = event.get_result()
         if result is None or not result.chain:
             logger.debug("[Voice] no result chain, skipping voice")
@@ -208,14 +216,46 @@ class VoiceModelRouter(Star):
 
     @filter.after_message_sent(priority=-1000)
     async def cleanup_sent_voice(self, event: AstrMessageEvent) -> None:
+        """Keep local records available until NapCat has finished transcoding them.
+
+        A successful OneBot action only acknowledges that NapCat accepted the
+        record.  It may still be reading and converting the WAV in the
+        background, so deleting it in this hook can produce a visible but
+        silent QQ voice message.
+        """
         paths = event.get_extra("_local_tts_audio_paths", []) or []
         event.set_extra("_local_tts_audio_paths", [])
         configured_root = getattr(self, "audio_root", None)
         if configured_root is None:
             return
         root = Path(configured_root).resolve(strict=False)
+        safe_paths: list[str] = []
         for raw in paths:
             candidate = Path(str(raw or ""))
+            if candidate.is_symlink():
+                continue
+            try:
+                resolved = candidate.resolve(strict=True)
+                private_root = root.resolve(strict=True)
+            except OSError:
+                continue
+            if (
+                private_root not in resolved.parents
+                or resolved.suffix.lower() != ".wav"
+                or not resolved.is_file()
+            ):
+                continue
+            safe_paths.append(str(resolved))
+        if safe_paths:
+            asyncio.create_task(self._delete_voice_files_after_delivery(root, safe_paths))
+
+    @staticmethod
+    async def _delete_voice_files_after_delivery(root: Path, paths: list[str]) -> None:
+        # NapCat converts WAV to Silk asynchronously.  The TTS service also
+        # removes aged files, so this is only a bounded privacy cleanup.
+        await asyncio.sleep(60)
+        for raw in paths:
+            candidate = Path(raw)
             if candidate.is_symlink():
                 continue
             try:

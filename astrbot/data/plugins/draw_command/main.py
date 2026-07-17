@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import re
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import requests
 from PIL import Image as PillowImage
@@ -26,12 +28,21 @@ from .draw_core import (
 )
 from .pro_access import get_tier, is_active_pro_group, Tier
 from .pro_client import ProClient
+from .edit_sessions import ImageEditSessionStore
 
 try:
-    from xiaoning_runtime import ArtifactDeliveryResult, deliver_local_artifact
+    from xiaoning_runtime import (
+        ArtifactDeliveryResult,
+        deliver_local_artifact,
+        mirror_runtime_task_status,
+    )
 except ImportError:
     try:
-        from data.plugins.xiaoning_runtime import ArtifactDeliveryResult, deliver_local_artifact
+        from data.plugins.xiaoning_runtime import (
+            ArtifactDeliveryResult,
+            deliver_local_artifact,
+            mirror_runtime_task_status,
+        )
     except ImportError:
         # AstrBot's isolated plugin loader may expose only this plugin package.
         import importlib.util
@@ -48,28 +59,54 @@ except ImportError:
         _runtime_spec.loader.exec_module(_runtime)
         ArtifactDeliveryResult = _runtime.ArtifactDeliveryResult
         deliver_local_artifact = _runtime.deliver_local_artifact
+        mirror_runtime_task_status = _runtime.mirror_runtime_task_status
 
 
 DRAW_PROXY_URL = "http://127.0.0.1:3000/v1/images/generations"
 EDIT_PROXY_URL = "http://127.0.0.1:3000/v1/images/edits"
-MAX_IMAGE_BYTES = 20 * 1024 * 1024  # Imagen 3 output can be larger
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_EDGE = 4096
+QQ_IMAGE_HOSTS = frozenset(
+    {
+        "multimedia.nt.qq.com.cn",
+        "gchat.qpic.cn",
+        "c2cpicdw.qpic.cn",
+    }
+)
 DRAW_PRO_DAILY = 10
-DRAW_X_WEEKLY = 6
+DRAW_X_DAILY = 1
 DRAW_ORDINARY_DAILY = 1
 DRAW_LIMIT_MSG = "作图次数已用完（今日 {used}/{limit}）。明天自动重置。"
-DRAW_WEEKLY_LIMIT_MSG = "本周作图已用 {used}/{limit} 次。下周自动重置。"
-DRAW_ORDINARY_LIMIT_MSG = "作图次数已用完（今日 {used}/{limit}）。添加小柠为QQ好友获得X资格可享每周6次。"
-# PRO tier: Vertex Imagen 3 — dedicated high-quality image model
-PRO_IMAGE_MODEL = "gemini-3-pro-image"       # X/Pro — Gemini 3 Pro Image (best available)
-X_IMAGE_MODEL  = "gemini-3.1-flash-image"    # 普通用户 — fast, good quality
+DRAW_ORDINARY_LIMIT_MSG = "作图次数已用完（今日 {used}/{limit}）。添加小柠为QQ好友获得X资格可享每天1次。"
+# XY/PRO → Gemini 3 Pro Image (Nano Banana Pro); ordinary → Gemini Flash Image (Nano Banana 2)
+PRO_IMAGE_MODEL = "gemini-3-pro-image"       # X/Pro — best quality, 4K capable
+X_IMAGE_MODEL  = "gemini-3.1-flash-image"    # ordinary — fast, 14 reference images
 DRAW_MEMORY = (
-    "【作图能力】所有用户都可使用 /draw 或自然语言作图。普通用户每天 1 次；X资格每周 6 次；Pro 每天 10 次+定制图 1次/天。"
-    "支持画幅控制：在描述后加 --9:16（竖屏）--16:9（横屏）--1:1（方形）。"
-    "多图生成：描述后加 --2 或 --3 一次出多张。"
+    "【作图能力】所有用户都可使用 /draw 或自然语言作图。普通用户每天 1 次；X资格每天 1 次；Pro 每天 10 次+定制图 1次/天。"
+    "画幅控制：--9:16 --16:9 --1:1 --2:3 --3:2。多图：--2 到 --4 并行出图。"
+    "风格预设：--style photo/anime/product/illustration/cinematic/watercolor/oil。"
+    "Pro专属4K：描述后加 --4k 出 4096x4096 超高清（消耗3次普通用量）。"
+    "参考图模式：回复一张图片加描述，保持画风/角色一致继续出图。"
     "图片编辑：回复图片说「把这张图改成xxx」或使用 /edit 命令。"
-    "去水印：回复图片说「去水印」或「把右下角的@画师小尾巴抹掉」，可去除水印、字幕、Logo。"
+    "去水印：回复图片说「去水印」或「把右下角的@画师小尾巴抹掉」。"
     "只在用户明确要求画图或编辑图片时触发，不承诺生成失败的结果。"
+)
+
+_EDIT_CONFIRM_RE = re.compile(
+    r"^(?:需要|要|是|是的|对|对的|好|好的|可以|确认|确定|开始吧|处理吧|这张|就这张|"
+    r"(?:现在)?(?:修|弄|处理|去|抹)好了?(?:吗|没|没有)?|"
+    r"还没(?:修|弄|处理|去)好(?:吗|嘛)?|怎么还没好|"
+    r"(?:你)?(?:还)?没(?:发|传)(?:出来|给我|成功)?(?:吗|呀|啊)?|"
+    r"(?:重新|再)(?:发|传|处理|弄)(?:一下|一次|出来)?|"
+    r"继续(?:处理|去水印|弄)?)[。！!？?呀啊嘛呢\s]*$",
+    re.I,
+)
+_EDIT_CANCEL_RE = re.compile(r"^(?:取消|算了|不用了|别弄了|停止)[。！!\s]*$", re.I)
+# Short removal request + image present → default to dewatermark
+_SHORT_REMOVE = re.compile(
+    r".*(?:去掉|弄掉|删掉|抹掉|擦掉|p掉|搞掉|去了|去除|移除|消除|清除|不要|不想看到|"
+    r"帮我弄|帮我去|帮我删|帮我抹|帮我擦|帮我p|帮忙去|帮忙弄|把.{0,4}(?:去掉|弄掉|删掉|抹掉|擦掉|p掉)).*",
+    re.I,
 )
 
 
@@ -88,6 +125,16 @@ class DrawCommand(Star):
         self._pro_client = ProClient(self._pro_db_path)
         self._usage_file = self._output_root.parent / "state" / "draw_usage.json"
         self._daily_usage = self._load_usage()
+        session_root = (
+            project_root / "astrbot" / "data" / "plugin_data"
+            / "draw_command" / "edit_sessions"
+        )
+        self._edit_sessions = ImageEditSessionStore(
+            session_root,
+            max_image_bytes=MAX_IMAGE_BYTES,
+            max_image_edge=MAX_IMAGE_EDGE,
+        )
+        self._edit_sessions.cleanup()
 
     def _is_pro(self, sender_id: str) -> bool:
         """Pro access is granted ONLY via HMAC-signed DB membership.
@@ -113,6 +160,15 @@ class DrawCommand(Star):
         getter = getattr(event, "get_sender_id", None)
         return str(getter() if callable(getter) else "").strip()
 
+    @classmethod
+    def _edit_scope(cls, event: AstrMessageEvent) -> str:
+        origin = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        sender = cls._safe_sender_id(event)
+        if origin:
+            return f"{origin}:sender:{sender}"
+        group = str(getattr(event, "get_group_id", lambda: "")() or "").strip()
+        return f"group:{group}:{sender}" if group else f"private:{sender}"
+
     def _draw_rate_limit(self, tier: Tier, sender_id: str, in_pro_group: bool) -> tuple[int, str, int]:
         """Return (limit, cache_key, current_usage) for the given tier."""
         today = time.strftime("%Y%m%d")
@@ -120,9 +176,7 @@ class DrawCommand(Star):
         if tier >= Tier.PRO or in_pro_group:
             return DRAW_PRO_DAILY, dk, self._daily_usage.get(dk, 0)
         if tier >= Tier.X:
-            year, week_num = time.strftime("%Y"), time.strftime("%W")
-            wk = f"{sender_id}:{year}:{week_num}"
-            return DRAW_X_WEEKLY, wk, self._daily_usage.get(wk, 0)
+            return DRAW_X_DAILY, dk, self._daily_usage.get(dk, 0)
         return DRAW_ORDINARY_DAILY, dk, self._daily_usage.get(dk, 0)
 
     def _load_usage(self) -> dict[str, int]:
@@ -161,17 +215,26 @@ class DrawCommand(Star):
             raise ValueError("invalid image size")
         return image_bytes
 
-    def _request_image(self, prompt: str, aspect: str = "1:1", model: str = "") -> bytes:
+    def _request_image(self, prompt: str, aspect: str = "1:1", model: str = "",
+                       image_size: str = "2K") -> bytes:
         size_map = {"1:1": "1024x1024", "16:9": "1024x576", "9:16": "576x1024", "2:3": "1024x1536", "3:2": "1536x1024"}
         size = size_map.get(aspect, "1024x1024")
         chosen_model = model or X_IMAGE_MODEL
-        # Gemini image models benefit from quality guidance
         prompt = f"{prompt}, masterpiece, highly detailed, professional quality, sharp focus"
         response = requests.post(
             DRAW_PROXY_URL,
-            json={"prompt": prompt, "model": chosen_model, "size": size},
+            json={"prompt": prompt, "model": chosen_model, "size": size, "image_size": image_size},
             timeout=(30, 240),
         )
+        response.raise_for_status()
+        return self._decode_proxy_image(response)
+
+    def _request_image_raw(self, body: dict) -> bytes:
+        """Direct proxy call with full request body (supports reference images, 4K, etc.)."""
+        if "prompt" in body:
+            body = dict(body)
+            body["prompt"] = f"{body['prompt']}, masterpiece, highly detailed, professional quality, sharp focus"
+        response = requests.post(DRAW_PROXY_URL, json=body, timeout=(30, 240))
         response.raise_for_status()
         return self._decode_proxy_image(response)
 
@@ -198,60 +261,152 @@ class DrawCommand(Star):
         return target
 
     async def _deliver_image(
-        self, event: AstrMessageEvent, path: Path
+        self,
+        event: AstrMessageEvent,
+        path: Path,
+        *,
+        task_id: str = "",
+        task_desc: str = "",
     ) -> ArtifactDeliveryResult:
         return await deliver_local_artifact(
-            event, path, allowed_roots=[self._output_root], kind="image"
+            event,
+            path,
+            allowed_roots=[self._output_root],
+            kind="image",
+            task_id=task_id,
+            task_desc=task_desc,
+            task_owner="draw" if task_id else "",
         )
 
     @staticmethod
     def _get_referenced_image_base64(event: AstrMessageEvent) -> str | None:
         """Extract base64 image from the current message or its reply target.
-        Handles base64://, file://, and raw file paths by converting to base64."""
+        Handles base64://, local files, and trusted QQ CDN URLs."""
         import base64 as _b64
 
+        trusted_temp = (Path(__file__).resolve().parents[2] / "temp").resolve()
+
+        def _encode_local_image(value: str) -> str | None:
+            try:
+                path = Path(value).resolve(strict=True)
+                path.relative_to(trusted_temp)
+                if path.stat().st_size > MAX_IMAGE_BYTES:
+                    return None
+                payload = path.read_bytes()
+                with PillowImage.open(io.BytesIO(payload)) as source:
+                    if source.width < 1 or source.height < 1:
+                        return None
+                    if source.width > MAX_IMAGE_EDGE * 2 or source.height > MAX_IMAGE_EDGE * 2:
+                        return None
+                    source.verify()
+                return _b64.b64encode(payload).decode("ascii")
+            except (OSError, ValueError):
+                return None
+
+        def _download_qq_image(url: str) -> str | None:
+            parsed = urlparse(str(url or "").strip())
+            if parsed.scheme != "https" or (parsed.hostname or "").lower() not in QQ_IMAGE_HOSTS:
+                return None
+            try:
+                response = requests.get(url, timeout=(10, 30))
+                response.raise_for_status()
+                payload = response.content
+                if not payload or len(payload) > MAX_IMAGE_BYTES:
+                    return None
+                with PillowImage.open(io.BytesIO(payload)) as source:
+                    if source.width < 1 or source.height < 1:
+                        return None
+                    if source.width > MAX_IMAGE_EDGE * 2 or source.height > MAX_IMAGE_EDGE * 2:
+                        return None
+                    source.verify()
+                return _b64.b64encode(payload).decode("ascii")
+            except Exception as exc:
+                logger.warning("[ProDraw] QQ reference image download failed: %s", type(exc).__name__)
+                return None
+
         def _extract_from_message(msg_obj) -> str | None:
-            message = getattr(msg_obj, "message", None) or []
+            if isinstance(msg_obj, (list, tuple)):
+                message = msg_obj
+            elif isinstance(msg_obj, dict):
+                raw = msg_obj.get("raw_message")
+                message = msg_obj.get("message") or msg_obj.get("message_chain")
+                if message is None and isinstance(raw, dict):
+                    message = raw.get("message")
+                message = message or []
+            else:
+                raw = getattr(msg_obj, "raw_message", None)
+                message = getattr(msg_obj, "message", None) or getattr(msg_obj, "message_chain", None)
+                if message is None and isinstance(raw, dict):
+                    message = raw.get("message")
+                message = message or []
             for seg in (message if isinstance(message, list) else [message]):
-                seg_type = str(getattr(seg, "type", "") or "")
+                seg_data = seg.get("data") if isinstance(seg, dict) else getattr(seg, "data", None)
+                if not isinstance(seg_data, dict):
+                    seg_data = {}
+                seg_type = str((seg.get("type") if isinstance(seg, dict) else getattr(seg, "type", "")) or "")
                 # Check Image component
                 if "image" in seg_type.lower() or "Image" in str(type(seg).__name__):
                     # Try file attribute first (NapCat passes file:// paths)
-                    file_path = getattr(seg, "file", "") or ""
+                    file_path = str(
+                        seg_data.get("file")
+                        or (getattr(seg, "file", "") if not isinstance(seg, dict) else "")
+                        or ""
+                    )
                     if file_path:
                         cleaned = file_path
                         if cleaned.startswith("file:///"):
-                            from urllib.parse import unquote
                             cleaned = unquote(cleaned[len("file://"):])
                             if cleaned.startswith("/") and len(cleaned) > 3 and cleaned[2] == ":":
                                 cleaned = cleaned[1:]  # /D:/... → D:/...
                         elif cleaned.startswith("file://"):
                             cleaned = cleaned[len("file://"):]
                         p = Path(cleaned)
-                        if p.is_file():
-                            return _b64.b64encode(p.read_bytes()).decode("ascii")
+                        encoded = _encode_local_image(str(p))
+                        if encoded:
+                            return encoded
                     # Try url attribute
-                    url = getattr(seg, "url", "") or ""
+                    url = str(
+                        seg_data.get("url")
+                        or seg_data.get("file")
+                        or (getattr(seg, "url", "") if not isinstance(seg, dict) else "")
+                        or ""
+                    )
                     if url.startswith("base64://"):
                         return url[len("base64://"):]
+                    downloaded = _download_qq_image(url)
+                    if downloaded:
+                        return downloaded
                 # Check segment data dictionaries
                 for field in ("data", "image_url", "image"):
-                    data = getattr(seg, field, None)
+                    data = seg.get(field) if isinstance(seg, dict) else getattr(seg, field, None)
                     if isinstance(data, dict):
                         url = str(data.get("url", "") or data.get("file", "") or "")
                         if url.startswith("base64://"):
                             return url[len("base64://"):]
                         if url.startswith("file://"):
-                            from urllib.parse import unquote
                             cleaned = unquote(url[len("file://"):])
                             if cleaned.startswith("/") and len(cleaned) > 3 and cleaned[2] == ":":
                                 cleaned = cleaned[1:]
                             p = Path(cleaned)
-                            if p.is_file():
-                                return _b64.b64encode(p.read_bytes()).decode("ascii")
+                            encoded = _encode_local_image(str(p))
+                            if encoded:
+                                return encoded
+                        downloaded = _download_qq_image(url)
+                        if downloaded:
+                            return downloaded
             return None
 
         # Check current message
+        get_messages = getattr(event, "get_messages", None)
+        if callable(get_messages):
+            result = _extract_from_message(get_messages())
+            if result:
+                return result
+        msg_chain = getattr(event, "message_chain", None)
+        if msg_chain is not None:
+            result = _extract_from_message(msg_chain)
+            if result:
+                return result
         msg_obj = getattr(event, "message_obj", None)
         if msg_obj is not None:
             result = _extract_from_message(msg_obj)
@@ -276,24 +431,75 @@ class DrawCommand(Star):
         if "【作图能力】" not in system_prompt:
             req.system_prompt = f"{system_prompt}\n\n{DRAW_MEMORY}".strip()
 
-    @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=940)
+    # Image edits own their explicit intent before generic vision/search plugins.
+    @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=986)
     async def on_message(self, event: AstrMessageEvent):
         text = self._message_text(event)
         sender_id = self._safe_sender_id(event)
 
-        # ── Image Editing ──────────────────────────────────────────
-        edit_prompt = parse_edit_command(text)
-        if edit_prompt is not None and self._is_allowed_context(event):
+        # ── Image Editing (image and intent may arrive in adjacent turns) ──
+        if self._is_allowed_context(event):
+            scope = self._edit_scope(event)
+            if _EDIT_CANCEL_RE.fullmatch(text.strip()) and any(
+                vars(self._edit_sessions.get(scope)).values()
+            ):
+                self._edit_sessions.clear(scope)
+                yield event.plain_result("这次图片处理已取消，临时图片也已清除。")
+                event.stop_event()
+                return
+
             ref_img = self._get_referenced_image_base64(event)
+            if ref_img:
+                try:
+                    self._edit_sessions.remember_image(scope, ref_img)
+                except (OSError, ValueError):
+                    ref_img = None
+
+            session = self._edit_sessions.get(scope)
+            edit_prompt = parse_edit_command(text)
+            edit_kind = None
+            if is_dewatermark_request(text):
+                edit_kind, edit_prompt = "dewatermark", _DEWATERMARK_PROMPT
+            elif edit_prompt is not None:
+                edit_kind = "edit"
+            elif session.intent_kind and _EDIT_CONFIRM_RE.fullmatch(text.strip()):
+                edit_kind = session.intent_kind
+                edit_prompt = session.intent_prompt or _DEWATERMARK_PROMPT
+            elif (
+                ref_img
+                and session.intent_kind
+                and text.strip() in {"", "[图片]", "图片", "这张"}
+            ):
+                edit_kind = session.intent_kind
+                edit_prompt = session.intent_prompt or _DEWATERMARK_PROMPT
+            elif ref_img and not edit_prompt and _SHORT_REMOVE.match(text.strip()):
+                # Image sent + short removal request ("帮我把这个弄掉") →
+                # default to dewatermark even if explicit keyword didn't match
+                edit_kind, edit_prompt = "dewatermark", _DEWATERMARK_PROMPT
+
+            if edit_kind:
+                self._edit_sessions.remember_intent(scope, edit_kind, edit_prompt or "")
+                session = self._edit_sessions.get(scope)
+                ref_img = ref_img or session.image_b64
+
+        else:
+            edit_kind = None
+            edit_prompt = None
+            ref_img = None
+            scope = ""
+
+        if edit_kind == "edit":
             if not ref_img:
-                return  # pass through to normal chat — no image to edit
+                yield event.plain_result("已记住修改要求。请把原图发来，或回复那张图；收到图片后才会开始处理。")
+                event.stop_event()
+                return
             group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
             in_pro_group = bool(group_id) and is_active_pro_group(group_id, self._pro_db_path)
             tier = get_tier(sender_id, self._pro_db_path)
             today = time.strftime("%Y%m%d")
             dk = f"{sender_id}:{today}"
             limit, key, used = self._draw_rate_limit(tier, sender_id, in_pro_group)
-            is_weekly = (tier >= Tier.X and tier < Tier.PRO and not in_pro_group)
+            is_weekly = tier >= Tier.X and tier < Tier.PRO and not in_pro_group
             if used >= limit:
                 msg = DRAW_WEEKLY_LIMIT_MSG if is_weekly else (
                     DRAW_ORDINARY_LIMIT_MSG if tier < Tier.X else DRAW_LIMIT_MSG
@@ -310,42 +516,57 @@ class DrawCommand(Star):
                 yield event.plain_result(f"作图冷却中，{retry_after} 秒后再试。")
                 event.stop_event()
                 return
+            task_id = uuid.uuid4().hex[:12]
+            task_desc = f"编辑图片：{edit_prompt[:140]}"
+            await mirror_runtime_task_status(
+                sender_id, task_id, task_desc, "in_progress", "edit_started", owner="draw"
+            )
             yield event.plain_result("正在编辑图片，预计 30–90 秒。")
+            edit_ok = False
             try:
                 async with self._generation_lock:
                     payload = await asyncio.to_thread(self._request_edit, ref_img, edit_prompt)
                     output_path = self._save_sanitized_image(payload)
+                edit_ok = True
             except Exception as exc:
                 logger.warning("[ProDraw] edit failed: %s", type(exc).__name__)
-                yield event.plain_result("图片编辑失败，请尝试换一种描述或更清晰的图片。")
-                event.stop_event()
-                return
-            self._daily_usage[key] = used + 1
-            delivery = await self._deliver_image(event, output_path)
-            if delivery.delivered:
-                event.set_extra("_pro_draw_output_paths", [str(output_path)])
-                yield event.plain_result(f"图片编辑任务已完成，文件已交付：{output_path.name}")
-            else:
-                self._daily_usage[key] = used
-                self._save_usage()
-                retry_note = (
-                    "已加入后台重试队列，稍后自动送达。"
-                    if delivery.channel == "queued"
-                    else "文件已安全保留，请稍后重试。"
+                await mirror_runtime_task_status(
+                    sender_id, task_id, task_desc, "failed", type(exc).__name__, owner="draw"
                 )
-                yield event.plain_result(
-                    f"图片已处理，但 QQ 文件尚未交付，任务未完成；{retry_note}本次额度不计。"
+                yield event.plain_result("图片编辑没成功，换个方式帮你。")
+            if edit_ok:
+                delivery = await self._deliver_image(
+                    event, output_path, task_id=task_id, task_desc=task_desc
                 )
+                if delivery.delivered:
+                    await mirror_runtime_task_status(
+                        sender_id, task_id, task_desc, "done", f"qq:{delivery.channel}", owner="draw"
+                    )
+                    self._edit_sessions.clear(scope)
+                    event.set_extra("_pro_draw_output_paths", [str(output_path)])
+                    yield event.plain_result(f"图片编辑任务已完成，文件已交付：{output_path.name}")
+                else:
+                    await mirror_runtime_task_status(
+                        sender_id, task_id, task_desc, "delivery_pending", delivery.channel, owner="draw"
+                    )
+                    self._edit_sessions.clear(scope)
+                    self._daily_usage[key] = used
+                    self._save_usage()
+                    retry_note = (
+                        "已加入后台重试队列，稍后自动送达。"
+                        if delivery.channel == "queued"
+                        else "文件已安全保留，请稍后重试。"
+                    )
+                    yield event.plain_result(
+                        f"图片已处理，但 QQ 文件尚未交付，任务未完成；{retry_note}本次额度不计。"
+                    )
             event.stop_event()
             return
 
         # ── Watermark Removal ──────────────────────────────────────
-        if is_dewatermark_request(text):
-            if not self._is_allowed_context(event):
-                return
-            ref_img = self._get_referenced_image_base64(event)
+        if edit_kind == "dewatermark":
             if not ref_img:
-                yield event.plain_result("需要原图才能处理：请回复那张图片，再说「去水印」或描述要抹掉的位置。")
+                yield event.plain_result("已记住去水印要求。请把原图发来，或回复那张图；收到图片后才会开始处理。")
                 event.stop_event()
                 return
             if self._generation_lock.locked():
@@ -357,20 +578,38 @@ class DrawCommand(Star):
                 yield event.plain_result(f"冷却中，{retry_after} 秒后再试。")
                 event.stop_event()
                 return
+            task_id = uuid.uuid4().hex[:12]
+            task_desc = "去除图片水印并交付新图片"
+            await mirror_runtime_task_status(
+                sender_id, task_id, task_desc, "in_progress", "dewatermark_started", owner="draw"
+            )
             yield event.plain_result("去水印任务已开始，预计 30–90 秒；QQ 文件成功交付后才会标记完成。")
             try:
                 async with self._generation_lock:
                     payload = await asyncio.to_thread(self._request_edit, ref_img, _DEWATERMARK_PROMPT)
                     output_path = self._save_sanitized_image(payload)
-            except Exception:
+            except Exception as exc:
                 logger.warning("[Draw] dewatermark failed")
-                yield event.plain_result("去水印失败，请尝试换一张更清晰的图片。")
-                event.stop_event()
-                return
-            delivery = await self._deliver_image(event, output_path)
+                await mirror_runtime_task_status(
+                    sender_id, task_id, task_desc, "failed", type(exc).__name__, owner="draw"
+                )
+                yield event.plain_result("去水印没成功，换个方式帮你。")
+                # fall through to Agent
+            delivery = await self._deliver_image(
+                event, output_path, task_id=task_id, task_desc=task_desc
+            )
             if delivery.delivered:
+                await mirror_runtime_task_status(
+                    sender_id, task_id, task_desc, "done", f"qq:{delivery.channel}", owner="draw"
+                )
+                self._edit_sessions.clear(scope)
+                event.set_extra("_pro_draw_output_paths", [str(output_path)])
                 yield event.plain_result(f"去水印任务已完成，文件已交付：{output_path.name}")
             else:
+                await mirror_runtime_task_status(
+                    sender_id, task_id, task_desc, "delivery_pending", delivery.channel, owner="draw"
+                )
+                self._edit_sessions.clear(scope)
                 retry_note = (
                     "已加入后台重试队列，稍后自动送达。"
                     if delivery.channel == "queued"
@@ -396,16 +635,12 @@ class DrawCommand(Star):
         tier = get_tier(sender_id, self._pro_db_path)
         # Tiered drawing limits: ORDINARY=1/day, X=6/week, PRO=10/day
         limit, key, used = self._draw_rate_limit(tier, sender_id, in_pro_group)
-        is_weekly = (tier >= Tier.X and tier < Tier.PRO and not in_pro_group)
+        is_weekly = tier >= Tier.X and tier < Tier.PRO and not in_pro_group
         if used >= limit:
             msg = DRAW_WEEKLY_LIMIT_MSG if is_weekly else (
                 DRAW_ORDINARY_LIMIT_MSG if tier < Tier.X else DRAW_LIMIT_MSG
             )
             yield event.plain_result(msg.format(used=used, limit=limit))
-            event.stop_event()
-            return
-        if self._generation_lock.locked():
-            yield event.plain_result("我正在画一张图，等这张发出后再试。")
             event.stop_event()
             return
         retry_after = self._rate_limiter.try_acquire(sender_id)
@@ -415,30 +650,88 @@ class DrawCommand(Star):
             return
 
         # X/PRO→Gemini 3 Pro Image (high-quality); ordinary→Gemini Flash
-        is_pro_quality = tier >= Tier.X or in_pro_group
+        is_pro_quality = tier >= Tier.X
         draw_model = PRO_IMAGE_MODEL if is_pro_quality else X_IMAGE_MODEL
 
-        prompt, aspect, n_images = parse_draw_options(prompt)
-        n_label = f" x{n_images}" if n_images > 1 else ""
-        quality_tag = "（Imagen 3）" if is_pro_quality else ""
-        yield event.plain_result(f"我开始画了{n_label}{quality_tag}，预计 30–120 秒。")
-        try:
-            async with self._generation_lock:
-                output_paths: list[Path] = []
-                for i in range(n_images):
-                    payload = await asyncio.to_thread(
-                        self._request_image, prompt, aspect, draw_model
-                    )
-                    path = self._save_sanitized_image(payload)
-                    output_paths.append(path)
-                output_path = output_paths[0]
-        except Exception as exc:
-            logger.warning("[ProDraw] generation failed: %s", type(exc).__name__)
-            yield event.plain_result("这次没能画出来，稍后再试。")
+        prompt, aspect, n_images, is_4k, style_prefix = parse_draw_options(prompt)
+
+        # P1: 4K — PRO exclusive, costs 3× quota
+        image_size = "2K"
+        if is_4k and (is_pro_quality or in_pro_group):
+            image_size = "4K"
+            n_images = 1  # 4K only single image
+        elif is_4k:
+            yield event.plain_result("4K 画质仅限 PRO 用户。已按 2K 生成。")
             event.stop_event()
             return
 
-        self._daily_usage[key] = used + 1
+        # P2: style preset
+        if style_prefix:
+            prompt = style_prefix + prompt
+
+        # P1: reference image — detect if this is a reply to an image
+        has_ref = False
+        ref_image_b64 = None
+        attachment_url = getattr(event, "get_attachment_url", lambda: None) or None
+        if callable(attachment_url) and attachment_url():
+            has_ref = True
+            try:
+                ref_resp = requests.get(attachment_url(), timeout=15)
+                ref_resp.raise_for_status()
+                ref_image_b64 = base64.b64encode(ref_resp.content).decode("ascii")
+            except Exception:
+                pass  # proceed without reference if download fails
+
+        # P2: parallel batch generation (no global lock)
+        task_id = uuid.uuid4().hex[:12]
+        task_desc = f"生成图片：{prompt[:140]}"
+        await mirror_runtime_task_status(
+            sender_id, task_id, task_desc, "in_progress", "draw_started", owner="draw"
+        )
+        n_label = f" x{n_images}" if n_images > 1 else ""
+        k4_label = " 4K" if is_4k else ""
+        ref_label = " (参考图)" if has_ref else ""
+        style_label = f" ({style_prefix.split('—')[0].strip()})" if style_prefix else ""
+        quality_tag = "（Imagen 3）" if is_pro_quality else ""
+        yield event.plain_result(f"我开始画了{n_label}{k4_label}{ref_label}{style_label}{quality_tag}，预计 30–120 秒。")
+
+        try:
+            # P2: parallel batch — generate all images concurrently
+            async def _gen_one(prompt_text: str, aspect_ratio: str, model: str, isz: str):
+                if not ref_image_b64:
+                    return await asyncio.to_thread(
+                        self._request_image, prompt_text, aspect_ratio, model, isz
+                    )
+                body = {
+                    "prompt": prompt_text,
+                    "model": model,
+                    "size": f"{aspect_ratio.replace(':','x')}",
+                    "image_size": isz,
+                    "reference_image": ref_image_b64,
+                }
+                return await asyncio.to_thread(self._request_image_raw, body)
+
+            tasks = [_gen_one(prompt, aspect, draw_model, image_size) for _ in range(n_images)]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            output_paths: list[Path] = []
+            for r in results:
+                if isinstance(r, Exception):
+                    raise r
+                output_paths.append(self._save_sanitized_image(r))
+            output_path = output_paths[0]
+        except Exception as exc:
+            logger.warning("[ProDraw] generation failed: %s", type(exc).__name__)
+            await mirror_runtime_task_status(
+                sender_id, task_id, task_desc, "failed", type(exc).__name__, owner="draw"
+            )
+            yield event.plain_result("画图没成功，我换个方式帮你。")
+            # ponytail: don't stop the event — let Agent pick it up as fallback
+            return
+
+        # 4K costs 3× normal quota
+        draw_cost = 3 if is_4k else 1
+        self._daily_usage[key] = used + draw_cost
         self._save_usage()
         # Deliver all images
         delivered_count = 0
@@ -446,7 +739,9 @@ class DrawCommand(Star):
         delivered_paths: list[str] = []
         queued = False
         for idx, path in enumerate(output_paths):
-            delivery = await self._deliver_image(event, path)
+            delivery = await self._deliver_image(
+                event, path, task_id=task_id, task_desc=task_desc
+            )
             if delivery.delivered:
                 delivered_count += 1
                 last_ok_channel = delivery.channel
@@ -454,6 +749,14 @@ class DrawCommand(Star):
             elif delivery.channel == "queued":
                 queued = True
         if delivered_count == n_images:
+            await mirror_runtime_task_status(
+                sender_id,
+                task_id,
+                task_desc,
+                "done",
+                f"qq_delivery_confirmed:{delivered_count}",
+                owner="draw",
+            )
             # Only files proved delivered may be cleaned after AstrBot sends
             # the confirmation.  Queued/retained artifacts must remain for a
             # later QQ retry or recovery.
@@ -468,6 +771,14 @@ class DrawCommand(Star):
             label = f"{delivered_count} 张图片已生成" if n_images > 1 else "图片已生成"
             yield event.plain_result(f"作图任务已完成，{label}，{suffix}")
         elif delivered_count > 0:
+            await mirror_runtime_task_status(
+                sender_id,
+                task_id,
+                task_desc,
+                "delivery_pending",
+                f"qq_partial:{delivered_count}/{n_images}",
+                owner="draw",
+            )
             self._daily_usage[key] = used
             self._save_usage()
             retry_note = "已加入后台重试队列，稍后自动送达。" if queued else "文件已安全保留，请稍后重试。"
@@ -475,6 +786,14 @@ class DrawCommand(Star):
                 f"已交付 {delivered_count}/{n_images} 张图片，剩余文件尚未交付，任务未完成；{retry_note}本次额度不计。"
             )
         else:
+            await mirror_runtime_task_status(
+                sender_id,
+                task_id,
+                task_desc,
+                "delivery_pending",
+                "qq_delivery_unconfirmed",
+                owner="draw",
+            )
             self._daily_usage[key] = used
             self._save_usage()
             retry_note = "已加入后台重试队列，稍后自动送达。" if queued else "文件已安全保留，请稍后重试。"

@@ -46,6 +46,8 @@ CONSO_COOLDOWN = 600             # 合并冷却 10 分钟
 RANK_TIMEOUT = 3.0               # Gemini 排序超时秒数
 RANK_CACHE_TTL = 30              # 排序结果缓存秒数
 MAX_GROUP_ALIASES = 100          # 同一群最多保存的本人公开称呼数
+FIRESTORE_RETRY_INTERVAL = 60    # Firestore 连接失败后重试间隔秒数
+FIRESTORE_CONNECT_TIMEOUT = 8    # Firestore 首次连接超时秒数
 
 # 注入记忆时附在后面的安全指令
 MEMORY_SAFETY_NOTE = (
@@ -96,6 +98,14 @@ _OPERATIONAL_REQUEST = re.compile(
     r"^\s*(?:小柠[，,：:\s]*)?"
     r"(?:帮我|请你|麻烦你|请|帮忙|生成|创建|制作|导出|写|做|查|搜索|"
     r"翻译|画|下载|整理|总结|分析|部署|运行)",
+    re.I,
+)
+_TASK_TRACK_REQUEST = re.compile(
+    r"(?:帮我|请你|麻烦你)?(?:追踪|跟进|盯着|持续关注|记个任务|下次帮我|过几天帮我)"
+    r"|(?:帮我|请你|麻烦你|生成|创建|制作|导出|写|做|整理|分析).{0,30}"
+    r"(?:报告|文档|文件|表格|ppt|word|pdf|网页|网站|项目|数据集)"
+    r"|(?:任务|文件|报告|结果|进度).{0,6}(?:怎么样|完成|好了|发了|发到|送到|交付|进度|状态)"
+    r"|(?:刚才|刚刚|上次|之前|那个).{0,4}(?:任务|文件|报告)",
     re.I,
 )
 
@@ -178,13 +188,33 @@ class XiaoningMemory(Star):
         super().__init__(context)
         self.config = config or {}
         self._db = None
+        self._db_error_at: float = 0
         self._last_extract: dict[str, float] = {}
+        self._last_task_extract: dict[str, float] = {}
+        # ponytail: in-memory recent-context ring buffer so ALL users get basic
+        # conversation continuity even when Firestore is unreachable.
+        self._recent_context: dict[str, list[tuple[float, str]]] = {}
+        self._recent_context_max = 6  # per user, oldest evicted
         data_dir = Path(StarTools.get_data_dir("xiaoning_memory"))
         data_dir.mkdir(parents=True, exist_ok=True)
         self._pro_db = (
             Path(__file__).resolve().parents[2]
             / "plugin_data" / "xiaoning_pro" / "pro_members.db"
         )
+
+    def _ensure_recent_context(self) -> None:
+        if not hasattr(self, "_recent_context"):
+            self._recent_context = {}
+        if not hasattr(self, "_recent_context_max"):
+            self._recent_context_max = 6
+
+    @staticmethod
+    def _recent_context_scope(event: AstrMessageEvent, sender: str) -> str:
+        origin = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if origin:
+            return origin
+        group_id = str(getattr(event, "get_group_id", lambda: "")() or "").strip()
+        return f"group:{group_id}:{sender}" if group_id else f"private:{sender}"
 
     # ── Firestore backend ─────────────────────────────────────────
 
@@ -193,14 +223,23 @@ class XiaoningMemory(Star):
         if self._db is not None:
             return self._db
         if firestore is None:
-            logger.warning("[小柠记忆] google-cloud-firestore 未安装")
+            return None
+        # ponytail: don't hammer Firestore on every message; back off between retries.
+        # Create client only (fast, no I/O); actual operations handle their own timeouts.
+        now = time.time()
+        last_error = getattr(self, "_db_error_at", 0)
+        if last_error and (now - last_error) < FIRESTORE_RETRY_INTERVAL:
             return None
         try:
             self._db = firestore.Client(
-                project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE
+                project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE,
             )
+            logger.info("[小柠记忆] Firestore 客户端已创建")
+            self._db_error_at = 0
         except Exception as e:
-            logger.error(f"[小柠记忆] Firestore ADC 连接失败: {e}")
+            self._db = None
+            self._db_error_at = now
+            logger.error(f"[小柠记忆] Firestore 客户端创建失败 ({FIRESTORE_RETRY_INTERVAL}s 后重试): {type(e).__name__}")
             return None
         return self._db
 
@@ -356,17 +395,33 @@ class XiaoningMemory(Star):
             logger.warning("[小柠记忆] Firestore 不可用，记忆功能已降级")
         else:
             logger.info("[小柠记忆] Firestore 后端已就绪 (qqbot) | 安全: 按QQ隔离+敏感过滤")
+            # Replay any local fallback task events that accumulated during Firestore outage.
+            try:
+                await asyncio.to_thread(self._replay_local_task_events)
+            except Exception:
+                logger.debug("[小柠记忆] local fallback replay skipped")
 
     # ── message listener ──────────────────────────────────────────
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=900)
     async def on_message(self, event: AstrMessageEvent):
-        if not self.db:
-            return
         sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
         if not self._valid_qq(sender):
             return
         text = str(getattr(event, "get_message_str", lambda: "")() or "").strip()
+
+        # ── in-memory recent context for ALL users (no Firestore dependency) ──
+        self._ensure_recent_context()
+        if text and not _COMMAND_LIKE.match(text):
+            ctx_key = self._recent_context_scope(event, sender)
+            ctx_list = self._recent_context.setdefault(ctx_key, [])
+            now_ts = time.time()
+            ctx_list.append((now_ts, text[:200]))
+            if len(ctx_list) > self._recent_context_max:
+                ctx_list[:] = ctx_list[-self._recent_context_max:]
+
+        if not self.db:
+            return
 
         # All users may publish their own group nickname, but only when they
         # explicitly address the bot. It is a same-group alias, never a private
@@ -386,6 +441,18 @@ class XiaoningMemory(Star):
                 return
         except Exception:
             return
+
+        # Operational jobs are not personal facts, but explicit follow-ups and
+        # artifact work belong in the separate cross-conversation task ledger.
+        now = time.time()
+        if (
+            len(text) >= 6
+            and _TASK_TRACK_REQUEST.search(text)
+            and now - self._last_task_extract.get(sender, 0) >= TASK_COOLDOWN
+        ):
+            self._last_task_extract[sender] = now
+            asyncio.create_task(self._task_extract_and_store(sender, text))
+
         if len(text) < MIN_MESSAGE_LENGTH:
             return
         if _COMMAND_LIKE.match(text) or _OPERATIONAL_REQUEST.match(text):
@@ -489,21 +556,40 @@ class XiaoningMemory(Star):
 
     @filter.on_llm_request(priority=-10)
     async def inject_memories(self, event: AstrMessageEvent, req) -> None:
-        if not self.db:
-            return
         sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
         current_text = str(getattr(event, "get_message_str", lambda: "")() or "").strip()
         blocks: list[str] = []
         tier = Tier.ORDINARY
+        db_available = self.db is not None  # may trigger reconnection
+
+        # ── in-memory recent context: ALL users, no Firestore dependency ──
+        # Only inject messages from the last 2 hours — stale context causes confusion.
+        self._ensure_recent_context()
+        if current_text:
+            ctx_key = self._recent_context_scope(event, sender)
+            ctx_list = self._recent_context.get(ctx_key, [])
+            now_ts = time.time()
+            RECENT_WINDOW = 2 * 3600  # 2 hours
+            recent = [
+                c[1] for c in ctx_list[-6:]
+                if c[1] != current_text[:200]
+                and (now_ts - c[0]) < RECENT_WINDOW
+            ]
+            if recent:
+                blocks.append(
+                    "【最近对话上下文】该用户最近 2 小时内发送的消息（仅供参考话题连续性，"
+                    "不要逐条复述或追问已解决的事）：\n"
+                    + "\n".join(f"- {r[:120]}" for r in recent)
+                )
 
         # Private personal memories stay strictly tied to the current sender
         # and remain an X/Pro capability.
         memories: list[dict] = []
-        if self._valid_qq(sender):
+        if db_available and self._valid_qq(sender):
             try:
                 tier = get_tier(sender, self._pro_db)
                 if tier >= Tier.X:
-                    memories = self._get_memories(sender)
+                    memories = await asyncio.to_thread(self._get_memories, sender)
             except Exception:
                 memories = []
         if memories:
@@ -525,12 +611,13 @@ class XiaoningMemory(Star):
         # only by the named person, stays in this group, and is injected only
         # when this message literally mentions it. This works for ordinary
         # users without granting access to anyone's private memory.
-        if not event.is_private_chat() and current_text:
+        if db_available and not event.is_private_chat() and current_text:
             group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
             if self._valid_group_id(group_id):
                 try:
                     aliases = _mentioned_group_aliases(
-                        current_text, self._get_group_aliases(group_id)
+                        current_text,
+                        await asyncio.to_thread(self._get_group_aliases, group_id),
                     )
                 except Exception:
                     aliases = []
@@ -541,16 +628,9 @@ class XiaoningMemory(Star):
                         + "\n这些称呼只用于确认当前群里正在提到谁；不得补充、猜测或透露任何人的私有信息。"
                     )
 
-        if not blocks:
-            return
         marker = "【小柠记忆】"
-        memory_block = (
-            f"\n\n{marker}\n"
-            + "\n\n".join(blocks)
-            + f"\n{MEMORY_SAFETY_NOTE}"
-        )
         sp = str(getattr(req, "system_prompt", "") or "")
-        if marker in sp:
+        if blocks and marker in sp:
             end_marker = MEMORY_SAFETY_NOTE.strip()
             idx = sp.find(marker)
             end_idx = sp.find(end_marker, idx)
@@ -559,17 +639,59 @@ class XiaoningMemory(Star):
             else:
                 sp = sp[:idx]
             sp = sp.strip()
-        req.system_prompt = (sp + memory_block).strip()
+        if blocks:
+            memory_block = (
+                f"\n\n{marker}\n"
+                + "\n\n".join(blocks)
+                + f"\n{MEMORY_SAFETY_NOTE}"
+            )
+            req.system_prompt = (sp + memory_block).strip()
 
-        # 进行中的跨对话任务仍只属于当前 X/Pro 用户。
-        if tier >= Tier.X and self._valid_qq(sender):
-            try:
-                tasks = await asyncio.to_thread(self._get_active_tasks, sender)
-            except Exception:
-                tasks = []
-            if tasks:
-                task_block = self._build_task_block(tasks)
-                req.system_prompt = (req.system_prompt + task_block).strip()
+        # Task context — only inject when user asks about tasks/progress/files
+        if db_available and tier >= Tier.X and self._valid_qq(sender):
+            task_relevant = bool(_TASK_TRACK_REQUEST.search(current_text) if current_text else False)
+            if task_relevant:
+                try:
+                    tasks = await asyncio.to_thread(self._get_active_tasks, sender)
+                except Exception:
+                    tasks = []
+                if tasks:
+                    task_block = self._build_task_block(tasks)
+                    sp = str(getattr(req, "system_prompt", "") or "")
+                    req.system_prompt = (sp + task_block).strip()
+
+    async def build_proactive_memory_block(
+        self, sender: str, context_hint: str
+    ) -> str:
+        """Return only relevant X/Pro private memory for one autonomous message."""
+        sender = str(sender or "").strip()
+        hint = str(context_hint or "").strip()
+        if not hint or not self._valid_qq(sender) or not self.db:
+            return ""
+        try:
+            if get_tier(sender, self._pro_db) < Tier.X:
+                return ""
+            memories = await asyncio.to_thread(self._get_memories, sender)
+            ranked = await asyncio.to_thread(
+                self._gemini_rank_memories, memories, hint, sender
+            )
+        except Exception:
+            return ""
+        ranked = [item for item in ranked if item.get("_score", 0) > 0][
+            :MAX_INJECT_MEMORIES
+        ]
+        if not ranked:
+            return ""
+        lines = [
+            f"- [{item.get('category', 'other')}] "
+            f"{item.get('key', '?')}: {item.get('value', '?')}"
+            for item in ranked
+        ]
+        return (
+            "【小柠记忆】\n关于当前私聊对象的相关记忆（仅在当前话题自然相关时使用）：\n"
+            + "\n".join(lines)
+            + f"\n{MEMORY_SAFETY_NOTE}"
+        )
 
     # ── Gemini 语义相关性排序（替换关键词匹配）───────────────
     # 缓存：同一用户 30 秒内不重复调用 Gemini
@@ -579,9 +701,10 @@ class XiaoningMemory(Star):
         """Use Gemini to semantically rank memories by relevance to query.
         Falls back to keyword overlap on any failure."""
         if len(memories) <= MAX_INJECT_MEMORIES:
-            for m in memories:
-                m["_score"] = 1
-            return memories
+            # Still do keyword-based relevance check — don't inject ALL memories
+            # just because there are few of them.
+            self._rank_by_keywords(memories, query)
+            return [m for m in memories if m.get("_score", 0) > 0]
 
         # 缓存检查
         now = time.time()
@@ -641,16 +764,28 @@ class XiaoningMemory(Star):
 
     @staticmethod
     def _rank_by_keywords(memories: list[dict], query: str) -> list[dict]:
-        """Keyword-based fallback ranking."""
+        """Keyword-based ranking with minimum relevance threshold.
+        Requires either 2+ token overlap or an exact key-substring match."""
         query_lower = query.lower()
-        query_tokens = set(query_lower.split())
+        # Filter out common Chinese stop-words that cause false matches
+        stop_words = {'的','了','我','你','是','在','不','有','和','就','都','也','他','她','它','们','这','那','什么','怎么','为什么','一个','一下','一点','吗','呢','吧','啊','哦','嗯','好','很','还','要','会','能','可以','这个','那个'}
+        query_tokens = set(query_lower.split()) - stop_words
+        if not query_tokens:
+            # Query was all stop-words — don't inject any memories
+            for m in memories:
+                m["_score"] = 0
+            return []
         for m in memories:
             key = str(m.get("key", "")).lower()
             value = str(m.get("value", "")).lower()
-            mem_tokens = set(f"{key} {value}".split())
+            mem_tokens = set(f"{key} {value}".split()) - stop_words
             overlap = len(query_tokens & mem_tokens)
-            bonus = 2 if key and key in query_lower else 0
-            m["_score"] = overlap + bonus
+            # Require at least 2 content-word overlap OR exact key match
+            key_match = key and (key in query_lower or any(t in key for t in query_tokens if len(t) >= 2))
+            if overlap >= 2 or key_match:
+                m["_score"] = max(1, overlap + (2 if key_match else 0))
+            else:
+                m["_score"] = 0
         scored = [m for m in memories if m["_score"] > 0]
         scored.sort(key=lambda m: (-m["_score"], -float(m.get("importance", 0.5))))
         return scored
@@ -855,7 +990,9 @@ class XiaoningMemory(Star):
         if not self._valid_qq(qq_id) or not self.db:
             return []
         try:
-            docs = self._tasks_ref(qq_id).where("status", "in", ["pending", "in_progress"]).stream()
+            docs = self._tasks_ref(qq_id).where(
+                "status", "in", ["pending", "in_progress", "delivery_pending"]
+            ).stream()
             tasks = [{**doc.to_dict(), "doc_id": doc.id} for doc in docs]
             # Also include 3 most recent "done" tasks so the bot remembers
             # what it just completed (context continuity).
@@ -886,7 +1023,10 @@ class XiaoningMemory(Star):
         if active:
             lines.append("【进行中的任务】仅当用户当前消息明确询问进度、要求继续该任务，或清楚引用其中一项时，才可使用这些记录回答。绝不在无关对话中主动汇报、催促、建议下一步或祝贺；不得把旧任务当作当前任务。任务完成只能以实际 QQ 文件交付成功为准。")
             for t in active[-8:]:
-                status_emoji = {"pending": "⏳", "in_progress": "🔄", "done": "✅"}
+                status_emoji = {
+                    "pending": "⏳", "in_progress": "🔄",
+                    "delivery_pending": "📦", "done": "✅",
+                }
                 emoji = status_emoji.get(t.get("status", ""), "📌")
                 title = str(t.get("title", "?"))[:40]
                 desc = str(t.get("description", ""))[:100]
@@ -915,6 +1055,8 @@ class XiaoningMemory(Star):
                 title = str(fact.get("title", "")).strip()[:60]
                 description = str(fact.get("description", "")).strip()[:200]
                 status = str(fact.get("status", "pending")).strip()
+                if status not in {"pending", "in_progress"}:
+                    status = "pending"
 
                 if not title or action in ("none", "complete"):
                     continue  # complete is disabled — only via /任务 完成 or Agent delivery
@@ -936,6 +1078,22 @@ class XiaoningMemory(Star):
                 elif action == "create":
                     # Check limit
                     active = self._get_active_tasks(qq_id)
+                    duplicate = next(
+                        (
+                            item for item in active
+                            if not item.get("_recently_completed")
+                            and str(item.get("title", "")).strip().casefold()[:30]
+                            == title.casefold()[:30]
+                        ),
+                        None,
+                    )
+                    if duplicate:
+                        self._tasks_ref(qq_id).document(duplicate["doc_id"]).update({
+                            "description": description,
+                            "status": status,
+                            "updated_at": now_utc,
+                        })
+                        continue
                     if len(active) >= MAX_TASKS_PER_USER:
                         # Delete oldest completed task
                         try:
@@ -1062,7 +1220,10 @@ class XiaoningMemory(Star):
             if tasks:
                 lines.append(f"【进行中的任务 · {len(tasks)} 个】")
                 for t in tasks[-15:]:
-                    status_map = {"pending": "⏳", "in_progress": "🔄"}
+                    status_map = {
+                        "pending": "⏳", "in_progress": "🔄",
+                        "delivery_pending": "📦",
+                    }
                     emoji = status_map.get(t.get("status", ""), "📌")
                     title = str(t.get("title", "?"))[:50]
                     desc = str(t.get("description", ""))[:100]
@@ -1114,6 +1275,48 @@ class XiaoningMemory(Star):
         except Exception as e:
             logger.debug("[小柠任务] track_agent_task失败: %s", e)
 
+    # ── local fallback replay ─────────────────────────────────────
+
+    def _replay_local_task_events(self) -> None:
+        """Replay task events that were stored locally while Firestore was down."""
+        if not self.db:
+            return
+        try:
+            from data.plugins.claude_code_agent.job_store import JobStore
+        except ImportError:
+            try:
+                from claude_code_agent.job_store import JobStore
+            except ImportError:
+                return
+        try:
+            workspace = Path(__file__).resolve().parents[3] / "claude_workspace"
+            store = JobStore(workspace / "state" / "jobs.db")
+        except Exception:
+            return
+        events = store.pending_task_events(limit=50)
+        if not events:
+            return
+        replayed: list[int] = []
+        for ev in events:
+            sender = str(ev.get("sender_id", "")).strip()
+            if not sender:
+                continue
+            try:
+                track_runtime_task_status(
+                    sender,
+                    str(ev.get("job_id", "")),
+                    "",
+                    str(ev.get("status", "in_progress")),
+                    str(ev.get("evidence", "")),
+                    owner="agent",
+                )
+                replayed.append(int(ev["id"]))
+            except Exception:
+                pass
+        if replayed:
+            store.mark_task_events_replayed(replayed)
+            logger.info("[小柠记忆] 从本地回放 %d 条任务事件", len(replayed))
+
     # ── helpers ───────────────────────────────────────────────────
 
     @staticmethod
@@ -1129,37 +1332,108 @@ class XiaoningMemory(Star):
 
 # ── 模块级便捷函数：Agent完成时调用 ──────────────────────────
 
-def track_agent_task_complete(qq_id: str, task_desc: str, status: str = "done"):
-    """claude_code_agent 在文件交付成功后调用，标记任务完成。
+# ponytail: cached Firestore client so track_runtime_task_status doesn't create
+# a new connection on every call. Backoff guard prevents hammering Firestore when
+# it's persistently unreachable.
+_track_db: FirestoreClient | None = None
+_track_db_error_at: float = 0
+_track_db_retry_interval = 60
 
-    直接写 Firestore，不依赖 XiaoningMemory 实例。"""
+
+def _get_track_db() -> FirestoreClient | None:
+    global _track_db, _track_db_error_at
+    if _track_db is not None:
+        return _track_db
+    if firestore is None:
+        return None
+    now = time.time()
+    if _track_db_error_at and (now - _track_db_error_at) < _track_db_retry_interval:
+        return None
+    try:
+        _track_db = firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
+        _track_db_error_at = 0
+    except Exception:
+        _track_db = None
+        _track_db_error_at = now
+        return None
+    return _track_db
+
+
+def track_runtime_task_status(
+    qq_id: str,
+    task_id: str,
+    task_desc: str,
+    status: str = "in_progress",
+    evidence: str = "",
+    owner: str = "runtime",
+):
+    """Mirror one real runtime task into the per-user cross-dialog ledger.
+
+    The owning plugin remains authoritative.  Callers must supply evidence for
+    ``done``; a stable owner/task document id prevents duplicate tasks.
+    """
     import re as _re
     if not _re.match(r"^[1-9]\d{4,11}$", str(qq_id or "")):
         return
-    if firestore is None:
+    safe_task_id = _re.sub(r"[^a-zA-Z0-9_-]", "", str(task_id or ""))[:64]
+    safe_owner = _re.sub(r"[^a-zA-Z0-9_-]", "", str(owner or "runtime").lower())[:24]
+    if not safe_task_id or not safe_owner:
+        return
+    status = str(status or "").strip().lower()
+    if status not in {"pending", "in_progress", "delivery_pending", "done", "failed"}:
+        return
+    if status == "done" and not str(evidence or "").strip():
+        return
+    db = _get_track_db()
+    if db is None:
         return
     try:
-        db = firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
+        pro_db = (
+            Path(__file__).resolve().parents[2]
+            / "plugin_data" / "xiaoning_pro" / "pro_members.db"
+        )
+        if get_tier(str(qq_id), pro_db) < Tier.X:
+            return
         now_utc = datetime.now(timezone.utc)
         title = str(task_desc or "")[:60].strip()
         tasks_ref = db.collection("users").document(qq_id).collection("tasks")
-        # Check if similar task exists
-        existing = list(
-            tasks_ref.where("status", "in", ["pending", "in_progress"]).stream()
-        )
-        match = [t for t in existing if str(t.to_dict().get("title", "")).strip()[:30] == title[:30]]
-        if match:
-            match[0].reference.update({"status": status, "updated_at": now_utc})
-            logger.info("[小柠任务] Agent完成: %s → %s", qq_id, status)
-        else:
-            doc_ref = tasks_ref.document()
-            doc_ref.set({
-                "title": title,
-                "description": task_desc[:200],
-                "status": status,
-                "created_at": now_utc,
-                "updated_at": now_utc,
-            })
-            logger.info("[小柠任务] Agent创建+完成: %s → %s", qq_id, status)
+        doc_ref = tasks_ref.document(f"{safe_owner}-{safe_task_id}")
+        existing = doc_ref.get()
+        data = {
+            "title": title or "执行任务",
+            "description": str(task_desc or "")[:200],
+            "status": status,
+            "task_id": safe_task_id,
+            "task_owner": safe_owner,
+            "evidence": str(evidence or "")[:200],
+            "updated_at": now_utc,
+        }
+        if safe_owner == "agent":
+            data["agent_job_id"] = safe_task_id
+        if not existing.exists:
+            data["created_at"] = now_utc
+        doc_ref.set(data, merge=True)
+        logger.info("[小柠任务] %s/%s: %s → %s", safe_owner, safe_task_id, qq_id, status)
     except Exception:
         pass  # 不影响Agent主流程
+
+
+def track_agent_job_status(
+    qq_id: str,
+    job_id: str,
+    task_desc: str,
+    status: str = "in_progress",
+    evidence: str = "",
+):
+    """Compatibility wrapper for the authoritative Agent job store."""
+    track_runtime_task_status(
+        qq_id, job_id, task_desc, status, evidence, owner="agent"
+    )
+
+
+def track_agent_task_complete(qq_id: str, task_desc: str, status: str = "done"):
+    """Backward-compatible wrapper for older callers without a job id."""
+    import hashlib as _hashlib
+    job_id = _hashlib.sha256(str(task_desc or "").encode("utf-8")).hexdigest()[:12]
+    evidence = "legacy_agent_complete" if str(status or "").lower() == "done" else ""
+    track_agent_job_status(qq_id, job_id, task_desc, status, evidence)

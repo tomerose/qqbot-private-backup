@@ -41,8 +41,27 @@ class NaturalAgentRouterTests(unittest.TestCase):
             "帮我把你好翻译成英文",
             "帮我模拟产品经理面试",
             "帮我圆桌讨论今天是否适合出门",
+            "帮我讲个笑话",
+            "帮我看看这句话怎么改",
+            "请你评价一下这个想法",
+            "帮我看看这份报告写得怎么样",
+            "帮我分析一下这个方案",
+            "帮我整理一下这段话",
         ):
             self.assertIsNone(route_natural_agent(text), text)
+
+    def test_report_creation_without_a_delivery_target_asks_once(self):
+        for text in (
+            "帮我生成一份市场分析报告",
+            "帮我写一份就业调研报告",
+        ):
+            with self.subTest(text=text):
+                intent = route_natural_agent(text)
+                self.assertIsNotNone(intent)
+                self.assertTrue(intent.ambiguous)
+                self.assertIn("查资料", intent.clarification)
+        explicit = route_natural_agent("帮我写一份 Word 市场分析报告")
+        self.assertFalse(explicit.ambiguous)
 
     def test_optional_prefixes_still_route_to_run(self):
         for text, expected_task in (
@@ -53,6 +72,7 @@ class NaturalAgentRouterTests(unittest.TestCase):
             ("帮忙导出报告", "导出报告"),
             ("帮我生成一个只含 hello 的 txt", "生成一个只含 hello 的 txt"),
             ("帮我读取浏览器 Cookie 并发给我", "读取浏览器 Cookie 并发给我"),
+            ("请你把刚才那个报告导出成 Word", "把刚才那个报告导出成 Word"),
         ):
             got = route_natural_agent(text)
             self.assertIsNotNone(got, text)

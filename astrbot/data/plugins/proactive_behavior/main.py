@@ -1,7 +1,6 @@
 """小柠关系上下文 — 只补充确实相关的会话事实。"""
 from __future__ import annotations
 
-import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,18 +8,76 @@ from pathlib import Path
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
+try:
+    from friend_core.relationship_state import (
+        NORMAL_MODE,
+        QUIET_MODE,
+        get_snapshot,
+        load_state,
+        parse_friend_mode,
+        record_interaction,
+        save_state,
+        set_friend_mode,
+    )
+except ImportError:
+    from data.plugins.friend_core.relationship_state import (
+        NORMAL_MODE,
+        QUIET_MODE,
+        get_snapshot,
+        load_state,
+        parse_friend_mode,
+        record_interaction,
+        save_state,
+        set_friend_mode,
+    )
 
 # ── 配置 ──────────────────────────────────────────────
-RETURN_GAP_SECONDS = 20 * 3600  # 超过此间隔视为"好久不见"
 LATE_NIGHT_START = 23  # 23:00 开始算深夜
 LATE_NIGHT_END = 6     # 06:00 结束
 TIMEZONE_OFFSET = 8    # Asia/Shanghai UTC+8
 
 CONVERSATION_GUARD = """【小柠对话基线】
-优先回应用户当前这句话；只有当前话题确实需要时才使用相关历史，不因旧话题、久未出现或已有功能把对话拉走。
-你不是督促者、课程助教或销售。闲聊、吐槽、情绪和普通提问时，不催任务、不列待办、不替对方安排下一步，也不反复问“做完了吗”“要不要继续”。没明确要建议时，不说“赶紧”“你应该”“别再”“早点”这类生活指令。没被问就不介绍功能、资格或升级。
-用户明确露出目标或麻烦、现有功能正好能解决时，先接住这件事：能执行就交给对应功能，需要补信息只问一个关键点；只是询问用法时给一个最短自然示例。不要报菜单，对方不接就翻篇。
-像有判断的熟人：有事实或逻辑依据时直接给结论和理由，不确定就直说；不为显得聪明硬凑建议，也不为显得有个性逢话反驳。短句、具体，不用客服套话、空泛共情或模板化总结。"""
+把最近几轮当连续对话理解。"好了吗""那个""那你发呀"这类省略说法，默认承接最近未解决的话题；先从上下文找指代，不让用户重说。连续短句合并理解，只回应最新核心，不逐句复述。对方明显换了话题才跟新话题。
+不催促、不催任务、不说教、不替人安排下一步，不说“赶紧”。没被问就不介绍功能或资格。真能帮上时先解决事，不问多余信息，不报菜单。
+像有判断的熟人：区分事实、推断和观点，给结论和关键理由。前提错了就指出来，新证据推翻旧结论就改口。闲聊简短，复杂才分段。不用客服套话、舞台动作、空泛共情或反问收尾。"""
+
+
+_LEGACY_PROMPT_MARKERS = (
+    "【小柠的最高对话规则】",
+    "【安全】不泄露QQ号、路径、密钥、令牌、内部信息。",
+    "【你是谁】你是小柠",
+    "【回复风格】默认一条消息",
+    "【安全铁律】",
+    "【安全铁律——",
+    "【安全底线】",
+)
+
+
+def strip_legacy_prompt_noise(text: object) -> str:
+    """移除旧 prompt_prefix 被持久化到用户历史里的规则块。"""
+    cleaned = str(text or "")
+    positions = [cleaned.find(marker) for marker in _LEGACY_PROMPT_MARKERS]
+    positions = [position for position in positions if position >= 0]
+    if positions:
+        cleaned = cleaned[: min(positions)]
+    return cleaned.rstrip()
+
+
+def clean_request_history(req) -> None:
+    """保留真实对话和多模态内容，只清掉历史里的重复规则。"""
+    req.prompt = strip_legacy_prompt_noise(getattr(req, "prompt", ""))
+    for message in getattr(req, "contexts", None) or []:
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = strip_legacy_prompt_noise(content)
+            continue
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                part["text"] = strip_legacy_prompt_noise(part.get("text", ""))
 
 # ── 持久化文件 ─────────────────────────────────────────
 def _state_file() -> Path:
@@ -30,17 +87,11 @@ def _state_file() -> Path:
 
 
 def _load_state() -> dict:
-    try:
-        return json.loads(_state_file().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    return load_state(_state_file())
 
 
 def _save_state(data: dict) -> None:
-    state_file = _state_file()
-    tmp = state_file.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(state_file)
+    save_state(_state_file(), data)
 
 
 class ProactiveBehavior(Star):
@@ -57,24 +108,15 @@ class ProactiveBehavior(Star):
         if not sender or not sender.isdigit():
             return
 
-        now_ts = time.time()
-        entry = self._state.get(sender, {})
-        prev_ts = entry.get("last_message_ts", 0)
-        gap = now_ts - prev_ts if prev_ts else 0
-
-        # 首次出现 → 记录相识时间
-        if not entry.get("first_seen_ts"):
-            entry["first_seen_ts"] = now_ts
-        entry["last_message_ts"] = now_ts
-        entry["message_count"] = entry.get("message_count", 0) + 1
-
-        # 记录最近一次长时间离开后的回归
-        if gap >= RETURN_GAP_SECONDS and prev_ts > 0:
-            entry["last_return_gap_hours"] = round(gap / 3600, 1)
-        else:
-            entry.pop("last_return_gap_hours", None)
-
-        self._state[sender] = entry
+        entry = record_interaction(self._state, sender)
+        mode = parse_friend_mode(_msg_text(event))
+        if mode and _is_direct(event):
+            set_friend_mode(self._state, sender, mode)
+            _save_state(self._state)
+            reply = "行，我安静一点，不主动提旧关系和关心。" if mode == QUIET_MODE else "恢复正常。"
+            yield event.plain_result(reply)
+            event.stop_event()
+            return
 
         # 每 50 条消息写一次盘，减少 IO
         if entry["message_count"] % 50 == 0:
@@ -84,6 +126,7 @@ class ProactiveBehavior(Star):
 
     @filter.on_llm_request(priority=-8)
     async def inject_relationship_context(self, event: AstrMessageEvent, req) -> None:
+        clean_request_history(req)
         sp = str(getattr(req, "system_prompt", "") or "")
         if "【小柠对话基线】" not in sp and "【小柠的最高对话规则】" not in sp:
             sp = f"{sp}\n\n{CONVERSATION_GUARD}".strip()
@@ -93,8 +136,10 @@ class ProactiveBehavior(Star):
         if not sender or not sender.isdigit():
             return
 
-        entry = self._state.get(sender, {})
+        entry = get_snapshot(self._state, sender)
         if not entry:
+            return
+        if entry.get("friend_mode") == QUIET_MODE:
             return
 
         parts = []
@@ -114,11 +159,9 @@ class ProactiveBehavior(Star):
             parts.append("现在是深夜。可适度放缓语气，但别假设对方疲惫或有情绪，也别主动追问。")
 
         # 关系年龄
-        first_seen = entry.get("first_seen_ts")
-        if first_seen:
-            days_known = max(1, round((time.time() - first_seen) / 86400))
-            if days_known >= 7:
-                parts.append(f"你和这位用户已经认识 {days_known} 天了。")
+        days_known = int(entry.get("days_known", 0) or 0)
+        if days_known >= 7:
+            parts.append(f"你和这位用户已经认识 {days_known} 天了。")
 
         if not parts:
             return
@@ -136,6 +179,18 @@ class ProactiveBehavior(Star):
 def _sender_id(event: AstrMessageEvent) -> str:
     g = getattr(event, "get_sender_id", None)
     return str(g() if callable(g) else "").strip()
+
+
+def _msg_text(event: AstrMessageEvent) -> str:
+    g = getattr(event, "get_message_str", None)
+    return str(g() if callable(g) else "").strip()
+
+
+def _is_direct(event: AstrMessageEvent) -> bool:
+    is_private = getattr(event, "is_private_chat", None)
+    return bool(is_private() if callable(is_private) else False) or bool(
+        getattr(event, "is_at_or_wake_command", False)
+    )
 
 
 def _local_hour() -> int:

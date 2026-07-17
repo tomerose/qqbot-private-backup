@@ -11,10 +11,6 @@ sys.path.insert(0, str(PLUGINS_DIR))
 from emotional_chat.main import (  # noqa: E402
     CRISIS_CONTEXT,
     EMOTION_CONTEXT,
-    PARTNER_CONTEXT,
-    PARTNER_DESCRIPTION,
-    PARTNER_NAME,
-    PARTNER_QQ,
     TALK_SYSTEM,
     EmotionalChat,
     is_crisis_language,
@@ -66,10 +62,26 @@ class EmotionalChatTests(unittest.TestCase):
         self.assertIn("不设固定句数", TALK_SYSTEM)
         self.assertIn("不要逐句机械答复", EMOTION_CONTEXT)
 
-    def test_partner_description_is_durable_and_privacy_safe(self):
-        self.assertIn("长期伴侣", PARTNER_DESCRIPTION)
-        self.assertIn(PARTNER_DESCRIPTION, PARTNER_CONTEXT)
-        self.assertNotIn(PARTNER_QQ, PARTNER_DESCRIPTION)
+    def test_talk_model_uses_gemini_flash_for_ordinary_users(self):
+        plugin = EmotionalChat.__new__(EmotionalChat)
+        self.assertEqual(
+            plugin._talk_model_config("ordinary"),
+            (
+                "http://127.0.0.1:3000/v1/chat/completions",
+                "sk-gemini-vertex",
+                "gemini-3.5-flash",
+            ),
+        )
+
+    def test_relationship_identity_is_single_and_privacy_safe(self):
+        async def scenario():
+            plugin = EmotionalChat.__new__(EmotionalChat)
+            replies = await collect(plugin.on_message(FakeEvent("小柠的对象是谁？", "2000000000")))
+            self.assertEqual(len(replies), 1)
+            self.assertIn("单身", replies[0])
+            self.assertNotIn("3424575956", replies[0])
+
+        asyncio.run(scenario())
 
     def test_talk_claims_the_event_and_returns_one_conversation(self):
         async def scenario():
@@ -111,7 +123,7 @@ class EmotionalChatTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_partner_uses_private_context_without_exposing_qq(self):
+    def test_private_context_has_no_legacy_partner_binding(self):
         class Request:
             system_prompt = "人设"
 
@@ -119,28 +131,26 @@ class EmotionalChatTests(unittest.TestCase):
             plugin = EmotionalChat.__new__(EmotionalChat)
             request = Request()
             await plugin.inject_partner_context(FakeEvent("晚安", "3424575956"), request)
-            self.assertIn(PARTNER_CONTEXT, request.system_prompt)
-            self.assertIn("绝不能回答不认识", request.system_prompt)
+            self.assertIn("【小柠·私聊基础人格】", request.system_prompt)
+            self.assertIn("普通网友", request.system_prompt)
+            self.assertNotIn("长期伴侣", request.system_prompt)
             self.assertNotIn("3424575956", request.system_prompt)
 
         asyncio.run(scenario())
 
-    def test_partner_self_query_gets_a_certain_affectionate_reply(self):
+    def test_legacy_partner_self_query_is_not_claimed_as_task(self):
         async def scenario():
             plugin = EmotionalChat.__new__(EmotionalChat)
             replies = await collect(plugin.on_message(FakeEvent("小柠，你还认识我吗？", "3424575956")))
-            self.assertEqual(len(replies), 1)
-            self.assertIn("你是明阳", replies[0])
-            self.assertIn("小柠的对象", replies[0])
-            self.assertNotIn("3424575956", replies[0])
+            self.assertEqual(replies, [])
 
         asyncio.run(scenario())
 
-    def test_partner_identity_reply_never_contains_qq(self):
+    def test_relationship_reply_never_contains_qq(self):
         async def scenario():
             plugin = EmotionalChat.__new__(EmotionalChat)
             replies = await collect(plugin.on_message(FakeEvent("小柠的对象是谁？", "2000000000")))
-            self.assertEqual(replies, [f"小柠的对象是{PARTNER_NAME}呀。"])
+            self.assertIn("单身", replies[0])
             self.assertNotIn("3424575956", replies[0])
 
         asyncio.run(scenario())

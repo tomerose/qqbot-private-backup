@@ -14,11 +14,16 @@ sys.path.insert(0, str(ROOT / "astrbot" / "data" / "plugins"))
 
 from data.plugins.search_command.main import (  # noqa: E402
     ActionUsageStore,
+    SearchContextStore,
     SearchCommand,
     _detect_search_mode,
+    _fetch_news_rss,
+    is_image_edit_intent,
+    is_search_followup,
     is_video_search_intent,
     parse_action_pack,
 )
+from data.plugins.search_command import main as search_main  # noqa: E402
 from data.plugins.draw_command.pro_access import Tier  # noqa: E402
 from data.plugins.xiaoning_runtime import ArtifactDeliveryResult  # noqa: E402
 
@@ -68,6 +73,13 @@ class FakeEvent:
 
 
 class SearchCommandTests(unittest.TestCase):
+    def setUp(self):
+        task_mirror = patch.object(
+            search_main, "mirror_runtime_task_status", new=AsyncMock()
+        )
+        task_mirror.start()
+        self.addCleanup(task_mirror.stop)
+
     def test_action_words_route_to_the_right_feature(self):
         cases = {
             "/research 手机端本地AI发展": ("research", "手机端本地AI发展"),
@@ -102,6 +114,100 @@ class SearchCommandTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(is_video_search_intent(text))
         self.assertFalse(is_video_search_intent("搜索姆巴佩最近的比赛结果"))
+
+    def test_image_edit_is_reserved_for_draw_delivery(self):
+        self.assertTrue(is_image_edit_intent("去s水印"))
+
+        async def scenario():
+            event = FakeEvent("去s水印")
+            plugin = SearchCommand.__new__(SearchCommand)
+            replies = [reply async for reply in plugin.on_message(event)]
+            self.assertEqual(replies, [])
+            self.assertFalse(event.stopped)
+
+        asyncio.run(scenario())
+
+    def test_search_followups_are_explicit_not_generic_chat(self):
+        self.assertTrue(is_search_followup("再核实一下官方来源"))
+        self.assertTrue(is_search_followup("有没有可靠来源"))
+        self.assertFalse(is_search_followup("这个呢"))
+        self.assertFalse(is_search_followup("刚才我有点难过"))
+
+    def test_search_context_is_scoped_and_expires(self):
+        with tempfile.TemporaryDirectory() as directory:
+            now = [1000.0]
+            store = SearchContextStore(
+                Path(directory) / "context.db", ttl_seconds=60, clock=lambda: now[0]
+            )
+            store.remember("private:one", "Gemini 最新版本")
+            self.assertEqual(store.get("private:one"), ("Gemini 最新版本", "text"))
+            self.assertIsNone(store.get("private:two"))
+            now[0] = 1061.0
+            self.assertIsNone(store.get("private:one"))
+
+    def test_scoped_followup_reuses_only_same_senders_search(self):
+        async def scenario(directory):
+            plugin = SearchCommand.__new__(SearchCommand)
+            plugin._search_context = SearchContextStore(Path(directory) / "context.db")
+            mocked = AsyncMock(return_value=("搜索结果", []))
+            with patch("data.plugins.search_command.main._call_proxy", mocked):
+                first = FakeEvent("检索一下 Gemini 最新版本", sender_id="111111")
+                self.assertTrue([reply async for reply in plugin.on_message(first)])
+                followup = FakeEvent("再核实一下官方来源", sender_id="111111")
+                self.assertTrue([reply async for reply in plugin.on_message(followup)])
+                other = FakeEvent("再核实一下官方来源", sender_id="222222")
+                self.assertEqual([reply async for reply in plugin.on_message(other)], [])
+
+            self.assertEqual(mocked.await_count, 2)
+            self.assertIn("上一轮搜索主题", mocked.await_args_list[1].args[0])
+            self.assertIn("Gemini 最新版本", mocked.await_args_list[1].args[0])
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(directory))
+
+    def test_realtime_question_routes_without_fake_model_knowledge(self):
+        async def scenario():
+            event = FakeEvent("Gemini 最新版本是什么")
+            plugin = SearchCommand.__new__(SearchCommand)
+            mocked = AsyncMock(return_value=(("官方结果"), []))
+            with patch("data.plugins.search_command.main._call_proxy", mocked):
+                replies = [reply async for reply in plugin.on_message(event)]
+            self.assertEqual(replies[0], "正在搜索…")
+            self.assertTrue(event.stopped)
+
+        asyncio.run(scenario())
+
+    def test_international_news_falls_back_to_source_linked_rss(self):
+        async def scenario():
+            event = FakeEvent("搜索国际新闻")
+            plugin = SearchCommand.__new__(SearchCommand)
+            with patch(
+                "data.plugins.search_command.main._call_proxy",
+                new=AsyncMock(return_value=("", [])),
+            ), patch(
+                "data.plugins.search_command.main._fetch_news_rss",
+                return_value="RSS 国际新闻\nhttps://example.com/news",
+            ):
+                replies = [reply async for reply in plugin.on_message(event)]
+            self.assertEqual(replies[0], "正在搜索…")
+            self.assertIn("https://example.com/news", replies[1])
+            self.assertTrue(event.stopped)
+
+        asyncio.run(scenario())
+
+    def test_news_rss_parser_keeps_title_source_time_and_link(self):
+        rss = b"""<?xml version='1.0' encoding='UTF-8'?>
+        <rss><channel><item><title>Verified headline</title>
+        <link>https://example.com/story</link><pubDate>Wed, 15 Jul 2026 09:53:20 GMT</pubDate>
+        <source>Reuters</source></item></channel></rss>"""
+        response = unittest.mock.Mock(content=rss)
+        response.raise_for_status.return_value = None
+        with patch("data.plugins.search_command.main.requests.get", return_value=response):
+            result = _fetch_news_rss("国际新闻")
+        self.assertIn("Verified headline", result)
+        self.assertIn("来源：Reuters", result)
+        self.assertIn("07-15 17:53", result)
+        self.assertIn("https://example.com/story", result)
 
     def test_maps_does_not_combine_two_grounding_tools(self):
         self.assertEqual(

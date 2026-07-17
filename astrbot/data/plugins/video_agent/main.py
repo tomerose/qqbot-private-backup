@@ -11,6 +11,7 @@ Dependencies: FFmpeg (PATH), edge-tts (pip), Pexels API key (free: pexels.com)
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -33,13 +34,60 @@ except ImportError:
     from data.plugins.draw_command.pro_access import Tier, get_tier
 
 try:
-    from xiaoning_runtime import ArtifactDeliveryResult, deliver_local_artifact
+    from xiaoning_runtime import (
+        ArtifactDeliveryResult,
+        deliver_local_artifact,
+        mirror_runtime_task_status,
+    )
 except ImportError:
-    from data.plugins.xiaoning_runtime import ArtifactDeliveryResult, deliver_local_artifact
+    from data.plugins.xiaoning_runtime import (
+        ArtifactDeliveryResult,
+        deliver_local_artifact,
+        mirror_runtime_task_status,
+    )
 
 PROXY_CHAT = "http://127.0.0.1:3000/v1/chat/completions"
-PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
+IMAGE_PROXY = "http://127.0.0.1:3000/v1/images/generations"
 PEXELS_BASE = "https://api.pexels.com/videos"
+DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+
+# TTS multi-voice mapping — edge-tts built-in voices, zero cost
+TTS_VOICES = {
+    "narration": "zh-CN-YunxiNeural",       # 旁白男声，沉稳
+    "female": "zh-CN-XiaoxiaoNeural",       # 女声，活泼
+    "male": "zh-CN-YunyangNeural",          # 男声，新闻感
+    "storytelling": "zh-CN-XiaoyiNeural",   # 讲故事，有感情
+    "gentle": "zh-CN-XiaochenNeural",       # 温柔女声
+    "default": "zh-CN-XiaoxiaoNeural",
+}
+
+# xfade transition presets — AutoShorts AI reference
+XFADE_PRESETS = {
+    "fade": "fade",
+    "slide": "slideright",
+    "pixel": "pixelize",
+    "dissolve": "fadegrays",
+    "wipe": "wiperight",
+    "zoom": "zoomin",
+}
+
+
+def _load_pexels_api_key() -> str:
+    key = os.environ.get("PEXELS_API_KEY", "").strip()
+    if key or os.name != "nt":
+        return key
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as handle:
+            value, _kind = winreg.QueryValueEx(handle, "PEXELS_API_KEY")
+        return str(value or "").strip()
+    except OSError:
+        return ""
+
+
+PEXELS_API_KEY = _load_pexels_api_key()
 
 AGENT_SYSTEM = """你是视频脚本撰写助手。根据用户主题，生成一段短视频脚本。
 
@@ -66,6 +114,12 @@ TIER_CONFIG = {
     Tier.PRO: (120, 10, 5, "1080p"),   # 5/day
 }
 
+_HIGH_QUALITY_PIPELINE_RE = re.compile(
+    r"(?:高质量|专业|精美|电影级).{0,80}(?:视频|短片)"
+    r"|(?:视频|短片).{0,12}(?:工坊|工作室|全流程)",
+    re.I,
+)
+
 
 def _parse_agent_command(text: str) -> str | None:
     """Extract topic from /做视频 or natural language. Returns None=not a match, ''=help."""
@@ -91,6 +145,21 @@ def _parse_agent_command(text: str) -> str | None:
         raw = raw[agent_prefix.end():].strip()
         if not raw:
             return ""
+
+    # High-quality/workshop wording belongs to video_pipeline.  Keep this
+    # parser silent even if the topic-before-视频 pattern would otherwise match.
+    if not agent_prefix and _HIGH_QUALITY_PIPELINE_RE.search(raw):
+        return None
+
+    # Plain “生成/创建/画视频” belongs to the short Veo generator.  It reaches
+    # this parser only when the user explicitly names Video Agent.
+    if not agent_prefix and re.match(
+        r"^(?:小柠[，,\s]*)?(?:帮我|请|给我|来|想|想要?)?\s*"
+        r"(?:生成|创建|画).{0,80}(?:视频|短片|动画)",
+        raw,
+        re.I,
+    ):
+        return None
 
     # ── Natural language: wide match for "做/制作/弄 一个/个 视频/短片" ──
     patterns = [
@@ -222,6 +291,63 @@ def _download_clip(url: str, dest: Path) -> bool:
         return False
 
 
+def _generate_scene_clip(
+    visual: str, duration: float, dest: Path, resolution: str
+) -> bool:
+    """Generate a real scene still and animate it when stock footage is unavailable."""
+    width, height = {
+        "480p": (854, 480),
+        "720p": (1280, 720),
+        "1080p": (1920, 1080),
+    }.get(resolution, (1280, 720))
+    still = dest.with_suffix(".png")
+    try:
+        response = requests.post(
+            IMAGE_PROXY,
+            json={
+                "prompt": (
+                    "Cinematic documentary video frame, realistic, visually rich, "
+                    f"16:9 composition, no captions, no logo, no watermark. Scene: {visual}"
+                ),
+                "model": "gemini-3.1-flash-image",
+                "size": "1024x576",
+            },
+            timeout=(30, 240),
+        )
+        response.raise_for_status()
+        data = response.json().get("data", [])
+        encoded = data[0].get("b64_json") if data else None
+        if not isinstance(encoded, str):
+            return False
+        payload = base64.b64decode(encoded, validate=True)
+        if not payload or len(payload) > 20 * 1024 * 1024:
+            return False
+        still.write_bytes(payload)
+        frames = max(25, int(max(1.0, float(duration)) * 25))
+        video_filter = (
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},"
+            f"zoompan=z='min(zoom+0.001,1.08)':d={frames}:s={width}x{height}:fps=25,"
+            "format=yuv420p"
+        )
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-loop", "1", "-i", str(still),
+                "-vf", video_filter,
+                "-t", f"{max(1.0, float(duration)):.2f}",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "25",
+                "-pix_fmt", "yuv420p", str(dest),
+            ],
+            capture_output=True,
+            timeout=120,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        return result.returncode == 0 and dest.is_file() and dest.stat().st_size > 1000
+    except Exception as exc:
+        logger.warning("[VideoAgent] generated scene fallback failed: %s", type(exc).__name__)
+        return False
+
+
 async def _tts_audio(text: str, output_path: Path) -> bool:
     """Generate TTS audio with edge-tts. Returns True on success."""
     try:
@@ -251,6 +377,78 @@ def _get_duration(file_path: Path) -> float:
         return 5.0
 
 
+def _subtitle_font_path() -> Path | None:
+    candidates = (
+        Path("C:/Windows/Fonts/msyh.ttc"),
+        Path("C:/Windows/Fonts/msyhbd.ttc"),
+        Path("C:/Windows/Fonts/simhei.ttf"),
+        Path("C:/Windows/Fonts/simsun.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+    )
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def _ffmpeg_filter_path(path: Path) -> str:
+    return path.resolve(strict=True).as_posix().replace(":", r"\:").replace("'", r"\'")
+
+
+_BLACK_DURATION_RE = re.compile(r"black_duration:([0-9]+(?:\.[0-9]+)?)")
+
+
+def _black_ratio_from_ffmpeg(output: str, duration: float) -> float:
+    if duration <= 0:
+        return 1.0
+    black = sum(float(value) for value in _BLACK_DURATION_RE.findall(str(output or "")))
+    return min(1.0, black / duration)
+
+
+def _video_is_usable(path: Path) -> bool:
+    duration = _get_duration(path)
+    if duration < 1 or not path.is_file() or path.stat().st_size <= 1000:
+        return False
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-i", str(path),
+                "-vf", "blackdetect=d=0.5:pix_th=0.10",
+                "-an", "-f", "null", "NUL" if os.name == "nt" else "/dev/null",
+            ],
+            capture_output=True,
+            timeout=90,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    diagnostic = result.stderr.decode("utf-8", errors="replace")
+    ratio = _black_ratio_from_ffmpeg(diagnostic, duration)
+    if ratio >= 0.90:
+        logger.warning("[VideoAgent] rejected near-black output ratio=%.3f", ratio)
+        return False
+    return True
+
+
+def _video_delivery_message(
+    title: str, delivery: ArtifactDeliveryResult, used: int, daily_limit: int
+) -> str:
+    if delivery.delivered:
+        return (
+            f"✅ 视频「{title}」制作完成！已发送。\n"
+            f"剩余次数：{daily_limit - used - 1}/{daily_limit}"
+        )
+    retry_note = (
+        "已加入后台重试队列，稍后自动送达。"
+        if delivery.channel == "queued"
+        else "文件已安全保留，请稍后重试。"
+    )
+    return (
+        f"视频「{title}」已生成，但 QQ 文件尚未交付，任务未完成；"
+        f"{retry_note}本次次数不计。"
+    )
+
+
 def _compose_video(
     clips: list[Path],
     audio_paths: list[Path],
@@ -273,7 +471,7 @@ def _compose_video(
         normalized: list[Path] = []
         for i, clip in enumerate(clips):
             out = tmp / f"clip_{i}.mp4"
-            subprocess.run(
+            normalized_result = subprocess.run(
                 ["ffmpeg", "-y", "-i", str(clip),
                  "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1",
                  "-c:v", "libx264", "-preset", "fast", "-crf", "28",
@@ -281,10 +479,10 @@ def _compose_video(
                 capture_output=True, timeout=60,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
-            if out.exists():
+            if normalized_result.returncode == 0 and out.exists() and out.stat().st_size > 1000:
                 normalized.append(out)
 
-        if not normalized:
+        if len(normalized) != len(clips):
             return False
 
         # Step 2: Build concat file
@@ -321,17 +519,22 @@ def _compose_video(
                         "-movflags", "+faststart"])
 
         # Add subtitle burn-in if subtitles present
-        # ponytail: use drawtext instead of subtitles filter — SRT path escaping
-        # breaks on Windows (colons, commas, quotes). drawtext works everywhere.
         if any(subtitles):
+            font = _subtitle_font_path()
+            if font is None:
+                logger.warning("[VideoAgent] no CJK subtitle font available")
+                return False
+            font_arg = _ffmpeg_filter_path(font)
             draw_parts: list[str] = []
             t = 0.0
             for i, sub in enumerate(subtitles):
                 dur = _get_duration(normalized[i]) if i < len(normalized) else 5.0
-                # Escape special chars for drawtext: ' : \
-                safe = str(sub).replace("\\", "\\\\").replace(":", "\\:").replace("'", "'\\\\\\''")
+                subtitle_file = tmp / f"subtitle_{i}.txt"
+                subtitle_file.write_text(str(sub), encoding="utf-8")
+                subtitle_arg = _ffmpeg_filter_path(subtitle_file)
                 draw_parts.append(
-                    f"drawtext=text='{safe}':fontsize=20:fontcolor=white:"
+                    f"drawtext=fontfile='{font_arg}':textfile='{subtitle_arg}':"
+                    f"fontsize=30:fontcolor=white:"
                     f"x=(w-text_w)/2:y=h-th-60:"
                     f"box=1:boxcolor=black@0.5:boxborderw=6:"
                     f"enable='between(t,{t:.1f},{t + dur:.1f})'"
@@ -350,7 +553,12 @@ def _compose_video(
             cmd, capture_output=True, timeout=180,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
-        success = result.returncode == 0 and output_path.stat().st_size > 1000
+        success = (
+            result.returncode == 0
+            and output_path.is_file()
+            and output_path.stat().st_size > 1000
+            and _video_is_usable(output_path)
+        )
         if not success:
             stderr = result.stderr.decode("utf-8", errors="replace")[-300:]
             logger.warning("[VideoAgent] FFmpeg failed: %s", stderr)
@@ -363,6 +571,339 @@ def _fmt_srt(seconds: float) -> str:
     s = int(seconds % 60)
     ms = int((seconds % 1) * 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# Enhanced functions — additive, existing functions untouched
+# ═══════════════════════════════════════════════════════════════
+
+
+def _simplify_query(query: str) -> str:
+    """Simplify a visual query for retry — drop adjectives, keep nouns."""
+    stopwords = {"beautiful", "stunning", "amazing", "cinematic", "epic", "dramatic",
+                 "gorgeous", "breathtaking", "spectacular", "magnificent", "vibrant"}
+    words = [w for w in query.split() if w.lower() not in stopwords]
+    return " ".join(words) if words else query
+
+
+def _generate_script_deepseek(topic: str, max_duration: int, max_scenes: int) -> dict | None:
+    """DeepSeek script generation — used as fallback when Gemini fails."""
+    if not DEEPSEEK_KEY:
+        return None
+    system = AGENT_SYSTEM.format(max_duration=max_duration, max_scenes=max_scenes)
+    try:
+        resp = requests.post(
+            DEEPSEEK_URL,
+            headers={"Authorization": f"Bearer {DEEPSEEK_KEY}"},
+            json={
+                "model": "deepseek-v4-flash",
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": f"主题：{topic}"},
+                ],
+                "max_tokens": 2048,
+                "temperature": 0.8,
+            },
+            timeout=(15, 45),
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        raw = str(body.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+        if not raw:
+            return None
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```\s*$", "", raw)
+        raw = raw.strip()
+        if not raw.startswith("{"):
+            return None
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) and parsed.get("scenes") else None
+    except Exception:
+        return None
+
+
+def _review_script_deepseek(script: dict) -> dict | None:
+    """DeepSeek reviews script quality, returns {score:1-10, suggestions:[...]}."""
+    if not DEEPSEEK_KEY:
+        return None
+    try:
+        resp = requests.post(
+            DEEPSEEK_URL,
+            headers={"Authorization": f"Bearer {DEEPSEEK_KEY}"},
+            json={
+                "model": "deepseek-v4-flash",
+                "messages": [
+                    {"role": "system", "content": (
+                        "你是视频脚本审核专家。从吸引力、节奏、画面多样性、叙事连贯性四个维度"
+                        "给脚本打分(1-10)并给出改进建议。返回JSON："
+                        '{{"score": 7, "suggestions": ["建议1", "建议2"]}}'
+                        "只返回JSON，不要其他文字。"
+                    )},
+                    {"role": "user", "content": json.dumps(script, ensure_ascii=False)},
+                ],
+                "max_tokens": 512,
+                "temperature": 0.3,
+            },
+            timeout=(10, 20),
+        )
+        resp.raise_for_status()
+        raw = str(resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```\s*$", "", raw)
+        return json.loads(raw) if raw.startswith("{") else None
+    except Exception:
+        return None
+
+
+def _generate_script_v2(topic: str, max_duration: int, max_scenes: int) -> dict | None:
+    """Multi-model script: Gemini primary → DeepSeek review → fallback to DeepSeek."""
+    draft = _generate_script(topic, max_duration, max_scenes)
+    if not draft:
+        logger.info("[VideoAgent] Gemini script failed, fallback to DeepSeek")
+        return _generate_script_deepseek(topic, max_duration, max_scenes)
+    review = _review_script_deepseek(draft)
+    if review and review.get("score", 10) < 6:
+        logger.info("[VideoAgent] script score=%d < 6, retry with DeepSeek", review.get("score", 0))
+        retry = _generate_script_deepseek(topic, max_duration, max_scenes)
+        return retry if retry else draft
+    return draft
+
+
+def _search_douyin_cache(query: str, per_page: int = 3) -> list[str]:
+    """Search local douyin_source cache for matching video files."""
+    try:
+        cache_dir = Path(__file__).resolve().parents[5] / "claude_workspace" / "douyin_cache"
+        if not cache_dir.is_dir():
+            return []
+        results: list[tuple[float, str]] = []
+        keywords = query.lower().split()
+        for f in cache_dir.glob("*.mp4"):
+            meta_file = cache_dir / f"{f.stem}.json"
+            meta_text = ""
+            if meta_file.exists():
+                try:
+                    meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                    meta_text = str(meta.get("title", "") or meta.get("desc", "")).lower()
+                except (OSError, json.JSONDecodeError):
+                    pass
+            # Score by keyword overlap
+            score = sum(1 for kw in keywords if kw in f"{f.stem} {meta_text}".lower())
+            if score > 0:
+                results.append((score, str(f)))
+        results.sort(key=lambda x: -x[0])
+        return [url for _, url in results[:per_page]]
+    except Exception:
+        return []
+
+
+def _search_multi_source(query: str, per_page: int = 3) -> list[str]:
+    """Three-tier asset acquisition: Pexels → Douyin cache → Pexels retry."""
+    urls = _search_pexels(query, per_page)
+    if urls:
+        return urls
+    cache_urls = _search_douyin_cache(query, per_page)
+    if cache_urls:
+        logger.info("[VideoAgent] using douyin_cache for query=%r", query[:60])
+        return cache_urls
+    simplified = _simplify_query(query)
+    if simplified != query:
+        urls = _search_pexels(simplified, per_page)
+        if urls:
+            logger.info("[VideoAgent] Pexels retry with simplified query=%r", simplified[:60])
+            return urls
+    return []
+
+
+async def _tts_audio_with_voice(text: str, output_path: Path,
+                                 voice_style: str = "default") -> bool:
+    """TTS with voice selection. Falls back to default voice on failure."""
+    voice = TTS_VOICES.get(voice_style, TTS_VOICES["default"])
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "edge-tts", "--voice", voice,
+            "--text", text, "--write-media", str(output_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        if output_path.stat().st_size > 100:
+            return True
+        # Fallback to default voice
+        if voice != TTS_VOICES["default"]:
+            return await _tts_audio(text, output_path)
+        return False
+    except Exception:
+        if voice != TTS_VOICES["default"]:
+            return await _tts_audio(text, output_path)
+        return False
+
+
+def _compose_video_v2(
+    clips: list[Path],
+    audio_paths: list[Path],
+    subtitles: list[str],
+    output_path: Path,
+    resolution: str = "720p",
+    transition: str = "fade",
+) -> bool:
+    """Enhanced compose with xfade transitions, LUT, and Ken Burns motion.
+
+    Falls back to _compose_video (simple concat) if xfade filtergraph fails.
+    """
+    if not clips:
+        return False
+    if len(clips) == 1 and transition == "fade":
+        # Single clip — no transition needed, use simple compose
+        return _compose_video(clips, audio_paths, subtitles, output_path, resolution)
+
+    width, height = {"480p": (854, 480), "720p": (1280, 720), "1080p": (1920, 1080)}.get(
+        resolution, (1280, 720)
+    )
+    xfade_type = XFADE_PRESETS.get(transition, "fade")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+
+        # Step 1: normalize all clips to same resolution
+        normalized: list[Path] = []
+        for i, clip in enumerate(clips):
+            out = tmp / f"norm_{i}.mp4"
+            dur = _get_duration(clip) if i < len(clips) else 5.0
+            # Ken Burns slow zoom for visual interest
+            motion_vf = (
+                f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height},"
+                f"zoompan=z='min(zoom+0.0015,1.06)':d={max(25, int(dur*25))}:s={width}x{height}:fps=25,"
+                f"format=yuv420p"
+            )
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-i", str(clip),
+                 "-vf", motion_vf,
+                 "-c:v", "libx264", "-preset", "fast", "-crf", "25",
+                 "-an", "-t", f"{dur:.2f}", str(out)],
+                capture_output=True, timeout=90,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            if result.returncode == 0 and out.is_file() and out.stat().st_size > 1000:
+                normalized.append(out)
+
+        if len(normalized) != len(clips):
+            logger.warning("[VideoAgent] normalize clip count mismatch, fallback to simple compose")
+            return _compose_video(clips, audio_paths, subtitles, output_path, resolution)
+
+        # Step 2: build xfade filtergraph
+        if len(normalized) == 1:
+            # Single normalized clip — simple path
+            return _compose_video(clips, audio_paths, subtitles, output_path, resolution)
+
+        # Build xfade filter_complex string
+        # Pattern: [0][1]xfade=transition=fade:duration=0.3:offset=3.8[x1];
+        #          [x1][2]xfade=transition=fade:duration=0.3:offset=7.3[x2]; ...
+        filter_parts: list[str] = []
+        last_label = "0"
+        accumulated_offset = 0.0
+        transition_dur = 0.3
+
+        for i in range(len(normalized)):
+            dur = _get_duration(normalized[i])
+            if i == 0:
+                accumulated_offset += dur
+                continue
+            offset = accumulated_offset - transition_dur
+            next_label = f"x{i}" if i < len(normalized) - 1 else "xfade_out"
+            filter_parts.append(
+                f"[{last_label}][{i}]xfade=transition={xfade_type}:"
+                f"duration={transition_dur}:offset={offset:.2f}[{next_label}]"
+            )
+            last_label = next_label
+            accumulated_offset += dur - transition_dur
+
+        vf_filter = ";".join(filter_parts)
+
+        # Step 3: merge audio
+        audio_concat = tmp / "audio_merged.mp3"
+        if audio_paths and all(p.exists() for p in audio_paths):
+            audio_inputs = []
+            for p in audio_paths:
+                audio_inputs.extend(["-i", str(p)])
+            subprocess.run(
+                ["ffmpeg", "-y", *audio_inputs,
+                 "-filter_complex", f"concat=n={len(audio_paths)}:v=0:a=1",
+                 "-ac", "1", str(audio_concat)],
+                capture_output=True, timeout=60,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+
+        # Step 4: assemble
+        inputs = []
+        for p in normalized:
+            inputs.extend(["-i", str(p)])
+        cmd = ["ffmpeg", "-y", *inputs,
+               "-filter_complex", vf_filter,
+               "-map", f"[{last_label}]"]
+        if audio_concat.exists():
+            cmd.extend(["-i", str(audio_concat)])
+            cmd.extend(["-map", "1:a:0"])
+            cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "26",
+                        "-c:a", "aac", "-b:a", "96k",
+                        "-shortest", "-movflags", "+faststart"])
+        else:
+            cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "26",
+                        "-movflags", "+faststart"])
+
+        # Add subtitle burn-in
+        if any(subtitles):
+            font = _subtitle_font_path()
+            if font is None:
+                logger.warning("[VideoAgent] no CJK subtitle font, fallback to simple compose")
+                return _compose_video(clips, audio_paths, subtitles, output_path, resolution)
+            font_arg = _ffmpeg_filter_path(font)
+            draw_parts: list[str] = []
+            t = 0.0
+            for i, sub in enumerate(subtitles):
+                dur_val = _get_duration(normalized[i]) if i < len(normalized) else 5.0
+                subtitle_file = tmp / f"sub_{i}.txt"
+                subtitle_file.write_text(str(sub), encoding="utf-8")
+                sub_arg = _ffmpeg_filter_path(subtitle_file)
+                draw_parts.append(
+                    f"drawtext=fontfile='{font_arg}':textfile='{sub_arg}':"
+                    f"fontsize=30:fontcolor=white:"
+                    f"x=(w-text_w)/2:y=h-th-60:"
+                    f"box=1:boxcolor=black@0.5:boxborderw=6:"
+                    f"enable='between(t,{t:.1f},{t + dur_val:.1f})'"
+                )
+                t += dur_val - transition_dur
+            subtitle_vf = ",".join(draw_parts)
+            # Chain subtitle filter after xfade output
+            orig_vf = vf_filter
+            vf_filter = f"{orig_vf};[{last_label}]{subtitle_vf}[final]"
+            # Update map target
+            for i, part in enumerate(cmd):
+                if part == f"[{last_label}]":
+                    cmd[i] = "[final]"
+                    break
+
+        cmd.append(str(output_path))
+        result = subprocess.run(
+            cmd, capture_output=True, timeout=300,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        success = (
+            result.returncode == 0
+            and output_path.is_file()
+            and output_path.stat().st_size > 1000
+            and _video_is_usable(output_path)
+        )
+        if not success:
+            stderr = result.stderr.decode("utf-8", errors="replace")[-300:]
+            logger.warning("[VideoAgent] xfade compose failed: %s, fallback to simple", stderr)
+            return _compose_video(clips, audio_paths, subtitles, output_path, resolution)
+        return success
+
+
+# ═══════════════════════════════════════════════════════════════
 
 
 class VideoAgent(Star):
@@ -465,6 +1006,11 @@ class VideoAgent(Star):
             event.stop_event()
             return
 
+        task_id = uuid.uuid4().hex[:12]
+        task_desc = f"制作完整视频：{topic[:140]}"
+        await mirror_runtime_task_status(
+            sender_id, task_id, task_desc, "in_progress", "video_agent_started", owner="video_agent"
+        )
         yield event.plain_result(
             f"🎬 开始制作视频「{topic[:30]}」…\n"
             f"① 生成脚本 → ② 搜索素材 → ③ 合成配音 → ④ 渲染输出\n"
@@ -473,11 +1019,14 @@ class VideoAgent(Star):
 
         try:
             async with self._lock:
-                # Step 1: Generate script
+                # Step 1: Generate script (multi-model: Gemini → DeepSeek review → fallback)
                 script = await asyncio.to_thread(
-                    _generate_script, topic, max_dur, max_scenes
+                    _generate_script_v2, topic, max_dur, max_scenes
                 )
                 if not script or not script.get("scenes"):
+                    await mirror_runtime_task_status(
+                        sender_id, task_id, task_desc, "failed", "script_generation", owner="video_agent"
+                    )
                     yield event.plain_result("脚本生成失败，请换个主题试试。")
                     event.stop_event()
                     return
@@ -501,38 +1050,58 @@ class VideoAgent(Star):
                         narration = scene.get("narration", "")
                         subtitles.append(narration[:80])
 
-                        # Search & download clip
-                        urls = await asyncio.to_thread(_search_pexels, visual, 1)
+                        # Search & download clip (three-tier: Pexels → Douyin cache → Pexels retry)
+                        urls = await asyncio.to_thread(_search_multi_source, visual, 3)
                         clip_path = tmp / f"scene_{i}.mp4"
                         downloaded = False
                         if urls:
                             downloaded = await asyncio.to_thread(_download_clip, urls[0], clip_path)
                         if not downloaded:
-                            # Fallback: use a black placeholder clip
-                            subprocess.run(
-                                ["ffmpeg", "-y", "-f", "lavfi",
-                                 "-i", f"color=c=black:s=1280x720:d={scene.get('duration', 5)}",
-                                 "-c:v", "libx264", "-preset", "ultrafast",
-                                 str(clip_path)],
-                                capture_output=True, timeout=30,
-                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                            await mirror_runtime_task_status(
+                                sender_id, task_id, task_desc, "failed", "scene_unavailable", owner="video_agent"
                             )
+                            downloaded = await asyncio.to_thread(
+                                _generate_scene_clip,
+                                visual,
+                                float(scene.get("duration", 5) or 5),
+                                clip_path,
+                                resolution,
+                            )
+                        if not downloaded:
+                            yield event.plain_result(
+                                "这次没有拿到可用画面，视频未生成，本次次数不计。"
+                            )
+                            event.stop_event()
+                            return
                         clip_paths.append(clip_path)
 
-                        # TTS
+                        # TTS with voice selection (narration style by default)
                         audio_path = tmp / f"audio_{i}.mp3"
-                        tts_ok = await _tts_audio(narration, audio_path)
-                        if tts_ok:
-                            audio_paths.append(audio_path)
+                        tts_ok = await _tts_audio_with_voice(narration, audio_path, "narration")
+                        if not tts_ok:
+                            await mirror_runtime_task_status(
+                                sender_id, task_id, task_desc, "failed", "tts_failed", owner="video_agent"
+                            )
+                            yield event.plain_result(
+                                "这次配音没有生成成功，视频未完成，本次次数不计。"
+                            )
+                            event.stop_event()
+                            return
+                        audio_paths.append(audio_path)
 
-                    # Step 4: Compose final video
+                    # Step 4: Compose final video with xfade transitions
                     output_path = self._output_root / f"agent-{uuid.uuid4().hex}.mp4"
                     ok = await asyncio.to_thread(
-                        _compose_video, clip_paths, audio_paths, subtitles,
-                        output_path, resolution,
+                        _compose_video_v2, clip_paths, audio_paths, subtitles,
+                        output_path, resolution, "fade",
                     )
                     if not ok:
-                        yield event.plain_result("视频合成失败，请稍后再试。")
+                        await mirror_runtime_task_status(
+                            sender_id, task_id, task_desc, "failed", "quality_gate", owner="video_agent"
+                        )
+                        yield event.plain_result(
+                            "视频质量检查没通过（黑屏或字幕渲染异常），没有发送，本次次数不计。"
+                        )
                         event.stop_event()
                         return
 
@@ -540,26 +1109,31 @@ class VideoAgent(Star):
                 delivery = await deliver_local_artifact(
                     event, output_path,
                     allowed_roots=[self._output_root], kind="file",
+                    task_id=task_id, task_desc=task_desc,
+                    task_owner="video_agent",
                 )
-                self._daily_usage[dk] = used + 1
-                try:
-                    self._save_usage()
-                except OSError:
-                    pass
-
                 if delivery.delivered:
-                    suffix = "已发送"
-                elif delivery.channel == "queued":
-                    suffix = "已加入后台重试队列，稍后自动送达"
+                    await mirror_runtime_task_status(
+                        sender_id, task_id, task_desc, "done", f"qq:{delivery.channel}", owner="video_agent"
+                    )
+                    self._daily_usage[dk] = used + 1
+                    try:
+                        self._save_usage()
+                    except OSError:
+                        pass
                 else:
-                    suffix = "QQ 投递失败，文件已安全保留"
+                    await mirror_runtime_task_status(
+                        sender_id, task_id, task_desc, "delivery_pending", delivery.channel, owner="video_agent"
+                    )
                 yield event.plain_result(
-                    f"✅ 视频「{title}」制作完成！{suffix}。\n"
-                    f"剩余次数：{daily_limit - used - 1}/{daily_limit}"
+                    _video_delivery_message(title, delivery, used, daily_limit)
                 )
 
         except Exception as exc:
             logger.warning("[VideoAgent] unexpected error: %s: %s\n%s", type(exc).__name__, exc, traceback.format_exc())
+            await mirror_runtime_task_status(
+                sender_id, task_id, task_desc, "failed", type(exc).__name__, owner="video_agent"
+            )
             yield event.plain_result(f"视频制作过程中出错（{type(exc).__name__}: {exc}），请稍后再试。")
         event.stop_event()
 
@@ -568,7 +1142,7 @@ class VideoAgent(Star):
         try:
             now = time.time()
             for f in self._output_root.glob("agent-*.mp4"):
-                if now - f.stat().st_mtime > 3600:  # 1 hour
+                if now - f.stat().st_mtime > 3 * 86400:
                     f.unlink(missing_ok=True)
         except Exception:
             pass

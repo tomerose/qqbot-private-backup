@@ -10,9 +10,11 @@ PLUGINS = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugins"
 sys.path.insert(0, str(PLUGINS))
 
 from ai_interview import main as interview_module  # noqa: E402
+from ai_debate import main as debate_module  # noqa: E402
 from ai_debate.main import parse_debate_topic  # noqa: E402
+from pdf_analysis import main as pdf_module  # noqa: E402
 from smart_translate.main import parse_translate_request  # noqa: E402
-from welcome_card.main import WelcomeCard  # noqa: E402
+from welcome_card.main import WelcomeCard, _private_sender_id  # noqa: E402
 from time_capsule.main import TimeCapsule, parse_capsule_request  # noqa: E402
 from xiaoning_scheduled.main import XiaoningScheduled  # noqa: E402
 
@@ -27,6 +29,7 @@ class FakeEvent:
         self.sender = sender
         self.unified_msg_origin = origin
         self.is_at_or_wake_command = True
+        self.stopped = False
 
     def get_message_str(self):
         return self.text
@@ -37,8 +40,11 @@ class FakeEvent:
     def get_group_id(self):
         return "12345678" if "GroupMessage" in self.unified_msg_origin else ""
 
+    def is_private_chat(self):
+        return "GroupMessage" not in self.unified_msg_origin
+
     def stop_event(self):
-        pass
+        self.stopped = True
 
     def plain_result(self, text):
         return text
@@ -86,6 +92,44 @@ class NewFeaturePluginTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_ordinary_group_users_are_rejected_for_x_only_features(self):
+        async def scenario():
+            interview = interview_module.AiInterview.__new__(interview_module.AiInterview)
+            interview._pro_db = Path("unused.db")
+            interview._sessions = {}
+            interview._daily_usage = {}
+            group_event = FakeEvent("/interview PM", origin="test:GroupMessage:12345678")
+            with patch.object(interview_module, "get_tier", return_value=interview_module.Tier.ORDINARY), patch.object(
+                interview_module, "is_active_pro_group", return_value=False
+            ), patch.object(interview_module, "_call") as call:
+                replies = await collect(interview.on_message(group_event))
+            self.assertEqual(replies, [interview_module.PRO_REQUIRED_MSG])
+            call.assert_not_called()
+
+            debate = debate_module.AiDebate.__new__(debate_module.AiDebate)
+            debate._pro_db = Path("unused.db")
+            debate._daily_free = {}
+            group_event = FakeEvent("/debate abcdefg", origin="test:GroupMessage:12345678")
+            with patch.object(debate_module, "get_tier", return_value=debate_module.Tier.ORDINARY), patch.object(
+                debate_module, "is_active_pro_group", return_value=False
+            ), patch.object(debate_module, "_call_gemini") as call:
+                replies = await collect(debate.on_message(group_event))
+            self.assertEqual(replies, [debate_module.REQUIRED_MSG])
+            call.assert_not_called()
+
+            pdf = pdf_module.PdfAnalysis.__new__(pdf_module.PdfAnalysis)
+            pdf._pro_db = Path("unused.db")
+            pdf._daily_usage = {}
+            pdf._cooldowns = {}
+            group_event = FakeEvent("/analysis summarize", origin="test:GroupMessage:12345678")
+            with patch.object(pdf_module, "get_tier", return_value=pdf_module.Tier.ORDINARY), patch.object(
+                pdf_module, "is_active_pro_group", return_value=False
+            ):
+                replies = await collect(pdf.on_message(group_event))
+            self.assertEqual(replies, [pdf_module.REQUIRED_MSG])
+
+        asyncio.run(scenario())
+
     def test_group_welcome_yields_the_real_message_result(self):
         plugin = WelcomeCard.__new__(WelcomeCard)
         plugin._welcomed_friends = set()
@@ -96,6 +140,10 @@ class NewFeaturePluginTests(unittest.TestCase):
         )
         self.assertEqual(len(replies), 1)
         self.assertIsNotNone(replies[0])
+
+    def test_private_welcome_uses_origin_when_sender_id_is_missing(self):
+        event = FakeEvent(sender="", origin="llbot-test:FriendMessage:2000000000")
+        self.assertEqual(_private_sender_id(event), "2000000000")
 
     def test_failed_capsule_delivery_is_retained_and_rescheduled(self):
         class Scheduler:

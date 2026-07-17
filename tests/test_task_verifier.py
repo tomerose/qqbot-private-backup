@@ -74,6 +74,16 @@ class TaskVerifierTests(unittest.TestCase):
         self.assertTrue(verify_step(step, 0, [], None).verified)
         self.assertFalse(verify_step(step, 2, [], None).verified)
 
+    def test_failed_execution_preserves_specific_backend_error_code(self):
+        step = TaskStep(
+            "job123", 0, "璇诲彇椤圭洰", ActionClass.READ_ONLY, False
+        )
+
+        evidence = verify_step(step, 1, [], None, error_code="empty_result")
+
+        self.assertFalse(evidence.verified)
+        self.assertEqual(evidence.code, "empty_result")
+
     def test_selects_only_known_project_verification_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

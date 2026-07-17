@@ -140,6 +140,12 @@ class GitHubTools(Star):
 
         event.stop_event()
         args = msg[4:].strip()
+
+        # Natural GitHub URL detection — extract owner/repo from pasted links
+        url_match = re.match(r'https?://github\.com/([^/\s]+)/([^/\s?#]+)', args)
+        if url_match:
+            args = f"repo {url_match.group(1)}/{url_match.group(2)}"
+
         result = await self._dispatch(args)
         yield event.plain_result(result)
 

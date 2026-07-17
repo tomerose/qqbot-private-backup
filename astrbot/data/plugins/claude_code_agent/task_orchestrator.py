@@ -24,6 +24,7 @@ class StepExecution:
     verification_exit: int | None
     started_side_effect: bool
     response: str = ""
+    error_code: str = ""
 
 
 @dataclass(frozen=True)

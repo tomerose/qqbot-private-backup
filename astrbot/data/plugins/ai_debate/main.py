@@ -17,13 +17,13 @@ except ImportError:
     from data.plugins.xiaoning_runtime import defer_stop_event
 
 try:
-    from draw_command.pro_access import get_tier, is_active_pro, is_active_pro_group, Tier
+    from draw_command.pro_access import get_tier, is_active_pro_group, Tier
 except ImportError:
-    from data.plugins.draw_command.pro_access import get_tier, is_active_pro, is_active_pro_group, Tier
+    from data.plugins.draw_command.pro_access import get_tier, is_active_pro_group, Tier
 
 PROXY = "http://127.0.0.1:3000/v1/chat/completions"
 PRO_DAILY = 10
-FREE_DAILY = 1
+REQUIRED_MSG = "AI 圆桌辩论需要 X 或 Pro 资格。添加小柠为 QQ 好友即可获得 X 资格。"
 PRO_MSG = "AI 圆桌辩论次数已用完（今日 {used}/{limit}）。请联系管理员获取更多次数。"
 
 PERSONAS = [
@@ -127,7 +127,10 @@ class AiDebate(Star):
         tier = get_tier(sender_id, self._pro_db)
         group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
         in_pro_group = bool(group_id) and is_active_pro_group(group_id, self._pro_db)
-        limit = PRO_DAILY if (tier >= Tier.X or in_pro_group) else FREE_DAILY
+        if tier < Tier.X and not in_pro_group:
+            yield event.plain_result(REQUIRED_MSG)
+            return
+        limit = PRO_DAILY
         used = self._daily_free.get(key, 0)
         if used >= limit:
             yield event.plain_result(PRO_MSG.format(used=used, limit=limit))

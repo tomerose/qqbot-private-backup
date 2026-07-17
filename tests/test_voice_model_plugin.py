@@ -6,7 +6,7 @@ import unittest
 import wave
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 _PROJ_ROOT = Path(__file__).resolve().parents[1]
 os.environ["ASTRBOT_ROOT"] = str(_PROJ_ROOT / "astrbot")
@@ -150,7 +150,7 @@ class VoiceModelPluginTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_sent_voice_cleanup_deletes_only_generated_audio_inside_private_root(self):
+    def test_sent_voice_cleanup_delays_and_limits_generated_audio_to_private_root(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 base = Path(tmp)
@@ -167,11 +167,15 @@ class VoiceModelPluginTests(unittest.TestCase):
                     "_local_tts_audio_paths", [str(generated), str(outside)]
                 )
 
-                await plugin.cleanup_sent_voice(event)
+                with patch("voice_model_router.main.asyncio.create_task") as create_task:
+                    await plugin.cleanup_sent_voice(event)
 
-                self.assertFalse(generated.exists())
+                self.assertTrue(generated.exists())
                 self.assertTrue(outside.exists())
                 self.assertEqual(event.get_extra("_local_tts_audio_paths"), [])
+                create_task.assert_called_once()
+                scheduled = create_task.call_args.args[0]
+                scheduled.close()
 
         asyncio.run(scenario())
 
@@ -213,6 +217,40 @@ class VoiceModelPluginTests(unittest.TestCase):
             )
             await plugin.route_voice_request(event)
             self.assertIsNone(event.get_extra("voice_reply_requested"))
+
+        asyncio.run(scenario())
+
+    def test_group_reply_has_ten_percent_voice_chance(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                audio = Path(tmp) / "voice.wav"
+                write_wav(audio, b"\x01\x00" * 4)
+                plugin = VoiceModelRouter.__new__(VoiceModelRouter)
+                plugin.tts_client = FakeTTSClient([audio])
+                plugin.audio_root = Path(tmp)
+                result = FakeResult([Plain("普通群聊文字")])
+                event = FakeEvent("正常回答", private=False, wake=True, result=result)
+
+                with patch("voice_model_router.main.random.random", return_value=0.09):
+                    await plugin.synthesize_voice_reply(event)
+
+                self.assertTrue(event.get_extra("voice_reply_requested"))
+                self.assertTrue(any(isinstance(item, Record) for item in result.chain))
+
+        asyncio.run(scenario())
+
+    def test_group_reply_stays_text_outside_ten_percent_voice_chance(self):
+        async def scenario():
+            plugin = VoiceModelRouter.__new__(VoiceModelRouter)
+            plugin.tts_client = None
+            result = FakeResult([Plain("普通群聊文字")])
+            event = FakeEvent("正常回答", private=False, wake=True, result=result)
+
+            with patch("voice_model_router.main.random.random", return_value=0.10):
+                await plugin.synthesize_voice_reply(event)
+
+            self.assertEqual(len(result.chain), 1)
+            self.assertIsInstance(result.chain[0], Plain)
 
         asyncio.run(scenario())
 

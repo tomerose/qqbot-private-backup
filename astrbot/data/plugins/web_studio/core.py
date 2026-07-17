@@ -25,13 +25,22 @@ _URL_ATTRS = {"action", "formaction", "href", "poster", "src", "srcset", "xlink:
 _NETWORK_CODE = re.compile(
     r"(?:\bfetch\s*\(|\bXMLHttpRequest\b|\bWebSocket\b|\bEventSource\b|"
     r"\bsendBeacon\s*\(|navigator\.serviceWorker|\bimportScripts\s*\(|"
+    r"navigator\.clipboard\.(?:read|readText)\s*\(|"
     r"\bwindow\.open\s*\(|(?:window\.|document\.)?location\s*=|"
     r"(?:window\.|document\.)?location\.(?:href|assign|replace)|"
     r"\bdocument\.cookie\b|\beval\s*\(|\bnew\s+Function\s*\()",
     re.I,
 )
 _EXTERNAL_SCHEME = re.compile(r"(?:https?|wss?|ftp):\s*//", re.I)
-_CSS_URL = re.compile(r"url\s*\(", re.I)
+_INLINE_SVG_NAMESPACE = re.compile(
+    r"\bxmlns(?::[\w.-]+)?\s*=\s*(['\"])http://www\.w3\.org/(?:2000/svg|1999/xlink)\1",
+    re.I,
+)
+_CSS_URL = re.compile(r"(?<![\w$])url\s*\(", re.I)
+_SAFE_CSS_DATA_IMAGE = re.compile(
+    r"url\s*\(\s*(['\"]?)data:image/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+\1\s*\)",
+    re.I,
+)
 _COVERAGE_RULES = (
     ("任务清单", ("任务", "待办", "清单"), ("任务", "待办", "清单")),
     ("番茄专注", ("番茄", "专注计时", "专注"), ("番茄", "专注")),
@@ -50,12 +59,19 @@ _COVERAGE_RULES = (
     ("旅行", ("旅行", "行程"), ("旅行", "行程", "行李", "出行")),
     ("简历", ("简历",), ("简历", "经历")),
     ("名片", ("名片",), ("名片", "联系")),
+    ("本地图片选择", ("图库", "选择图片", "多张图片"), ('type="file"', "accept=")),
+    ("拖拽导入", ("拖入", "拖拽"), ("dragover", "drop")),
+    ("缩略图", ("缩略图",), ("缩略图", "thumbnail", "createobjecturl")),
+    ("搜索", ("搜索",), ("搜索", "search", "filter(")),
+    ("排序", ("排序",), ("排序", "sort(")),
+    ("批量选择", ("批量勾选", "批量选择"), ("checkbox", "批量")),
+    ("JSON 导出", ("导出为json", "导出json"), ("json.stringify", "application/json")),
 )
 
 _CSP = (
     "default-src 'none'; img-src data: blob:; media-src data: blob:; "
     "font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
-    "connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; "
+    "connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src blob:; "
     "object-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
 )
 _HEAD_INJECTION = (
@@ -94,17 +110,28 @@ class _SafetyParser(HTMLParser):
             self.errors.append("禁止外链脚本")
         if name == "meta" and values.get("http-equiv", "").lower() == "refresh":
             self.errors.append("禁止页面跳转")
-        if name == "input" and values.get("type", "text").lower() in {"password", "file"}:
-            self.errors.append("禁止密码或文件采集")
+        if name == "input" and values.get("type", "text").lower() == "password":
+            self.errors.append("禁止密码采集")
         for key, value in values.items():
             if key in _URL_ATTRS:
                 allowed_fragment = key == "href" and (not value or value.startswith("#"))
                 allowed_data = key in {"src", "poster"} and value.lower().startswith(
                     ("data:image/", "data:audio/", "data:video/")
                 )
-                if value and not allowed_fragment and not allowed_data:
+                allowed_download = (
+                    name == "a"
+                    and key == "href"
+                    and "download" in values
+                    and value.lower().startswith(
+                        (
+                            "data:text/plain", "data:text/csv", "data:text/json",
+                            "data:application/json",
+                        )
+                    )
+                )
+                if value and not allowed_fragment and not allowed_data and not allowed_download:
                     self.errors.append("禁止外部链接或资源")
-            if key == "style" and _CSS_URL.search(value):
+            if key == "style" and _CSS_URL.search(_SAFE_CSS_DATA_IMAGE.sub("", value)):
                 self.errors.append("禁止 CSS 外部资源")
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -125,11 +152,11 @@ def prepare_html(raw: object) -> tuple[str, str]:
     document = str(raw or "").strip()
     if not document or len(document) > MAX_HTML_CHARS:
         raise UnsafePageError("网页为空或过大")
-    if _EXTERNAL_SCHEME.search(document):
+    if _EXTERNAL_SCHEME.search(_INLINE_SVG_NAMESPACE.sub("", document)):
         raise UnsafePageError("网页包含外部地址")
     if _NETWORK_CODE.search(document):
         raise UnsafePageError("网页包含联网、跳转或动态执行代码")
-    if _CSS_URL.search(document):
+    if _CSS_URL.search(_SAFE_CSS_DATA_IMAGE.sub("", document)):
         raise UnsafePageError("网页包含外部样式资源")
     if any(
         marker in document.lower()

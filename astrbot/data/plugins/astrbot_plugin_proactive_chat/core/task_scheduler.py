@@ -678,13 +678,9 @@ class SchedulerMixin:
                     "unanswered_count", 0
                 )
 
-            self._track_task(
-                asyncio.create_task(
-                    self._schedule_next_chat_and_save(session_id, reset_counter=False)
-                )
-            )
+            self._track_task(asyncio.create_task(self.check_and_chat(session_id)))
             logger.info(
-                f"[主动消息] {self._get_session_log_str(session_id, current_config)} 已沉默 {idle_minutes} 分钟，开始计划主动消息喵。(当前未回复次数: {current_unanswered})"
+                f"[主动消息] {self._get_session_log_str(session_id, current_config)} 已沉默 {idle_minutes} 分钟，开始主动消息检查喵。(当前未回复次数: {current_unanswered})"
             )
         except Exception as e:
             logger.error(f"[主动消息] 沉默倒计时回调函数执行失败喵: {e}")

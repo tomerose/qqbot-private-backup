@@ -16,6 +16,7 @@ from data.plugins.web_studio.main import (  # noqa: E402
     WebStudio,
     parse_web_intent,
 )
+from data.plugins.web_studio import main as web_main  # noqa: E402
 from data.plugins.web_studio.publisher import PageSnapshot, PublishError  # noqa: E402
 
 
@@ -49,6 +50,13 @@ async def collect(generator):
 
 
 class WebStudioPluginTests(unittest.TestCase):
+    def setUp(self):
+        task_mirror = patch.object(
+            web_main, "mirror_runtime_task_status", new=AsyncMock()
+        )
+        task_mirror.start()
+        self.addCleanup(task_mirror.stop)
+
     def test_parser_claims_only_explicit_web_creation_requests(self):
         cases = {
             "/web 做一个番茄钟工具": ("create", "", "做一个番茄钟工具"),
@@ -57,6 +65,8 @@ class WebStudioPluginTests(unittest.TestCase):
             "/web show 0123456789": ("show", "0123456789", ""),
             "帮我制作一个网页工具 记录喝水": ("create", "", "记录喝水"),
             "帮我做一个记录每日开销的网页": ("create", "", "记录每日开销"),
+            "能帮我做一个整理图库的东西吗": ("create", "", "整理图库"),
+            "刚才那个网页再加上导出功能": ("edit_latest", "", "加上导出功能"),
         }
         for text, expected in cases.items():
             with self.subTest(text=text):
@@ -117,6 +127,23 @@ class WebStudioPluginTests(unittest.TestCase):
         replies = asyncio.run(collect(plugin.on_message(event)))
         self.assertIn("饮水记录", replies[-1])
         self.assertIn("https://site/x/0123456789/", replies[-1])
+
+    @patch("data.plugins.web_studio.main.get_tier", return_value=Tier.X)
+    @patch.object(WebStudio, "_edit", autospec=True)
+    def test_natural_followup_edits_the_latest_owned_page(self, edit, _tier):
+        plugin = self._plugin()
+        plugin._store.list.return_value = [
+            SimpleNamespace(id="0123456789", title="图库")
+        ]
+
+        async def fake_edit(_plugin, event, owner, tier, page_id, changes):
+            yield event.plain_result(f"{owner}:{page_id}:{changes}")
+
+        edit.side_effect = fake_edit
+        event = FakeEvent("刚才那个网页再加上导出功能")
+        replies = asyncio.run(collect(plugin.on_message(event)))
+
+        self.assertEqual(replies[-1], "123456:0123456789:加上导出功能")
 
     @patch.object(WebStudio, "_finalize_html", new_callable=AsyncMock)
     @patch("data.plugins.web_studio.main.revise_page", return_value="draft")
@@ -193,6 +220,20 @@ class WebStudioPluginTests(unittest.TestCase):
         self.assertEqual(title, "任务清单")
         self.assertNotIn("<iframe", html)
         review.assert_called_once()
+
+    @patch("data.plugins.web_studio.main.review_draft")
+    def test_safety_repair_rechecks_and_never_publishes_second_unsafe_draft(self, review):
+        unsafe = "<html><head><title>x</title></head><body><iframe></iframe></body></html>"
+        still_unsafe = "<html><head><title>x</title></head><body><object></object></body></html>"
+        repaired = (
+            "<html><head><title>任务清单</title></head><body>"
+            "<input><button>添加任务</button></body></html>"
+        )
+        review.side_effect = [still_unsafe, repaired]
+        html, title = asyncio.run(WebStudio._finalize_html("制作任务清单", unsafe))
+        self.assertEqual(title, "任务清单")
+        self.assertNotIn("<object", html)
+        self.assertEqual(review.call_count, 2)
 
 
 if __name__ == "__main__":

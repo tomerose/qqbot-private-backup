@@ -7,10 +7,8 @@ from dataclasses import dataclass
 
 try:
     from .agent_core import normalize_backend, validate_task
-    from .artifact_staging import is_artifact_request
 except ImportError:  # Direct module loading in unit tests.
     from agent_core import normalize_backend, validate_task
-    from artifact_staging import is_artifact_request
 
 
 @dataclass(frozen=True)
@@ -22,19 +20,14 @@ class NaturalAgentIntent:
     clarification: str = ""       # human-readable disambiguation prompt
 
 # ── Ambiguity: when NL could be Agent task OR search/action report ──
-# Keywords that suggest the user wants a file/artifact, not just a text report
-_ARTIFACT_KEYWORDS = re.compile(
-    r"文件|生成|创建|制作|交付|输出|导出|保存|下载|发给?我|做成|"
-    r"网页|网站|html|前端|页面|部署|代码|写一个|帮我写|"
-    r"表格|excel|csv|ppt|幻灯片",
-    re.I,
-)
-# Keywords that suggest the user wants research/analysis (text), not agent
-_SEARCH_ACTION_KEYWORDS = re.compile(
+# A report can mean either a researched answer or a local file.  Creation
+# verbs alone do not settle that question; concrete delivery targets do.
+_REPORTISH = re.compile(
     r"研究|调研|分析|比较|对比|决策|规划.*行程|规划.*旅行|攻略|深度研究|"
-    r"报告|调查|评估|汇总|整理",
+    r"报告|调查|评估|汇总|整理|资料",
     re.I,
 )
+_DELIVERY_ACTION = re.compile(r"导出|保存|交付|下载|发给?我|做成", re.I)
 # Strong disambiguators — these override the ambiguity check
 _FORCE_AGENT = re.compile(
     r"(?:用\s*(?:claude|codex|workbuddy)|"
@@ -51,6 +44,14 @@ _CONTEXT_OBJECT = re.compile(
     r"这份|那份|这个文件|那个文件|该文件|附件|刚才.*文件|上次.*文件|刚才.*报告|上次.*报告",
     re.I,
 )
+_READ_ONLY_TASK = re.compile(
+    r"^(?:看(?:看|一下)?|解释(?:一下)?|评价(?:一下)?|点评(?:一下)?|"
+    r"说说|讲讲|聊聊|总结(?:一下)?|分析(?:一下)?|研究(?:一下)?|"
+    r"调研(?:一下)?)",
+    re.I,
+)
+_REPORT_CREATION = re.compile(r"生成|创建|制作|编写|撰写|做(?:一份|个)?|写(?:一份|个)?", re.I)
+_REPORT_ACTION = re.compile(r"^(?:深度研究|深入研究|研究|调研|比较|对比|规划)", re.I)
 
 
 def _check_ambiguity(task: str) -> tuple[bool, str]:
@@ -62,14 +63,13 @@ def _check_ambiguity(task: str) -> tuple[bool, str]:
         return False, ""
     if _CONTEXT_OBJECT.search(task):
         return False, ""
-    has_artifact = bool(_ARTIFACT_KEYWORDS.search(task))
-    has_search = bool(_SEARCH_ACTION_KEYWORDS.search(task))
-    if has_search and not has_artifact:
+    if (
+        _REPORTISH.search(task)
+        and not _DELIVERY_ACTION.search(task)
+        and not _CONCRETE_AGENT_TARGET.search(task)
+    ):
         return True, (
-            "这个请求我可以：\n"
-            "A) 生成一份 Markdown 研究报告发给你（搜索行动包）\n"
-            "B) 启动 Agent 在本地工作区生成完整的项目文件\n"
-            "回复 A 或 B，或者说得更具体一点～"
+            "你是想让我查资料后直接给结论，还是做成 Word、PPT 这类文件发你？"
         )
     return False, ""
 
@@ -122,9 +122,10 @@ _GREETING_ONLY = re.compile(
 _BACKEND_PREFIX = re.compile(
     r"^用\s*(claude(?:\s*code)?|codex|workbuddy)\s*", re.I
 )
-_PROJECT_TASK = re.compile(
+_CONCRETE_AGENT_TARGET = re.compile(
     r"代码|项目|仓库|脚本|程序|测试|构建|编译|部署|服务|目录|文件|数据|"
-    r"报告|文档|表格|资料|txt|csv|markdown|"
+    r"文档|表格|txt|csv|markdown|docx|xlsx|pptx|zip|json|"
+    r"png|jpe?g|webp|gif|"
     r"数据库|网页|网站|接口|日志|压缩包|磁盘|disk|git|github|python|typescript|"
     r"浏览器|cookie|密码|通讯录|私聊记录|"
     r"javascript|node(?:\.js)?|excel|word|ppt|pdf",
@@ -165,9 +166,22 @@ def route_natural_agent(text: str) -> NaturalAgentIntent | None:
     if not task:
         return None
     task = validate_task(task)
-    # Feature plugins and normal chat own generic "帮我..." language. Agent only
-    # claims an explicit backend request or concrete file/project work.
-    if not backend and not is_artifact_request(task) and not _PROJECT_TASK.search(task):
+    if not backend and _READ_ONLY_TASK.match(task):
+        return None
+    concrete_target = bool(
+        _CONCRETE_AGENT_TARGET.search(task)
+        or _CONTEXT_OBJECT.search(task)
+        or (_DELIVERY_ACTION.search(task) and _REPORTISH.search(task))
+    )
+    if not (backend or concrete_target):
+        if (
+            (_REPORT_CREATION.search(task) or _REPORT_ACTION.search(task))
+            and _REPORTISH.search(task)
+        ):
+            ambiguous, clarification = _check_ambiguity(task)
+            return NaturalAgentIntent(
+                "run", task, ambiguous=ambiguous, clarification=clarification
+            )
         return None
     ambiguous, clarification = _check_ambiguity(task)
     return NaturalAgentIntent("run", task, backend, ambiguous=ambiguous, clarification=clarification)

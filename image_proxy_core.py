@@ -12,8 +12,8 @@ IMAGE_MODEL_PREMIUM = "gemini-3-pro-image"       # kept for backward compat
 IMAGE_MODEL_ULTRA   = "gemini-3-pro-image"
 IMAGE_MODELS = frozenset({IMAGE_MODEL_PRIMARY, IMAGE_MODEL_FALLBACK})
 # ponytail: Imagen disabled — project solar-modem-496213-f5 has no Imagen quota.
-# Enable via GCP console before re-adding imagen-3.0/imagen-4.0 to this set.
-IMAGEN_MODELS: frozenset[str] = frozenset()  # empty → all draws use Gemini path
+# Google will sunset all Imagen models 2026-06-30. All gen uses Gemini native image.
+IMAGEN_MODELS: frozenset[str] = frozenset()
 MAX_IMAGE_PROMPT_CHARS = 500
 _SIZE_TO_ASPECT_RATIO = {
     "512x512": "1:1",
@@ -23,6 +23,8 @@ _SIZE_TO_ASPECT_RATIO = {
     "1024x576": "16:9",
     "576x1024": "9:16",
 }
+# 4K resolution — PRO exclusive, Gemini 3 Pro Image supports up to 4096x4096
+_4K_ASPECT_RATIOS = frozenset({"1:1", "16:9", "9:16", "2:3", "3:2"})
 
 
 class ImageRequestError(ValueError):
@@ -34,6 +36,7 @@ class ImageRequest:
     prompt: str
     model: str
     aspect_ratio: str
+    image_size: str  # "2K" (default) or "4K" (PRO exclusive)
 
 
 def image_model_attempts(model: str) -> tuple[str, ...]:
@@ -61,10 +64,14 @@ def normalize_image_request(body: object) -> ImageRequest:
     requested_model = str(body.get("model", "")).strip()
     model = requested_model if requested_model in IMAGE_MODELS else IMAGE_MODEL_PRIMARY
     size = str(body.get("size", "1024x1024")).lower().replace(" ", "")
+    image_size = str(body.get("image_size", "2K")).upper()
+    if image_size not in ("2K", "4K"):
+        image_size = "2K"
     return ImageRequest(
         prompt=prompt,
         model=model,
         aspect_ratio=_SIZE_TO_ASPECT_RATIO.get(size, "1:1"),
+        image_size=image_size,
     )
 
 

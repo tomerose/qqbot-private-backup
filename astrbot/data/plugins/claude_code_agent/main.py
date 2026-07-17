@@ -26,6 +26,7 @@ from .agent_core import (
     ApprovalRegistry,
     BACKEND_CLAUDE,
     BACKEND_CODEX,
+    BACKEND_WORKBUDDY,
     DEFAULT_WORKSPACE,
     DEFAULT_WORK_DIR,
     DEFAULT_CODEX_MODEL,
@@ -43,6 +44,7 @@ from .agent_core import (
     parse_backend_result,
     redact_sensitive_text,
     referenced_workspace_files,
+    strip_tool_call_xml,
     upload_aiocqhttp_group_file,
     upload_aiocqhttp_private_file,
     validate_task,
@@ -74,6 +76,7 @@ from .document_quality import (
 from .step_policy import assess_step, step_digest
 from .task_orchestrator import StepExecution, TaskEvent, TaskOrchestrator
 from .task_planner import ExecutionPlan, TaskRequest, TaskStep, plan_task
+from . import file_cache
 from .progress_policy import ProgressPolicy
 from .response_style import format_task_reply
 from .eta_policy import estimate_eta
@@ -94,6 +97,17 @@ try:
 except ImportError:  # AstrBot package import path.
     from data.plugins.draw_command.pro_access import agent_available, get_tier, Tier, use_agent
 OWNER_ID = "1211000567"
+
+def _import_task_tracker():
+    """Lazy-import the cross-dialog task mirror so late-loaded memory plugins still connect."""
+    try:
+        from astrbot_plugin_xiaoning_memory.main import track_agent_job_status
+    except ImportError:
+        try:
+            from data.plugins.astrbot_plugin_xiaoning_memory.main import track_agent_job_status
+        except ImportError:
+            return None
+    return track_agent_job_status
 MAX_REPLY_CHARS = 3500
 
 
@@ -119,7 +133,7 @@ class ClaudeCodeAgent(Star):
         self.codex_model = str(self.config.get("codex_model", DEFAULT_CODEX_MODEL)).strip() or DEFAULT_CODEX_MODEL
         configured_dir = self.config.get("default_work_dir", str(DEFAULT_WORK_DIR))
         self.work_dir = validate_work_dir(configured_dir)
-        self.timeout_seconds = max(60, min(int(self.config.get("timeout_seconds", 1800)), 7200))
+        self.timeout_seconds = max(120, min(int(self.config.get("timeout_seconds", 3600)), 7200))
         self.max_attachment_files = max(1, min(int(self.config.get("max_attachment_files", 10)), 20))
         attachment_mb = max(1, min(int(self.config.get("max_attachment_mb", 20)), 100))
         self.max_attachment_bytes = attachment_mb * 1024 * 1024
@@ -138,6 +152,17 @@ class ClaudeCodeAgent(Star):
             self.workspace / "state" / "private_jobs"
         )
         self._job_store = JobStore(self.workspace / "state" / "jobs.db")
+        self._task_tracker = None  # lazy-imported on first use
+        try:
+            try:
+                from data.plugins.friend_core.delivery_queue import get_queue
+            except ImportError:
+                from friend_core.delivery_queue import get_queue
+            get_queue().register_outcome_handler(
+                "agent", self._on_queued_delivery_outcome
+            )
+        except Exception:
+            logger.debug("[LocalAgent] delivery outcome callback unavailable")
         recovered = self._job_store.recover_interrupted()
         if recovered:
             logger.warning(f"[LocalAgent] recovered interrupted jobs count={recovered}")
@@ -148,6 +173,78 @@ class ClaudeCodeAgent(Star):
             )
         except RuntimeError:
             pass
+
+    def _get_task_tracker(self):
+        """Lazy-import the cross-dialog task mirror; retry on every call until it sticks."""
+        tracker = getattr(self, "_task_tracker", None)
+        if tracker is not None:
+            return tracker
+        tracker = _import_task_tracker()
+        if tracker is not None:
+            self._task_tracker = tracker
+        return tracker
+
+    async def _track_cross_dialog_job(
+        self, qq_id: str, job_id: str, task: str, status: str, evidence: str = ""
+    ) -> None:
+        def sync_track() -> bool:
+            tracker = self._get_task_tracker()
+            if tracker is None:
+                return False
+            tracker(qq_id, job_id, task, status, evidence)
+            return True
+
+        try:
+            if await asyncio.wait_for(asyncio.to_thread(sync_track), timeout=1.0):
+                return
+        except Exception:
+            logger.debug("[LocalAgent] cross-dialog task mirror unavailable, writing local fallback")
+        # ── local fallback: preserve task events even when memory plugin / Firestore is down ──
+        try:
+            self._job_store.record_task_event(job_id, status, evidence, sender_id=qq_id)
+        except Exception:
+            logger.debug("[LocalAgent] local task-event fallback write failed")
+
+    async def _on_queued_delivery_outcome(
+        self, entry: object, status: str, evidence: str
+    ) -> None:
+        """Converge Agent's private ledger after the shared queue settles."""
+        job_id = str(getattr(entry, "job_id", "") or "")
+        local_path = Path(str(getattr(entry, "local_path", "") or ""))
+        if not job_id or str(getattr(entry, "task_owner", "")) != "agent":
+            return
+        if status in {"artifact_delivered", "done"} and local_path.is_file():
+            try:
+                payload = self._payload_store.read(job_id)
+                digests = set(payload.delivery_cursor)
+                digests.add(self._file_digest(local_path))
+                self._payload_store.write(
+                    job_id, self._payload_with_cursor(payload, digests)
+                )
+            except Exception:
+                logger.debug("[LocalAgent] queued delivery cursor unavailable: %s", job_id)
+        if status == "done":
+            record = self._job_store.get(job_id)
+            if record and record.get("state") in {
+                "delivery_pending", "delivering", "interrupted"
+            }:
+                try:
+                    payload = self._payload_store.read(job_id)
+                    count = len(payload.delivery_cursor)
+                except Exception:
+                    count = max(1, int(record.get("deliverable_count", 0)))
+                self._job_store.finish(
+                    job_id, "completed", exit_code=0, deliverable_count=count
+                )
+                self._delete_payload(job_id)
+        elif status == "failed":
+            record = self._job_store.get(job_id)
+            if record and record.get("state") in {
+                "delivery_pending", "delivering", "interrupted"
+            }:
+                self._job_store.finish(
+                    job_id, "failed", error_code="delivery_retries_exhausted"
+                )
 
     def _is_owner(self, ctx: Context) -> bool:
         sender_id = ctx.get_sender_id()
@@ -308,7 +405,13 @@ class ClaudeCodeAgent(Star):
         return "\n".join(lines)
 
     async def _deliver_artifact(
-        self, event: AstrMessageEvent, path: Path, *, kind: str = "file"
+        self,
+        event: AstrMessageEvent,
+        path: Path,
+        *,
+        kind: str = "file",
+        task_id: str = "",
+        task_desc: str = "",
     ) -> ArtifactDeliveryResult:
         roots = [self.workspace, default_workspace_root(event.unified_msg_origin)]
         if not is_within_allowed_roots(path, roots):
@@ -316,7 +419,13 @@ class ClaudeCodeAgent(Star):
             return ArtifactDeliveryResult(False, "retained", error="PolicyRejected")
         logger.info("[Agent] delivery start: %s kind=%s", path.name, kind)
         result = await deliver_local_artifact(
-            event, path, allowed_roots=roots, kind=kind
+            event,
+            path,
+            allowed_roots=roots,
+            kind=kind,
+            task_id=task_id,
+            task_desc=task_desc,
+            task_owner="agent" if task_id else "",
         )
         logger.info("[Agent] delivery result: %s ok=%s ch=%s err=%s",
                      path.name, result.delivered, result.channel, result.error)
@@ -379,7 +488,9 @@ class ClaudeCodeAgent(Star):
         allowed_roots = [self.workspace, default_workspace_root(event.unified_msg_origin)]
         for component in components:
             if isinstance(component, Plain):
-                component.text = redact_sensitive_text(component.text)
+                component.text = strip_tool_call_xml(
+                    redact_sensitive_text(component.text)
+                )
                 cleaned.append(component)
                 continue
             if isinstance(component, File) and component.file_:
@@ -602,6 +713,10 @@ class ClaudeCodeAgent(Star):
             [d.path.name for d in deliverables] if deliverables else [],
         )
         result = parse_backend_result(backend, raw)
+        # Strip raw XML tool-call blocks — without --output-format json,
+        # Claude Code may emit <tool_call>/<function> tags that should
+        # never reach the QQ chat window.
+        result = strip_tool_call_xml(result)
         if not result and not deliverables:
             logger.error(f"[LocalAgent] backend={backend} job={job_id} empty_result")
             return f"{backend} 没有返回可读结果。", [], "failed", returncode, "empty_result"
@@ -780,7 +895,12 @@ class ClaudeCodeAgent(Star):
 
     async def _recover_jobs(self) -> None:
         """Resume only DPAPI-backed replay-safe jobs; block everything else."""
-        for record in self._job_store.list_interrupted():
+        recoverable = (
+            self._job_store.list_recoverable()
+            if hasattr(self._job_store, "list_recoverable")
+            else self._job_store.list_interrupted()
+        )
+        for record in recoverable:
             job_id = str(record["job_id"])
             try:
                 payload = self._payload_store.read(job_id)
@@ -914,6 +1034,7 @@ class ClaudeCodeAgent(Star):
                                 step_exit if step_state == "completed" else (step_exit or 1),
                                 step_items,
                                 None,
+                                response_text=response,
                             )
                             if not evidence.verified:
                                 state = "failed"
@@ -1093,6 +1214,10 @@ class ClaudeCodeAgent(Star):
             yield self._reply(ctx, Plain("任务存储失败，请稍后再试。"))
             return
 
+        await self._track_cross_dialog_job(
+            sender_id, job_id, payload.task, "in_progress", "planned"
+        )
+
         will_queue = self._execution_lock.locked()
         queue_ahead = self._queued_handlers + (1 if will_queue else 0)
         eta = estimate_eta(plan, queue_ahead=queue_ahead)
@@ -1126,6 +1251,9 @@ class ClaudeCodeAgent(Star):
                         self._job_store.finish(
                             job_id, "failed", error_code="agent_quota_exhausted"
                         )
+                        await self._track_cross_dialog_job(
+                            sender_id, job_id, payload.task, "failed", "agent_quota_exhausted"
+                        )
                         self._delete_payload(job_id)
                         yield self._reply(ctx, Plain(reason))
                         return
@@ -1153,8 +1281,8 @@ class ClaudeCodeAgent(Star):
                     ),
                 )
 
-            output_dir = job_dir / "outputs"
             available_backends = await self._backend_health.available()
+            output_dir = job_dir / "outputs"
             def policy(step: TaskStep):
                 decision = assess_step(
                     step,
@@ -1163,40 +1291,15 @@ class ClaudeCodeAgent(Star):
                     allowed_work_root=self.recovery_root,
                     allowed_output_root=self.workspace,
                 )
-                # ponytail: unknown steps are approved via assess_step's
-                # requires_approval=True; once approved the orchestrator runs
-                # them on the host (same path as HIGH_IMPACT). No dead
-                # isolation adapter exists, so do not synthesize a blocked
-                # decision that would waste the user's approval effort.
                 return decision
 
             def router(step: TaskStep, attempted: frozenset[str]):
-                if not trusted_runtime:
-                    # ponytail: prefer Codex sandbox, fall back to Claude if
-                    # unavailable. WorkBuddy is excluded (full host access).
-                    sandbox_backends = available_backends - {"workbuddy"}
-                    if not sandbox_backends:
-                        return BackendRoute(None, "no_sandbox_available")
-                    sandbox_preferred = (
-                        BACKEND_CODEX if BACKEND_CODEX in sandbox_backends
-                        else BACKEND_CLAUDE
-                    )
-                    selected = route_backend(
-                        step, sandbox_preferred, sandbox_backends, attempted,
-                    )
-                    if selected.backend is None:
-                        return BackendRoute(None, "no_sandbox_available")
-                    return selected
-                selected = route_backend(
+                return route_backend(
                     step,
                     plan.preferred_backend,
                     available_backends,
                     attempted,
                 )
-                approved_backend = approved_steps.get(step_digest(step))
-                if approved_backend and selected.backend != approved_backend:
-                    return BackendRoute(None, "approval_backend_changed")
-                return selected
 
             async def execute(step: TaskStep, route):
                 original_trusted_runtime = getattr(
@@ -1204,7 +1307,7 @@ class ClaudeCodeAgent(Star):
                 )
                 self._execution_trusted_runtime = trusted_runtime
                 try:
-                    response, deliverables, state, exit_code, _error = await self._execute(
+                    response, deliverables, state, exit_code, error_code = await self._execute(
                         job_id,
                         job_dir,
                         step.instruction,
@@ -1244,6 +1347,7 @@ class ClaudeCodeAgent(Star):
                     verification_exit,
                     started_side_effect,
                     response=response,
+                    error_code=error_code,
                 )
 
             async def verifier(step: TaskStep, execution: StepExecution):
@@ -1252,6 +1356,8 @@ class ClaudeCodeAgent(Star):
                     execution.exit_code,
                     execution.deliverables,
                     execution.verification_exit,
+                    response_text=execution.response,
+                    error_code=execution.error_code,
                 )
 
             orchestrator = TaskOrchestrator(
@@ -1328,8 +1434,25 @@ class ClaudeCodeAgent(Star):
                     "failed",
                     error_code=outcome.events[-1].code,
                 )
+                await self._track_cross_dialog_job(
+                    sender_id,
+                    job_id,
+                    payload.task,
+                    "failed",
+                    outcome.events[-1].code,
+                )
                 self._delete_payload(job_id)
-                detail = "验证未通过，未标记为完成。"
+                error_messages = {
+                    "all_backends_exhausted": "所有后端均已尝试但均未成功，请稍后重试。",
+                    "execution_failed": "任务执行失败（Agent 退出非零）。可能是任务依赖的外部资源无法获取（如图片下载失败），可尝试换一个更具体的描述。",
+                    "empty_result": "Agent 后端没有返回可读结果，也没有生成目标文件。请换个更明确的描述或稍后重试。",
+                    "artifact_missing": "Agent 执行完成但未生成目标文件。任务可能需要更明确的文件格式要求。",
+                    "verification_failed": "项目验证未通过。",
+                }
+                detail = error_messages.get(
+                    outcome.events[-1].code,
+                    f"任务未完成（{outcome.events[-1].code}），请稍后重试或换个描述方式。",
+                )
                 failed_event = TaskEvent(
                     "failed", job_id, next_cursor, outcome.events[-1].code
                 )
@@ -1360,11 +1483,14 @@ class ClaudeCodeAgent(Star):
             response = outcome.responses[-1] if outcome.responses else "验证已通过。"
             delivered_digests: set[str] = set(payload.delivery_cursor)
             all_delivered = True
+            queued_for_retry = False
             for item in deliverables:
                 outcome = await self._deliver_artifact(
                     ctx,
                     item.path,
                     kind="image" if item.kind == "image" else "file",
+                    task_id=job_id,
+                    task_desc=payload.task,
                 )
                 delivered = outcome.delivered
                 if delivered:
@@ -1384,6 +1510,7 @@ class ClaudeCodeAgent(Star):
                     payload = self._payload_with_cursor(payload, delivered_digests)
                     self._payload_store.write(job_id, payload)
                 else:
+                    queued_for_retry = queued_for_retry or outcome.channel == "queued"
                     retry_note = (
                         "已加入后台重试队列，稍后自动送达。"
                         if outcome.channel == "queued"
@@ -1403,6 +1530,24 @@ class ClaudeCodeAgent(Star):
                     exit_code=0,
                     deliverable_count=len(deliverables),
                 )
+                await self._track_cross_dialog_job(
+                    sender_id,
+                    job_id,
+                    payload.task,
+                    "done",
+                    f"qq_delivery_confirmed:{len(deliverables)}",
+                )
+                # Cache file paths so "发送刚才那个文件" works across users
+                for item in deliverables:
+                    try:
+                        file_cache.record_file(
+                            payload.task,
+                            str(item.path.resolve()),
+                            sender_id=sender_id,
+                            job_id=job_id,
+                        )
+                    except Exception:
+                        pass
                 self._delete_payload(job_id)
                 completed_event = TaskEvent(
                     "completed", job_id, len(plan.steps) - 1, "completed"
@@ -1413,6 +1558,17 @@ class ClaudeCodeAgent(Star):
                         Plain(format_task_reply("completed", detail=response)),
                     )
             else:
+                if queued_for_retry:
+                    self._job_store.transition(
+                        job_id, "delivery_pending", "delivery_pending"
+                    )
+                await self._track_cross_dialog_job(
+                    sender_id,
+                    job_id,
+                    payload.task,
+                    "delivery_pending",
+                    "qq_delivery_unconfirmed",
+                )
                 delivery_event = TaskEvent(
                     "failed", job_id, len(plan.steps) - 1, "delivery_pending"
                 )
@@ -1432,6 +1588,13 @@ class ClaudeCodeAgent(Star):
                     job_id,
                     "failed",
                     error_code=f"planned_{type(exc).__name__}",
+                )
+                await self._track_cross_dialog_job(
+                    sender_id,
+                    job_id,
+                    payload.task,
+                    "failed",
+                    f"planned_{type(exc).__name__}",
                 )
             except Exception:
                 pass
@@ -1478,7 +1641,28 @@ class ClaudeCodeAgent(Star):
                     message = "/agent confirm"
                 else:
                     message = f"/agent {natural_intent.action}"
+        # ── 文件缓存命中: "发我那个文件" → 直接交付，不走Agent ──
         if not message.startswith("/agent"):
+            # Check both natural language and /agent paths for file requests
+            sender = str(ctx.get_sender_id() or "")
+            if file_cache.is_file_request(message) or file_cache.is_file_request(
+                self._natural_text(ctx)
+            ):
+                cached = file_cache.find_matching_file(message, sender)
+                if cached is not None:
+                    result = await self._deliver_artifact(
+                        ctx, cached, kind="file",
+                        task_id="cached", task_desc="之前生成的文件",
+                    )
+                    if result.delivered:
+                        yield self._reply(ctx, Plain(
+                            f"已发送：{cached.name}（之前已生成，直接发送）"
+                        ))
+                    else:
+                        yield self._reply(ctx, Plain(
+                            f"{cached.name} 暂时发送失败，已在后台重试队列。"
+                        ))
+                    return
             return
         parts = message.split(maxsplit=2)
         action = parts[1].lower() if len(parts) > 1 else "help"
@@ -1539,7 +1723,14 @@ class ClaudeCodeAgent(Star):
         if action not in {"run", "approve", "confirm"} or (
             action in {"run", "approve"} and len(parts) < 3
         ):
-            yield self._reply(ctx, Plain(self._help_text()))
+            yield self._reply(
+                ctx,
+                Plain(
+                    self._help_text(
+                        trusted_runtime=self._can_manage_runtime(ctx)
+                    )
+                ),
+            )
             return
         async for reply in self._handle_planned_action(
             ctx, action, parts, natural_intent

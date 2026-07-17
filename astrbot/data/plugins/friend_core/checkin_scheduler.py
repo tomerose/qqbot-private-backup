@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from astrbot.api import logger
 
@@ -18,8 +18,13 @@ QUIET_HOURS_END = 7     # 早上7点
 class CheckinScheduler:
     """Background scheduler that drives memory-triggered check-ins."""
 
-    def __init__(self, context: Any):
+    def __init__(
+        self,
+        context: Any,
+        send_checkin: Callable[[str, str], Awaitable[bool]] | None = None,
+    ):
         self._context = context
+        self._send_checkin_fn = send_checkin
         self._scanner = MemoryScanner()
         self._running = False
         self._task: asyncio.Task | None = None
@@ -90,12 +95,11 @@ class CheckinScheduler:
         if not prompt:
             return
 
-        # Build session ID for private chat: QQ friend sessions use format like "qq_official:{qq_id}"
-        session_id = f"qq_official:{qq_id}"
-
         try:
-            await self._context.send_message(session_id, prompt)
-            self._scanner.mark_sent(qq_id, task["memory_key"])
-            logger.info(f"[FriendCore] 关怀已发送 → {qq_id}: {prompt[:40]}...")
+            if self._send_checkin_fn is None:
+                return
+            if await self._send_checkin_fn(qq_id, prompt):
+                self._scanner.mark_sent(qq_id, task["memory_key"])
+                logger.info(f"[FriendCore] 关怀已发送 → {qq_id}: {prompt[:40]}...")
         except Exception as e:
             logger.warning(f"[FriendCore] 关怀发送失败 {qq_id}: {e}")

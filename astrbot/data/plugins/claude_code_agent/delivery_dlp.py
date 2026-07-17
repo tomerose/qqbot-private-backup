@@ -20,6 +20,8 @@ TEXT_SUFFIXES = {
     ".json", ".yaml", ".yml", ".xml", ".rels", ".csv", ".log", ".ini",
     ".toml", ".html", ".css", ".sql", ".sh", ".ps1", ".bat", ".cmd",
     ".java", ".c", ".cc", ".cpp", ".h", ".hpp", ".go", ".rs",
+    # Office document internals — python-pptx / python-docx / openpyxl generate these
+    ".bin", ".vml", ".emf", ".wmf",
 }
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 VIDEO_SUFFIXES = {".mp4", ".webm", ".mkv", ".mov", ".m4v"}

@@ -11,7 +11,16 @@ PLUGINS_DIR = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugin
 sys.path.insert(0, str(PLUGINS_DIR))
 
 from friend_core.birthday import Birthday, birthday_greeting, is_due_birthday, parse_explicit_birthday  # noqa: E402
-from friend_core.group_help import group_help_offer  # noqa: E402
+from friend_core.group_help import (  # noqa: E402
+    group_help_offer,
+    parse_group_help_confirmation,
+    screen_group_help,
+)
+from friend_core.persona_prompt import (  # noqa: E402
+    build_persona_prompt,
+    sanitize_conversational_reply,
+    sanitize_unverified_artifact_reply,
+)
 from friend_core import main as friend_main  # noqa: E402
 from friend_core.main import FriendCore  # noqa: E402
 
@@ -77,6 +86,116 @@ class _FixedDateTime:
 
 
 class FriendCoreBirthdayTests(unittest.TestCase):
+    def test_local_path_cannot_be_presented_as_a_delivered_image(self):
+        reply = sanitize_unverified_artifact_reply(
+            "[Image: path D:\\private\\avatar.png]\n\n"
+            "喏，说重画就重画。刚才偷偷帮你去后台把图画出来了，拿去换上吧！"
+        )
+
+        self.assertNotIn("D:\\", reply)
+        self.assertNotIn("本机路径", reply)
+        self.assertNotIn("后台把图画出来", reply)
+        self.assertIn("没有真正发出来", reply)
+
+    def test_normal_conversation_reply_is_unchanged(self):
+        reply = "这个头像的黑白线条挺干净，耳朵比例也合适。"
+        self.assertEqual(sanitize_unverified_artifact_reply(reply), reply)
+
+    def test_missed_artifact_route_cannot_fake_completion_without_a_path(self):
+        reply = sanitize_unverified_artifact_reply(
+            "弄好了，报告已经发给你了。",
+            "帮我生成一份 Word 报告",
+        )
+        self.assertNotIn("已经发给你", reply)
+        self.assertIn("收到文件才算", reply)
+
+    def test_exact_watermark_waiting_claim_is_replaced_with_truthful_handoff(self):
+        for raw in (
+            "我准备用图片编辑工具把这张图右下角残留的‘@酒莹’以及白点水印彻底抹掉，稍等我一下。",
+            "我这就调用去水印功能处理，稍微等我一下。",
+            "代码已经跑完了，我马上把修好的图片发给你。",
+        ):
+            reply = sanitize_unverified_artifact_reply(raw, "需要")
+            self.assertNotIn("稍等", reply)
+            self.assertNotIn("马上", reply)
+            self.assertIn("没有启动", reply)
+            self.assertIn("QQ 收到", reply)
+
+    def test_exact_web_waiting_and_fake_delivery_claims_are_blocked(self):
+        cases = (
+            ("行，我写一个简单的整理图库网页，HTML的，直接发你。稍等几分钟。", "能帮我做一个整理图库的东西吗"),
+            ("做好了，发你文件", "制作一个女仆雪墨网页"),
+        )
+        for raw, request in cases:
+            reply = sanitize_unverified_artifact_reply(raw, request)
+            self.assertNotEqual(reply, raw)
+            self.assertIn("没有", reply)
+            self.assertIn("QQ 收到文件", reply)
+
+    def test_status_question_gets_one_direct_verifiable_answer(self):
+        reply = sanitize_unverified_artifact_reply(
+            "网页做好了，这是 HTML 代码。",
+            "你不是在做网页吗，好了没？",
+        )
+        self.assertEqual(
+            reply,
+            "这里没有可核验的完成记录；QQ 还没收到成品，就不能说做好了。",
+        )
+
+    def test_stage_directions_and_ai_identity_excuses_are_removed(self):
+        self.assertEqual(
+            sanitize_conversational_reply("（托腮看着你）\n\n这个前提不成立。"),
+            "这个前提不成立。",
+        )
+        self.assertEqual(
+            sanitize_conversational_reply(
+                "前面说在北京上学是错的。我没有真实的个人经历。"
+            ),
+            "前面那句具体身份信息没有依据，是我说错了。我不该编现实履历来圆。",
+        )
+        self.assertEqual(
+            sanitize_conversational_reply("作为一个人工智能助手，我没有真实经历。"),
+            "前面那句具体身份信息没有依据，是我说错了。我不该编现实履历来圆。",
+        )
+
+    def test_customer_service_closers_are_trimmed(self):
+        self.assertEqual(
+            sanitize_conversational_reply("建议您先缩小范围。希望这能帮到您。"),
+            "建议你先缩小范围",
+        )
+        self.assertEqual(
+            sanitize_conversational_reply("当然可以呀，我理解你的感受。以下是我的建议：先别急。希望这能帮到你。"),
+            "先别急",
+        )
+        self.assertEqual(
+            sanitize_conversational_reply("如果你愿意，我可以继续帮你分析。这个说法站不住。"),
+            "这个说法站不住",
+        )
+
+    def test_empty_followup_questions_are_trimmed(self):
+        self.assertEqual(
+            sanitize_conversational_reply("这个判断大概率是对的。要不要我继续帮你分析？"),
+            "这个判断大概率是对的",
+        )
+        self.assertEqual(
+            sanitize_conversational_reply("先别急，这事更像是上下文断了。你想让我怎么帮你？"),
+            "先别急，这事更像是上下文断了",
+        )
+
+    def test_persona_prompt_blocks_botlike_friend_voice(self):
+        prompt = build_persona_prompt(90)
+        self.assertIn("【小柠本体】", prompt)
+        self.assertIn("当然可以呀", prompt)
+        self.assertIn("一句话顶住", prompt)
+        self.assertIn("轻微吐槽空话", prompt)
+
+    def test_artifact_how_to_question_is_not_treated_as_a_delivery_task(self):
+        reply = "视频制作完成后，再检查字幕和画面。"
+        self.assertEqual(
+            sanitize_unverified_artifact_reply(reply, "如何制作视频"),
+            reply,
+        )
+
     def test_only_accepts_explicit_solar_birthday(self):
         self.assertEqual(
             parse_explicit_birthday("我生日是3月8日"),
@@ -101,6 +220,25 @@ class FriendCoreBirthdayTests(unittest.TestCase):
         self.assertIsNone(group_help_offer("今天天气不错"))
         self.assertIn("文件", group_help_offer("谁会处理这个表格文件，帮我看看"))
         self.assertIn("查清", group_help_offer("杭州周末有什么推荐，谁知道"))
+        self.assertIsNone(group_help_offer("我想要一份杭州旅行规划"))
+        candidate = screen_group_help("我想要一份杭州旅行规划")
+        self.assertEqual(candidate.capability.id, "research")
+        self.assertLess(candidate.confidence, 0.92)
+        self.assertIsNone(screen_group_help("谁知道管理员的手机号和地址"))
+
+    def test_group_help_model_confirmation_is_strict(self):
+        accepted = parse_group_help_confirmation(
+            '{"help_requested":true,"capability_id":"research","confidence":0.95}',
+            "research",
+        )
+        self.assertEqual(accepted.capability.id, "research")
+        self.assertIsNone(
+            parse_group_help_confirmation(
+                '{"help_requested":true,"capability_id":"draw","confidence":0.99}',
+                "research",
+            )
+        )
+        self.assertIsNone(parse_group_help_confirmation("not-json", "research"))
 
     def test_birthday_song_is_completed_only_after_verified_delivery(self):
         reference = _ProfileRef()

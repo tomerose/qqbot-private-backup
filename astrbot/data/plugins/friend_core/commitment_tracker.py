@@ -3,14 +3,15 @@
 Extraction: scan last assistant message in conversation history for commitment
 patterns ("帮你查", "下次提醒你", etc.) → store in Firestore.
 
-Injection: on next interaction, inject pending commitments into system prompt
-so 小柠 knows what she promised.
+Injection: when the user follows up on an old promise, inject pending commitments
+into system prompt so 小柠 knows what she promised.
 
 Fulfillment: when user references previous commitments ("你上次说..."), auto-resolve.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import datetime, timezone
 
@@ -39,8 +40,6 @@ _COMMITMENT_PATTERNS: list[tuple[str, str]] = [
     (r"我记[住了下着]|帮你记[着下]|记下来", "remembered"),
     (r"会提醒你|到时候提醒|记得提醒|准时提醒", "remind"),
     (r"明天[帮给跟和找].{0,10}你|明天再|明天给|明天发", "tomorrow"),
-    (r"等[我一下]{1,3}(?:再|就|帮|给|查|看)|稍等.{0,10}(?:帮|给|查)", "wait"),
-    (r"马上[帮给查找].{0,10}你|现在就[帮给]", "soon"),
     (r"改天|有空再|找个时间|晚点再|抽空", "someday"),
     (r"(?:到时候|回头|晚点)(?:再|跟[你我]|和[你我])说", "tell_later"),
 ]
@@ -52,8 +51,16 @@ _COMMITMENT_RE = re.compile(
 
 # User messages that signal they're following up on a prior commitment
 _FULFILLED_TRIGGER = re.compile(
-    r"(?:你[上次之前]说|你答应|你不是说|你说了要|上次你|之前不是|"
+    r"(?:你(?:上次|之前)说|你答应|你不是说|你说了要|上次你|之前不是|"
     r"上回说|上次不是说|你说[过的]要|还记得.*你说)",
+    re.I,
+)
+_COMMITMENT_FOLLOWUP_TRIGGER = re.compile(
+    r"(?:你(?:上次|之前)说|你答应|你不是说|你说了要|上次你|之前不是|"
+    r"上回说|上次不是说|你说[过的]要|还记得.*你说|"
+    r"(?:刚才|刚刚|上次|之前|前面|那个|这事|这件事).{0,16}"
+    r"(?:怎么样|咋样|进度|好了|完成|查到|找到|提醒|结果|发了)|"
+    r"(?:进度|结果).{0,8}(?:怎么样|咋样|呢|如何))",
     re.I,
 )
 
@@ -123,7 +130,8 @@ class CommitmentTracker:
         now = datetime.now(timezone.utc)
         batch = self.db.batch()
         for promise in promises:
-            batch.set(ref.document(), {
+            identity = hashlib.sha256(promise.strip().casefold().encode("utf-8")).hexdigest()[:32]
+            batch.set(ref.document(identity), {
                 "promise": promise[:200],
                 "created_at": now,
                 "status": "pending",
@@ -180,8 +188,13 @@ class CommitmentTracker:
 
     # ── Resolve ────────────────────────────────────────────────────
 
-    def mark_fulfilled(self, qq_id: str) -> int:
-        """If user is following up on prior commitments, mark all pending as fulfilled."""
+    def mark_fulfilled(
+        self, qq_id: str, doc_ids: tuple[str, ...] = (), evidence: str = ""
+    ) -> int:
+        """Resolve only explicitly selected promises with execution evidence."""
+        selected = {str(item) for item in doc_ids if str(item)}
+        if not selected or not str(evidence or "").strip():
+            return 0
         ref = self._ref(qq_id)
         if ref is None:
             return 0
@@ -191,17 +204,21 @@ class CommitmentTracker:
 
         now = datetime.now(timezone.utc)
         batch = self.db.batch()
-        for c in pending:
+        matched = [c for c in pending if c.get("doc_id") in selected]
+        if not matched:
+            return 0
+        for c in matched:
             batch.update(ref.document(c["doc_id"]), {
                 "status": "fulfilled",
                 "fulfilled_at": now,
+                "evidence": str(evidence)[:200],
             })
         try:
             batch.commit()
         except Exception:
             return 0
-        logger.info(f"[CommitmentTracker] {qq_id} 兑现 {len(pending)} 条")
-        return len(pending)
+        logger.info(f"[CommitmentTracker] {qq_id} 兑现 {len(matched)} 条")
+        return len(matched)
 
     # ── Injection ──────────────────────────────────────────────────
 
@@ -226,7 +243,8 @@ class CommitmentTracker:
             f"\n\n{INJECTION_MARKER}\n"
             "你之前答应过此用户：\n"
             + "\n".join(lines)
-            + "\n如果用户提到相关话题，主动跟进。已经兑现的不要再提。"
+            + "\n这些都仍是待办，不是完成记录。用户追问、说“你答应过”或催进度不等于兑现；"
+            "只有真实执行和交付证据才能标记完成。相关时如实跟进，不能声称正在后台处理。"
         )
 
 
@@ -256,10 +274,10 @@ async def on_llm_request_extract(event: AstrMessageEvent, req) -> None:
     if len(sender) < 5:
         return
 
-    # Check user's message for fulfillment triggers
+    # A follow-up is evidence that a promise is still pending, never that it
+    # was fulfilled.  Keep the trigger only for intent recognition/injection.
     user_text = str(getattr(event, "get_message_str", lambda: "")() or "")
-    if user_text and _FULFILLED_TRIGGER.search(user_text):
-        tracker.mark_fulfilled(sender)
+    following_up = bool(user_text and _COMMITMENT_FOLLOWUP_TRIGGER.search(user_text))
 
     # Scan last assistant message in history for new commitments
     messages = getattr(req, "messages", None)
@@ -283,6 +301,8 @@ async def on_llm_request_extract(event: AstrMessageEvent, req) -> None:
     promises = _extract_sentences(last_assistant_text)
     if promises:
         tracker.store(sender, promises, context_msg[:80])
+    elif following_up:
+        logger.info("[CommitmentTracker] %s 正在追问未兑现约定", sender)
 
     # ── Time-based promise → scheduled action (Google ecosystem) ──
     try:
@@ -304,6 +324,9 @@ async def on_llm_request_inject(event: AstrMessageEvent, req) -> None:
     tracker = get_tracker()
     sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
     if len(sender) < 5:
+        return
+    user_text = str(getattr(event, "get_message_str", lambda: "")() or "")
+    if not (user_text and _COMMITMENT_FOLLOWUP_TRIGGER.search(user_text)):
         return
 
     sp = str(getattr(req, "system_prompt", "") or "")

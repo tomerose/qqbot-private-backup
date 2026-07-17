@@ -130,9 +130,15 @@ def verify_step(
     exit_code: int | None,
     deliverables: Sequence[object],
     verification_exit: int | None,
+    *,
+    response_text: str = "",
+    error_code: str = "",
 ) -> VerificationEvidence:
     if exit_code != 0:
-        return VerificationEvidence(False, "execution_failed")
+        code = str(error_code or "").strip()
+        return VerificationEvidence(False, code or "execution_failed")
+    if verification_exit not in {None, 0}:
+        return VerificationEvidence(False, "verification_failed")
     if step.expected_artifact and not deliverables:
         return VerificationEvidence(False, "artifact_missing")
     expected_suffixes = expected_artifact_suffixes(step.instruction)
@@ -142,6 +148,4 @@ def verify_step(
         }
         if not delivered_suffixes.intersection(expected_suffixes):
             return VerificationEvidence(False, "artifact_type")
-    if verification_exit not in {None, 0}:
-        return VerificationEvidence(False, "verification_failed")
     return VerificationEvidence(True, "verified")

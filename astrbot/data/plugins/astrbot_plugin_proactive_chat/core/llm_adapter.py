@@ -4,10 +4,37 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime
 from typing import Any
 
 from astrbot.api import logger
+
+try:
+    from friend_core.persona_prompt import (
+        sanitize_conversational_reply,
+        sanitize_unverified_artifact_reply,
+    )
+except ImportError:
+    from data.plugins.friend_core.persona_prompt import (
+        sanitize_conversational_reply,
+        sanitize_unverified_artifact_reply,
+    )
+
+try:
+    from emotional_chat.main import is_crisis_language
+except ImportError:
+    from data.plugins.emotional_chat.main import is_crisis_language
+
+
+PROACTIVE_HISTORY_MARKER = "[小柠主动消息记录]"
+_NO_SEND = "NO_SEND"
+_PROACTIVE_DEPENDENCY_RE = re.compile(
+    r"(?:想你|想死你|离不开你|只有你|你不回|等你回|必须回|快回|别不理我|"
+    r"没有你.{0,8}(?:不行|不行了|活不下去))",
+    re.I,
+)
+_GROUP_PRIVATE_RE = re.compile(r"(?:私聊|私信|QQ号|联系方式|你上次跟我说)", re.I)
 
 
 class LlmMixin:
@@ -32,6 +59,76 @@ class LlmMixin:
     context: Any
     timezone: Any
     telemetry: Any
+
+    @staticmethod
+    def _history_cue(history: list) -> str:
+        """Return a small user-authored cue for safe private-memory ranking."""
+        cues: list[str] = []
+        for message in reversed(history):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip() and content != PROACTIVE_HISTORY_MARKER:
+                cues.append(content.strip())
+            if len(cues) >= 2:
+                break
+        return "\n".join(reversed(cues))[:600]
+
+    async def _get_proactive_memory_block(self, session_id: str, history: list) -> str:
+        """Ask the loaded Xiaoning memory plugin for same-user X/Pro context only."""
+        parsed = self._parse_session_id(session_id)
+        if not parsed or ("Friend" not in parsed[1] and "Private" not in parsed[1]):
+            return ""
+        cue = self._history_cue(history)
+        if not cue:
+            return ""
+        try:
+            stars = self.context.get_all_stars()
+        except Exception:
+            return ""
+        for entry in stars:
+            plugin = getattr(entry, "star_cls", entry)
+            module_name = getattr(plugin.__class__, "__module__", "")
+            method = getattr(plugin, "build_proactive_memory_block", None)
+            if "xiaoning_memory" not in module_name or not callable(method):
+                continue
+            try:
+                result = method(parsed[2], cue)
+                if hasattr(result, "__await__"):
+                    result = await result
+                return str(result or "")
+            except Exception as exc:
+                logger.debug("[主动消息] 私聊记忆读取跳过: %s", type(exc).__name__)
+                return ""
+        return ""
+
+    def _sanitize_proactive_response(
+        self, text: object, session_id: str, request_text: str
+    ) -> str | None:
+        """Keep autonomous messages natural, bounded, and safe to send."""
+        cleaned = sanitize_conversational_reply(
+            sanitize_unverified_artifact_reply(text, request_text)
+        ).strip()
+        if not cleaned or cleaned.upper() == _NO_SEND:
+            return None
+        if len(cleaned) > 160 or _PROACTIVE_DEPENDENCY_RE.search(cleaned):
+            return None
+        parsed = self._parse_session_id(session_id)
+        if parsed and ("Group" in parsed[1] or "Guild" in parsed[1]):
+            if "@" in cleaned or _GROUP_PRIVATE_RE.search(cleaned):
+                return None
+        return cleaned
+
+    @staticmethod
+    def _has_crisis_context(history: list) -> bool:
+        """Scheduled outreach never becomes an unsolicited crisis intervention."""
+        for message in history:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and is_crisis_language(content):
+                return True
+        return False
 
     def _parse_bool_setting(self, value: Any, default: bool) -> bool:
         if isinstance(value, bool):
@@ -95,6 +192,15 @@ class LlmMixin:
             elif not isinstance(content, str):
                 # 非字符串内容强制转字符串
                 msg_dict["content"] = str(content) if content is not None else ""
+
+            if msg_dict.get("content") == PROACTIVE_HISTORY_MARKER:
+                continue
+            if (
+                msg_dict.get("role") == "user"
+                and str(msg_dict.get("content", "")).startswith("[系统任务：")
+                and "主动" in str(msg_dict.get("content", ""))
+            ):
+                continue
 
             sanitized_history.append(msg_dict)
         return sanitized_history
@@ -661,6 +767,11 @@ class LlmMixin:
                 context_settings=context_settings,
                 unanswered_count=current_unanswered_count,
             )
+            memory_block = await self._get_proactive_memory_block(
+                effective_session_id, effective_history_messages
+            )
+            if memory_block:
+                original_system_prompt = f"{original_system_prompt}\n\n{memory_block}"
 
             logger.info("[主动消息] 上下文与人格设定已准备完成喵。")
             if self.telemetry and self.telemetry.enabled:
@@ -810,7 +921,14 @@ class LlmMixin:
 
         # 仅在确实拿到 completion_text 时视为成功
         if llm_response_obj and llm_response_obj.completion_text:
-            response_text = llm_response_obj.completion_text.strip()
+            response_text = self._sanitize_proactive_response(
+                llm_response_obj.completion_text,
+                session_id,
+                final_user_simulation_prompt,
+            )
+            if not response_text:
+                logger.info("[主动消息] 本轮没有自然且安全的主动切口，跳过发送喵。")
+                return None, final_user_simulation_prompt
             if response_text == "[object Object]":
                 logger.error(
                     "[主动消息] 喵呜！LLM 返回了意料之外的 '[object Object]' 字符串喵！"

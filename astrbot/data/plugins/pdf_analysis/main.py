@@ -30,7 +30,7 @@ MIN_TEXT_LENGTH = 50  # below this, treat PDF as scanned
 SCANNED_RENDER_PAGES = 3
 COOLDOWN_SECONDS = 60
 PRO_DAILY_LIMIT = 10
-FREE_DAILY_LIMIT = 1
+REQUIRED_MSG = "文件分析需要 X 或 Pro 资格。添加小柠为 QQ 好友即可获得 X 资格。"
 PRO_MSG = "PDF 分析次数已用完（今日 {used}/{limit}）。请联系管理员获取更多次数。"
 
 _NATURAL_ANALYSIS = re.compile(
@@ -92,20 +92,18 @@ class PdfAnalysis(Star):
             return
 
         tier = get_tier(sender_id, self._pro_db)
-        group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
-        in_pro_group = bool(group_id) and is_active_pro_group(group_id, self._pro_db)
         today = time.strftime("%Y%m%d")
         dk = f"{sender_id}:{today}"
         used = self._daily_usage.get(dk, 0)
-        limit = PRO_DAILY_LIMIT if (tier >= Tier.X or in_pro_group) else FREE_DAILY_LIMIT
+        group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
+        in_pro_group = bool(group_id) and is_active_pro_group(group_id, self._pro_db)
+        if tier < Tier.X and not in_pro_group:
+            yield event.plain_result(REQUIRED_MSG)
+            return
+        limit = PRO_DAILY_LIMIT
         if used >= limit:
             yield event.plain_result(PRO_MSG.format(used=used, limit=limit))
             return
-        if tier < Tier.X:
-            yield event.plain_result(
-                f"PDF 分析每日免费 {FREE_DAILY_LIMIT} 次（{used}/{FREE_DAILY_LIMIT}）。"
-                f"X/Pro 每日 {PRO_DAILY_LIMIT} 次。发送 /pro status 查看资格。"
-            )
 
         now = time.time()
         last = self._cooldowns.get(sender_id, 0)

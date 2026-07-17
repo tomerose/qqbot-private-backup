@@ -19,8 +19,7 @@ except ImportError:
     from data.plugins.draw_command.pro_access import get_tier, Tier
 
 GEMINI_PROXY = "http://127.0.0.1:3000/v1/chat/completions"
-DEEPSEEK_API = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_KEY = "sk-991ee2d8b710420abe434f541a26164b"
+REQUIRED_MSG = "深度思考需要 X 或 Pro 资格。添加小柠为 QQ 好友即可获得 X 资格。"
 
 THINK_SYSTEM = (
     "用中文回答。你是严谨的分析师：给出结论、关键依据和不确定之处。"
@@ -63,7 +62,7 @@ class DeepThink(Star):
                 return GEMINI_PROXY, "sk-gemini-vertex", "gemini-2.5-pro", "Gemini"
         except Exception:
             pass
-        return DEEPSEEK_API, DEEPSEEK_KEY, "deepseek-reasoner", "DeepSeek"
+        return "https://api.deepseek.com/v1", "sk-991ee2d8b710420abe434f541a26164b", "deepseek-reasoner", "DeepSeek"
 
     @staticmethod
     def _call_think(question: str, *, api_base: str, api_key: str,
@@ -79,7 +78,7 @@ class DeepThink(Star):
             "max_tokens": 4096,
         }
         # Gemini thinking mode via proxy
-        if "gemini" in model.lower():
+        if "gemini" in model.lower() and "pro" in model.lower():
             payload["thinking"] = True
         response = requests.post(
             api_base,
@@ -120,6 +119,13 @@ class DeepThink(Star):
             return
 
         sender_id = str(getattr(ctx, "get_sender_id", lambda: "")() or "")
+        try:
+            tier = get_tier(sender_id, self._pro_db)
+        except Exception:
+            tier = Tier.ORDINARY
+        if tier < Tier.X:
+            yield ctx.plain_result(REQUIRED_MSG)
+            return
         api_base, api_key, model, label = self._think_config(sender_id)
         yield ctx.plain_result(f"🤔 深度思考中（{label}），稍等…")
 

@@ -67,11 +67,42 @@ class DeepThinkTriggerTests(unittest.TestCase):
 
         async def scenario():
             plugin = MODULE.DeepThink.__new__(MODULE.DeepThink)
-            with patch.object(MODULE.requests, "post", return_value=Response()) as post:
+            plugin._pro_db = Path("unused.db")
+            with patch.object(MODULE, "get_tier", return_value=MODULE.Tier.X), patch.object(
+                MODULE.requests, "post", return_value=Response()
+            ) as post:
                 replies = [reply async for reply in plugin.on_message(Event())]
             self.assertEqual(replies[-1], "最终答案")
             self.assertNotIn("思维链", replies[-1])
-            self.assertNotIn("thinking", post.call_args.kwargs["json"])
+            self.assertTrue(post.call_args.kwargs["json"]["thinking"])
+
+        asyncio.run(scenario())
+
+    def test_ordinary_user_is_rejected_without_model_call(self):
+        class Event:
+            is_at_or_wake_command = True
+
+            def is_private_chat(self):
+                return False
+
+            def get_message_str(self):
+                return "/think compare two plans"
+
+            def get_sender_id(self):
+                return "2000000000"
+
+            def plain_result(self, text):
+                return text
+
+        async def scenario():
+            plugin = MODULE.DeepThink.__new__(MODULE.DeepThink)
+            plugin._pro_db = Path("unused.db")
+            with patch.object(MODULE, "get_tier", return_value=MODULE.Tier.ORDINARY), patch.object(
+                MODULE.requests, "post"
+            ) as post:
+                replies = [reply async for reply in plugin.on_message(Event())]
+            self.assertEqual(replies, [MODULE.REQUIRED_MSG])
+            post.assert_not_called()
 
         asyncio.run(scenario())
 

@@ -18,9 +18,9 @@ except ImportError:
     from data.plugins.draw_command.pro_access import get_tier, Tier
 
 try:
-    from xiaoning_runtime import deliver_local_artifact
+    from xiaoning_runtime import deliver_local_artifact, mirror_runtime_task_status
 except ImportError:
-    from data.plugins.xiaoning_runtime import deliver_local_artifact
+    from data.plugins.xiaoning_runtime import deliver_local_artifact, mirror_runtime_task_status
 
 from .core import (
     PageStore,
@@ -56,15 +56,30 @@ WEB_HELP = (
 
 _PAGE_ID = re.compile(r"^[a-f0-9]{10}$", re.I)
 _NATURAL_PREFIX = re.compile(
-    r"^\s*(?:小柠[，,：:\s]*)?(?:请|帮我|给我)?\s*"
+    r"^\s*(?:小柠[，,：:\s]*)?(?:(?:能不能|可以|能)\s*)?(?:请|帮我|给我)?\s*"
     r"(?:做|制作|生成|创建)(?:一个|个)?(?:网页工具|网页|页面|网站)"
     r"[，,：:\s]*(?P<request>.+?)\s*$",
     re.I,
 )
 _NATURAL_SUFFIX = re.compile(
-    r"^\s*(?:小柠[，,：:\s]*)?(?:请|帮我|给我)?\s*"
+    r"^\s*(?:小柠[，,：:\s]*)?(?:(?:能不能|可以|能)\s*)?(?:请|帮我|给我)?\s*"
     r"(?:做|制作|生成|创建)(?:一个|个)?(?P<request>.+?)"
     r"(?:的)?(?:网页工具|网页|页面|网站)\s*$",
+    re.I,
+)
+_NATURAL_TOOL = re.compile(
+    r"^\s*(?:小柠[，,：:\s]*)?(?:(?:能不能|可以|能)\s*)?(?:请|帮我|给我)?\s*"
+    r"(?:做|制作|生成|创建)(?:一个|个)?"
+    r"(?P<request>(?:整理|管理|记录|统计|清单|记账|图库|相册|倒计时|番茄钟|"
+    r"计算|抽签|打卡|日程).+?)(?:的)?(?:小工具|工具|东西)"
+    r"(?:吗|吧|呢)?[？?]?\s*$",
+    re.I,
+)
+_NATURAL_EDIT_LATEST = re.compile(
+    r"^\s*(?:小柠[，,：:\s]*)?(?:请|帮我|给我)?\s*(?:把)?\s*"
+    r"(?:刚才|之前|上一个)?\s*(?:这个|那个|做的)?\s*"
+    r"(?:网页|页面|网站|网页工具|工具)\s*(?:再)?\s*[，,：:]?\s*"
+    r"(?P<request>(?:加上|增加|添加|改成|换成|删掉|删除|调整|修改).+?)\s*$",
     re.I,
 )
 
@@ -100,7 +115,10 @@ def parse_web_intent(text: object) -> WebIntent | None:
         if action in {"create", "new", "制作", "创建"}:
             return WebIntent("create", payload=tail.strip())
         return WebIntent("create", payload=rest)
-    for pattern in (_NATURAL_PREFIX, _NATURAL_SUFFIX):
+    latest_edit = _NATURAL_EDIT_LATEST.match(value)
+    if latest_edit:
+        return WebIntent("edit_latest", payload=latest_edit.group("request").strip())
+    for pattern in (_NATURAL_PREFIX, _NATURAL_SUFFIX, _NATURAL_TOOL):
         match = pattern.match(value)
         if match:
             return WebIntent("create", payload=match.group("request").strip(" ，,：:"))
@@ -187,26 +205,36 @@ class WebStudio(Star):
 
     @staticmethod
     async def _finalize_html(request: str, raw: str) -> tuple[str, str]:
-        """Repair one unsafe or semantically incomplete draft, then fail closed."""
-        try:
-            html, title = prepare_html(raw)
-        except UnsafePageError as exc:
-            repair_request = (
-                f"{request[:900]}。当前草稿安全检查未通过：{exc}。"
-                "必须删除相关危险结构，禁止表单提交、外链、联网、跳转、登录和支付，同时保留核心功能。"
-            )
-            raw = await asyncio.to_thread(review_draft, repair_request, raw)
-            html, title = prepare_html(raw)
-        gaps = requirement_gaps(request, html)
-        if gaps:
+        """Bounded safety and requirement repair; never publish a partial draft."""
+
+        async def validate(candidate: str) -> tuple[str, str]:
+            for attempt in range(3):
+                try:
+                    return prepare_html(candidate)
+                except UnsafePageError as exc:
+                    if attempt == 2:
+                        raise
+                    repair_request = (
+                        f"{request[:900]}。当前草稿安全检查未通过：{exc}。"
+                        "必须删除相关危险结构，禁止表单提交、外链、联网、跳转、"
+                        "登录和支付，同时保留核心功能。"
+                    )
+                    candidate = await asyncio.to_thread(
+                        review_draft, repair_request, candidate
+                    )
+            raise GenerationError("网页安全检查未通过")
+
+        html, title = await validate(raw)
+        for _ in range(2):
+            gaps = requirement_gaps(request, html)
+            if not gaps:
+                return html, title
             repair_request = (
                 f"{request[:900]}。当前草稿遗漏：{'、'.join(gaps)}，必须逐项实现。"
             )
-            raw = await asyncio.to_thread(review_draft, repair_request, raw)
-            html, title = prepare_html(raw)
-            if requirement_gaps(request, html):
-                raise GenerationError("网页没有覆盖用户核心需求")
-        return html, title
+            revised = await asyncio.to_thread(review_draft, repair_request, html)
+            html, title = await validate(revised)
+        raise GenerationError("网页没有覆盖用户核心需求")
 
     async def _show(self, event: AstrMessageEvent, owner: str, page_id: str):
         if not _PAGE_ID.fullmatch(page_id):
@@ -233,6 +261,8 @@ class WebStudio(Star):
     async def _create(self, event: AstrMessageEvent, owner: str, tier: Tier, request: str):
         reserved_day: str | None = None
         uncertain_publish = False
+        page_id = new_page_id()
+        task_desc = f"制作网页：{request[:160]}"
         try:
             daily_limit, active_limit = self._tier_limits(tier)
             if self._store.active_count(owner) >= active_limit:
@@ -247,6 +277,9 @@ class WebStudio(Star):
                 )
                 return
             reserved_day = usage_day
+            await mirror_runtime_task_status(
+                owner, page_id, task_desc, "in_progress", "generation_started", owner="web"
+            )
             yield event.plain_result(
                 f"正在制作网页（今日 {used}/{daily_limit}）…完成后会返回预览、HTML 和 HTTPS 链接。"
             )
@@ -254,7 +287,6 @@ class WebStudio(Star):
             if tier == Tier.PRO:
                 raw = await asyncio.to_thread(review_draft, request, raw)
             html, title = await self._finalize_html(request, raw)
-            page_id = new_page_id()
             async with self._publish_lock:
                 if self._store.active_count(owner) >= active_limit:
                     raise RuntimeError("active limit reached")
@@ -288,6 +320,14 @@ class WebStudio(Star):
                 logger.warning("[WebStudio] QQ attachment delivery failed: %s", type(exc).__name__)
                 html_sent, preview_sent = False, False
             delivered = self._attachment_status(html_sent, preview_sent)
+            await mirror_runtime_task_status(
+                owner,
+                page_id,
+                task_desc,
+                "done",
+                f"public_url_verified;html={int(html_sent)};preview={int(preview_sent)}",
+                owner="web",
+            )
             yield event.plain_result(
                 f"网页做好了：{title}\n{self._publisher.page_url(page_id)}\n"
                 f"页面 ID：{page_id}（以后可原址修改）\n{delivered}。"
@@ -298,6 +338,14 @@ class WebStudio(Star):
         ) as exc:
             self._refund(owner, reserved_day)
             logger.warning("[WebStudio] create failed: %s", type(exc).__name__)
+            await mirror_runtime_task_status(
+                owner,
+                page_id,
+                task_desc,
+                "delivery_pending" if uncertain_publish else "failed",
+                f"create_{type(exc).__name__}",
+                owner="web",
+            )
             if isinstance(exc, (ValueError, UnsafePageError)):
                 yield event.plain_result(f"这个网页不能发布：{exc}。本次次数已退回。")
             elif uncertain_publish:
@@ -327,6 +375,10 @@ class WebStudio(Star):
                 f"今天的网页制作次数已用完（{used}/{daily_limit}），明天北京时间重置。"
             )
             return
+        task_desc = f"修改网页《{record.title}》：{changes[:140]}"
+        await mirror_runtime_task_status(
+            owner, page_id, task_desc, "in_progress", "revision_started", owner="web"
+        )
         yield event.plain_result(f"正在原址修改《{record.title}》（今日 {used}/{daily_limit}）…")
         uncertain_publish = False
         try:
@@ -367,6 +419,14 @@ class WebStudio(Star):
             except Exception as exc:
                 logger.warning("[WebStudio] QQ attachment delivery failed: %s", type(exc).__name__)
                 html_sent, preview_sent = False, False
+            await mirror_runtime_task_status(
+                owner,
+                page_id,
+                task_desc,
+                "done",
+                f"public_url_verified;html={int(html_sent)};preview={int(preview_sent)}",
+                owner="web",
+            )
             yield event.plain_result(
                 f"已原址更新：{title}\n{self._publisher.page_url(page_id)}\n"
                 f"页面 ID 仍是 {page_id}；{self._attachment_status(html_sent, preview_sent)}。"
@@ -377,6 +437,14 @@ class WebStudio(Star):
         ) as exc:
             self._refund(owner, reserved_day)
             logger.warning("[WebStudio] edit failed: %s", type(exc).__name__)
+            await mirror_runtime_task_status(
+                owner,
+                page_id,
+                task_desc,
+                "delivery_pending" if uncertain_publish else "failed",
+                f"edit_{type(exc).__name__}",
+                owner="web",
+            )
             if isinstance(exc, (ValueError, UnsafePageError)):
                 yield event.plain_result(f"这次修改不能发布：{exc}。本次次数已退回。")
             elif uncertain_publish:
@@ -480,6 +548,20 @@ class WebStudio(Star):
         if intent.action == "edit":
             async for result in self._edit(
                 event, owner, tier, intent.page_id, intent.payload
+            ):
+                yield result
+            return
+        if intent.action == "edit_latest":
+            try:
+                latest = self._store.list(owner)
+            except sqlite3.Error:
+                yield event.plain_result("网页记录暂时无法读取，请稍后再试。")
+                return
+            if not latest:
+                yield event.plain_result("你还没有可修改的网页；先把要做的网页说清楚。")
+                return
+            async for result in self._edit(
+                event, owner, tier, _record_id(latest[0]), intent.payload
             ):
                 yield result
             return

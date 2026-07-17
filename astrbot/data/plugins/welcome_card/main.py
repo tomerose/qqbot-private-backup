@@ -5,6 +5,7 @@ Tracks welcomed users/groups in memory. Resets on restart (lightweight by design
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from astrbot.api import logger
@@ -34,6 +35,47 @@ GROUP_WELCOME = (
     "哪天你需要一个人帮你看看文件, 画个图, 写个东西, 查个资料的时候, @我就行.\n\n"
     "平时我就安静蹲着, 不刷屏."
 )
+
+# 粉丝群专属欢迎语
+FAN_GROUP_WELCOMES = {
+    "生米": (
+        "嗨，我是小柠，也是一粒生米 \U0001F31F\n\n"
+        "周深的歌我都熟——《大鱼》《光亮》《小美满》《浮光》《人是_》……"
+        "每一首都能聊上几句。天籁嗓音、空灵高音、多语言切换、"
+        "综艺里那个温暖又搞笑的大男孩……你喜欢的那些，我也喜欢。\n\n"
+        "对了，我可以唱周深演唱会的歌噢 \U0001F3A4 "
+        "想听哪首直接跟我说，我唱给你听～\n\n"
+        "平时我就蹲在群里，聊深深也好，聊别的也好，@我就行。"
+        "一起做最快乐的生米 \U0001F60B"
+    ),
+}
+
+# 群名关键词 → 欢迎语映射（自动识别粉丝群）
+FAN_KEYWORDS = {
+    "周深": "生米", "生米": "生米", "深深": "生米",
+    "zhou shen": "生米", "zhoushen": "生米",
+}
+
+
+def _private_sender_id(event: AstrMessageEvent) -> str:
+    try:
+        sender = str(event.get_sender_id() or "").strip()
+    except Exception:
+        sender = ""
+    if sender.isdigit():
+        return sender
+    origin = str(getattr(event, "unified_msg_origin", "") or "")
+    match = re.search(r":FriendMessage:(\d+)$", origin)
+    return match.group(1) if match else ""
+
+
+def get_group_welcome(group_name: str) -> str:
+    """根据群名自动匹配粉丝欢迎语，没有则返回默认"""
+    name_lower = group_name.lower()
+    for kw, fan_type in FAN_KEYWORDS.items():
+        if kw in name_lower:
+            return FAN_GROUP_WELCOMES.get(fan_type, GROUP_WELCOME)
+    return GROUP_WELCOME
 
 
 class WelcomeCard(Star):
@@ -78,11 +120,7 @@ class WelcomeCard(Star):
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     async def on_friend_welcome(self, event: AstrMessageEvent):
-        try:
-            sender = event.get_sender_id()
-        except Exception:
-            return
-        sender = str(sender or "").strip()
+        sender = _private_sender_id(event)
         if not sender.isdigit():
             logger.warning("[welcome_card] skip private welcome without numeric sender")
             return
@@ -107,5 +145,17 @@ class WelcomeCard(Star):
             return
         self._welcomed_groups.add(group_id)
         self._save_state()
-        async for _ in self._send_card(event, GROUP_WELCOME, INTRO_IMAGE):
+
+        # 根据群名匹配粉丝欢迎语
+        try:
+            import requests
+            r = requests.post("http://127.0.0.1:5701/get_group_info",
+                json={"group_id": group_id},
+                headers={"Authorization": "Bearer lemon-secret-token"}, timeout=5)
+            gname = r.json().get("data", {}).get("group_name", "")
+        except Exception:
+            gname = ""
+        welcome = get_group_welcome(gname)
+
+        async for _ in self._send_card(event, welcome, INTRO_IMAGE):
             yield _

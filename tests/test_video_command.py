@@ -21,7 +21,15 @@ from data.plugins.video_command.main import (  # noqa: E402
     _parse_duration,
     _parse_video_command,
 )
-from data.plugins.video_agent.main import _parse_agent_command  # noqa: E402
+from data.plugins.video_command import main as video_main  # noqa: E402
+from data.plugins.video_agent.main import (  # noqa: E402
+    _black_ratio_from_ffmpeg,
+    _load_pexels_api_key,
+    _parse_agent_command,
+    _subtitle_font_path,
+    _video_delivery_message,
+)
+from data.plugins.xiaoning_runtime import ArtifactDeliveryResult  # noqa: E402
 
 
 def _load_proxy():
@@ -36,6 +44,13 @@ class VideoCommandTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.proxy = _load_proxy()
+
+    def setUp(self):
+        task_mirror = patch.object(
+            video_main, "mirror_runtime_task_status", new=AsyncMock()
+        )
+        task_mirror.start()
+        self.addCleanup(task_mirror.stop)
 
     def test_natural_video_prompt_has_a_real_capture_group(self):
         self.assertEqual(_parse_video_command("帮我生成视频 一只猫 4秒"), "一只猫 4秒")
@@ -59,6 +74,26 @@ class VideoCommandTests(unittest.TestCase):
         )
         self.assertEqual(_parse_video_command("用ai做一个未来视频"), "未来")
         self.assertIsNone(_parse_agent_command("视频agent怎么用"))
+
+    def test_video_agent_rejects_near_black_output_and_has_a_cjk_font(self):
+        diagnostic = "black_start:0 black_end:69.96 black_duration:69.96"
+        self.assertGreaterEqual(_black_ratio_from_ffmpeg(diagnostic, 70), 0.99)
+        self.assertIsNotNone(_subtitle_font_path())
+
+    def test_video_agent_can_read_the_configured_pexels_key(self):
+        with patch.dict("data.plugins.video_agent.main.os.environ", {"PEXELS_API_KEY": "configured"}):
+            self.assertEqual(_load_pexels_api_key(), "configured")
+
+    def test_video_agent_never_calls_failed_delivery_completed(self):
+        pending = _video_delivery_message(
+            "如何成为博主",
+            ArtifactDeliveryResult(False, "queued"),
+            0,
+            5,
+        )
+        self.assertNotIn("制作完成", pending)
+        self.assertIn("QQ 文件尚未交付", pending)
+        self.assertIn("本次次数不计", pending)
 
     def test_duration_parsing_keeps_generation_boundary_explicit(self):
         self.assertEqual(_parse_duration("一只猫 4s"), 4)
@@ -334,7 +369,7 @@ class VideoCommandTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "video.mp4"
-            path.write_bytes(b"video")
+            path.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom")
             event = Event()
             plugin = VideoCommand.__new__(VideoCommand)
             plugin._output_root = Path(tmp)

@@ -10,6 +10,7 @@ from draw_command.draw_core import (  # noqa: E402
     DrawRateLimiter,
     DrawRequestError,
     parse_draw_command,
+    parse_edit_command,
     parse_pro_user_ids,
     is_dewatermark_request,
 )
@@ -43,7 +44,15 @@ class DrawCoreTests(unittest.TestCase):
         self.assertTrue(is_dewatermark_request("帮我把右下角那个浅灰色的“@画师”小尾巴彻底抹掉"))
         self.assertTrue(is_dewatermark_request("消除这张图的 Logo"))
         self.assertTrue(is_dewatermark_request("去水印"))
+        self.assertTrue(is_dewatermark_request("帮我去s水印"))
         self.assertFalse(is_dewatermark_request("把右下角的人物抹掉"))
+
+    def test_recognizes_redraw_followups(self):
+        self.assertIn("忠实重绘", parse_edit_command("重画"))
+        self.assertEqual(
+            parse_edit_command("重新画一个极简黑白线条的大耳狗小鸡头像"),
+            "以参考图为基础重新绘制：极简黑白线条的大耳狗小鸡头像",
+        )
 
 
 if __name__ == "__main__":

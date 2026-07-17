@@ -4,12 +4,47 @@ import asyncio
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from functools import wraps
+import hashlib
+import json
 from pathlib import Path
+import time
 from typing import Any
+import uuid
+import zipfile
 
 from astrbot.api import logger
-from astrbot.api.message_components import Image, Plain
+from astrbot.api.message_components import File, Image, Plain
 from astrbot.core.message.message_event_result import MessageChain
+
+
+async def mirror_runtime_task_status(
+    qq_id: str,
+    task_id: str,
+    task_desc: str,
+    status: str,
+    evidence: str = "",
+    *,
+    owner: str = "runtime",
+) -> None:
+    """Best-effort bridge from real plugin execution to cross-dialog tasks."""
+    def sync_track() -> None:
+        try:
+            from astrbot_plugin_xiaoning_memory.main import track_runtime_task_status
+        except ImportError:
+            from data.plugins.astrbot_plugin_xiaoning_memory.main import track_runtime_task_status
+        track_runtime_task_status(
+            qq_id,
+            task_id,
+            task_desc,
+            status,
+            evidence,
+            owner,
+        )
+
+    try:
+        await asyncio.wait_for(asyncio.to_thread(sync_track), timeout=1.0)
+    except Exception:
+        logger.debug("[TaskMirror] status update unavailable: %s/%s", owner, task_id)
 
 
 @dataclass(frozen=True)
@@ -20,6 +55,150 @@ class ArtifactDeliveryResult:
     channel: str
     path: Path | None = None
     error: str = ""
+    quality_code: str = "unchecked"
+    manifest: Path | None = None
+
+
+@dataclass(frozen=True)
+class ArtifactQualityResult:
+    allowed: bool
+    code: str
+    size: int = 0
+    sha256: str = ""
+
+
+MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
+_ZIP_ARTIFACTS = {".docx", ".xlsx", ".pptx", ".zip"}
+_QQ_TEXT_ARTIFACTS = {".txt", ".md", ".csv"}
+_MAGIC = {
+    ".pdf": (b"%PDF-",),
+    ".png": (b"\x89PNG\r\n\x1a\n",),
+    ".jpg": (b"\xff\xd8\xff",),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".gif": (b"GIF87a", b"GIF89a"),
+    ".wav": (b"RIFF",),
+    ".mp3": (b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"),
+}
+
+
+def _normalize_qq_text_artifact(path: Path) -> bool:
+    """Make text attachments readable by both QQ and legacy Windows viewers.
+
+    QQ transfers bytes unchanged, while common Windows editors may still guess
+    UTF-8 without a BOM as GBK.  Normalize only text formats whose byte-level
+    encoding is unambiguous and useful outside a browser.  The rewrite is
+    atomic so a failed conversion never leaves a partial artifact behind.
+    """
+    if path.suffix.lower() not in _QQ_TEXT_ARTIFACTS:
+        return False
+    raw = path.read_bytes()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw.decode("utf-8-sig")
+        return False
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = raw.decode("utf-16")
+    else:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("gb18030")
+
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8-sig", newline="") as handle:
+            handle.write(text)
+        temporary.replace(path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return True
+
+
+def inspect_local_artifact(path: Path) -> ArtifactQualityResult:
+    """Cheap deterministic gate before an artifact is allowed near QQ."""
+    size = path.stat().st_size
+    if size <= 0:
+        return ArtifactQualityResult(False, "empty", size)
+    if size > MAX_ARTIFACT_BYTES:
+        return ArtifactQualityResult(False, "too_large", size)
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        head = handle.read(32)
+        digest.update(head)
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    sha256 = digest.hexdigest()
+    suffix = path.suffix.lower()
+    expected = _MAGIC.get(suffix)
+    if expected and not any(head.startswith(prefix) for prefix in expected):
+        return ArtifactQualityResult(False, "format_magic", size, sha256)
+    if suffix == ".mp4" and b"ftyp" not in head[:16]:
+        return ArtifactQualityResult(False, "format_magic", size, sha256)
+    if suffix in _ZIP_ARTIFACTS:
+        try:
+            with zipfile.ZipFile(path) as archive:
+                if archive.testzip() is not None or not archive.namelist():
+                    raise zipfile.BadZipFile
+        except (OSError, ValueError, zipfile.BadZipFile):
+            return ArtifactQualityResult(False, "archive_invalid", size, sha256)
+    if suffix in {".txt", ".md", ".csv", ".html", ".htm"}:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return ArtifactQualityResult(False, "text_encoding", size, sha256)
+        if not text.strip():
+            return ArtifactQualityResult(False, "empty", size, sha256)
+        if suffix in {".html", ".htm"} and "<html" not in text.lower():
+            return ArtifactQualityResult(False, "html_invalid", size, sha256)
+    return ArtifactQualityResult(True, "valid", size, sha256)
+
+
+def _record_delivery_manifest(
+    path: Path,
+    quality: ArtifactQualityResult,
+    *,
+    kind: str,
+    channel: str,
+    delivered: bool,
+    target_scope: str,
+    error: str = "",
+    root: Path | None = None,
+) -> Path | None:
+    """Persist non-sensitive delivery evidence without QQ ids or host paths."""
+    directory = root or (
+        Path(__file__).resolve().parents[1]
+        / "plugin_data"
+        / "xiaoning_artifacts"
+    )
+    trace_id = uuid.uuid4().hex
+    payload = {
+        "trace_id": trace_id,
+        "created_at": int(time.time()),
+        "file_name": path.name,
+        "kind": kind,
+        "size": quality.size,
+        "sha256": quality.sha256,
+        "quality_code": quality.code,
+        "delivered": delivered,
+        "channel": channel,
+        "target_scope": target_scope,
+        "error": str(error or "")[:80],
+    }
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"{trace_id}.json"
+        temporary = directory / f".{trace_id}.tmp"
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        temporary.replace(target)
+        return target
+    except OSError as exc:
+        logger.warning("[ArtifactDelivery] manifest write failed: %s", type(exc).__name__)
+        return None
 
 
 def _validated_artifact(path: object, allowed_roots: list[Path]) -> Path:
@@ -65,6 +244,9 @@ async def deliver_local_artifact(
     *,
     allowed_roots: list[Path],
     kind: str = "file",
+    task_id: str = "",
+    task_desc: str = "",
+    task_owner: str = "",
 ) -> ArtifactDeliveryResult:
     """Deliver a verified file to QQ using NapCat native APIs with retries.
 
@@ -94,6 +276,50 @@ async def deliver_local_artifact(
 
     group_id = str(getattr(event, "get_group_id", lambda: "")() or "").strip()
     sender_id = str(getattr(event, "get_sender_id", lambda: "")() or "").strip()
+    target_scope = "group" if group_id.isdigit() else "private"
+    try:
+        normalized = _normalize_qq_text_artifact(resolved)
+    except (OSError, UnicodeError) as exc:
+        logger.warning(
+            "[ArtifactDelivery] text normalization failed for %s: %s",
+            resolved.name,
+            type(exc).__name__,
+        )
+        quality = ArtifactQualityResult(
+            False, "text_encoding", resolved.stat().st_size
+        )
+    else:
+        quality = inspect_local_artifact(resolved)
+        if normalized:
+            logger.info(
+                "[ArtifactDelivery] normalized %s to UTF-8 BOM for QQ",
+                resolved.name,
+            )
+
+    def finish(
+        delivered: bool, channel: str, error: str = ""
+    ) -> ArtifactDeliveryResult:
+        manifest = _record_delivery_manifest(
+            resolved,
+            quality,
+            kind=kind,
+            channel=channel,
+            delivered=delivered,
+            target_scope=target_scope,
+            error=error,
+        )
+        return ArtifactDeliveryResult(
+            delivered, channel, resolved, error, quality.code, manifest
+        )
+
+    if not quality.allowed:
+        logger.warning(
+            "[ArtifactDelivery] quality gate rejected %s: %s",
+            resolved.name,
+            quality.code,
+        )
+        return finish(False, "rejected", quality.code)
+
     bot = getattr(event, "bot", None)
     call_action = getattr(bot, "call_action", None)
     send = getattr(event, "send", None)
@@ -121,11 +347,11 @@ async def deliver_local_artifact(
                 )
                 _check_action_result(result, "upload_group_file")
                 logger.info(f"[ArtifactDelivery] group_upload OK: {fname}")
-                return ArtifactDeliveryResult(True, "group_upload", resolved)
+                return finish(True, "group_upload")
             except Exception as exc:
                 logger.warning(
-                    "[ArtifactDelivery] group_upload attempt %d/3 failed: %s",
-                    attempt + 1, type(exc).__name__,
+                    "[ArtifactDelivery] group_upload attempt %d/3 failed: %s: %s",
+                    attempt + 1, type(exc).__name__, str(exc)[:160],
                 )
                 if attempt < 2:
                     await asyncio.sleep(1 * (2 ** attempt))
@@ -145,11 +371,11 @@ async def deliver_local_artifact(
                 _check_action_result(result, "upload_private_file")
                 channel = "private_fallback" if in_group else "private"
                 logger.info(f"[ArtifactDelivery] {channel} (upload_private_file) OK: {fname}")
-                return ArtifactDeliveryResult(True, channel, resolved)
+                return finish(True, channel)
             except Exception as exc:
                 logger.warning(
-                    "[ArtifactDelivery] upload_private_file attempt %d/3 failed: %s",
-                    attempt + 1, type(exc).__name__,
+                    "[ArtifactDelivery] upload_private_file attempt %d/3 failed: %s: %s",
+                    attempt + 1, type(exc).__name__, str(exc)[:160],
                 )
                 if attempt < 2:
                     await asyncio.sleep(1 * (2 ** attempt))
@@ -162,7 +388,7 @@ async def deliver_local_artifact(
             result = await send(MessageChain([img]))
             _check_action_result(result, "send(group_image)")
             logger.info(f"[ArtifactDelivery] group_image OK: {fname}")
-            return ArtifactDeliveryResult(True, "group_image", resolved)
+            return finish(True, "group_image")
         except Exception as exc:
             logger.warning(
                 "[ArtifactDelivery] group_image failed: %s", type(exc).__name__
@@ -173,7 +399,20 @@ async def deliver_local_artifact(
     # A caller must be able to distinguish a persistent retry from a file that
     # merely remains on disk.  Never tell a QQ user that a retry is scheduled
     # until Firestore has actually accepted the entry.
-    logger.warning(f"[ArtifactDelivery] ALL CHANNELS FAILED for {fname} → enqueuing")
+    if callable(send):
+        try:
+            result = await send(MessageChain([File(name=fname, file=fpath)]))
+            _check_action_result(result, "send(file_component)")
+            channel = "group_component" if in_group else "private_component"
+            logger.info("[ArtifactDelivery] %s OK: %s", channel, fname)
+            return finish(True, channel)
+        except Exception as exc:
+            logger.warning(
+                "[ArtifactDelivery] file_component failed: %s: %s",
+                type(exc).__name__, str(exc)[:160],
+            )
+
+    logger.warning("[ArtifactDelivery] native and component delivery failed for %s; enqueuing", fname)
     try:
         try:
             from data.plugins.friend_core.delivery_queue import get_queue
@@ -190,12 +429,15 @@ async def deliver_local_artifact(
                 kind=kind,
                 sender_id=sender_id,
                 group_id=group_id,
+                job_id=str(task_id or "")[:64],
+                task_desc=str(task_desc or "")[:200],
+                task_owner=str(task_owner or "")[:24],
             )
         )
-        done, _pending = await asyncio.wait({enqueue_task}, timeout=1)
+        done, _pending = await asyncio.wait({enqueue_task}, timeout=3)
         if enqueue_task in done and enqueue_task.result():
             logger.info("[ArtifactDelivery] ENQUEUED for retry: %s", fname)
-            return ArtifactDeliveryResult(False, "queued", resolved, "QueuedForRetry")
+            return finish(False, "queued", "QueuedForRetry")
         if enqueue_task not in done:
             # Do not hold the QQ response hostage to Firestore/ADC latency.
             # The task continues in the background and may still create a
@@ -216,10 +458,10 @@ async def deliver_local_artifact(
                 logger.info("[ArtifactDelivery] delayed queue result for %s: %s", fname, queued)
 
             enqueue_task.add_done_callback(_log_delayed_queue_result)
-            return ArtifactDeliveryResult(False, "retained", resolved, "QueuePending")
+            return finish(False, "retained", "QueuePending")
     except Exception as exc:
         logger.warning("[ArtifactDelivery] enqueue failed: %s", exc)
-    return ArtifactDeliveryResult(False, "retained", resolved, "AllChannelsExhausted")
+    return finish(False, "retained", "AllChannelsExhausted")
 
 
 def chat_response_content(response: Any) -> str:

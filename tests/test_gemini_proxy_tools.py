@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import importlib.util
+import io
 import json
 import threading
 import unittest
@@ -7,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from PIL import Image as PILImage
 from starlette.requests import Request
 
 
@@ -64,6 +67,169 @@ class GeminiProxyToolTests(unittest.TestCase):
             self.assertIsNotNone(captured[0].google_maps)
             self.assertIsNotNone(captured[1].code_execution)
             self.assertIsNotNone(captured[2].url_context)
+
+        asyncio.run(scenario())
+
+    def test_chat_accepts_bounded_structured_output_schema(self):
+        async def scenario():
+            captured = {}
+
+            def generate_content(**kwargs):
+                captured["config"] = kwargs["config"]
+                return SimpleNamespace(text='{"ok":true}', usage_metadata=None, candidates=[])
+
+            client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+            schema = {
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"],
+            }
+            with patch.object(self.proxy.genai, "Client", return_value=client):
+                result = await self.proxy.chat(
+                    request_with_json(
+                        {
+                            "model": "gemini-3.5-flash",
+                            "messages": [{"role": "user", "content": "classify"}],
+                            "response_json_schema": schema,
+                        }
+                    )
+                )
+            self.assertEqual(result["choices"][0]["message"]["content"], '{"ok":true}')
+            self.assertEqual(captured["config"].response_mime_type, "application/json")
+            self.assertEqual(captured["config"].response_json_schema, schema)
+
+        asyncio.run(scenario())
+
+    def test_chat_rejects_invalid_structured_output_schema(self):
+        async def scenario():
+            result = await self.proxy.chat(
+                request_with_json(
+                    {
+                        "messages": [{"role": "user", "content": "classify"}],
+                        "response_json_schema": ["not", "an", "object"],
+                    }
+                )
+            )
+            self.assertEqual(result.status_code, 400)
+
+        asyncio.run(scenario())
+
+    def test_chat_model_role_is_internal_and_preserves_legacy_default(self):
+        self.assertEqual(
+            self.proxy._resolve_model("gemini-2.5-flash"), "gemini-2.5-flash"
+        )
+        self.assertEqual(
+            self.proxy._resolve_model("gemini-2.5-flash", "quality"),
+            "gemini-3.1-pro-preview",
+        )
+
+    def test_thinking_models_keep_visible_output_headroom(self):
+        async def scenario():
+            captured = {}
+
+            def generate_content(**kwargs):
+                captured["max_output_tokens"] = kwargs["config"].max_output_tokens
+                return SimpleNamespace(text="OK", usage_metadata=None, candidates=[])
+
+            client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+            with patch.object(self.proxy.genai, "Client", return_value=client):
+                result = await self.proxy.chat(
+                    request_with_json(
+                        {
+                            "model": "gemini-3.1-pro-preview",
+                            "messages": [{"role": "user", "content": "test"}],
+                            "max_tokens": 20,
+                        }
+                    )
+                )
+            self.assertEqual(result["choices"][0]["message"]["content"], "OK")
+            self.assertEqual(captured["max_output_tokens"], 512)
+
+        asyncio.run(scenario())
+
+    def test_flash_25_also_keeps_visible_output_headroom(self):
+        async def scenario():
+            captured = {}
+
+            def generate_content(**kwargs):
+                captured["max_output_tokens"] = kwargs["config"].max_output_tokens
+                return SimpleNamespace(text="OK", usage_metadata=None, candidates=[])
+
+            client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+            with patch.object(self.proxy.genai, "Client", return_value=client):
+                result = await self.proxy.chat(
+                    request_with_json(
+                        {
+                            "model": "gemini-2.5-flash",
+                            "messages": [{"role": "user", "content": "test"}],
+                            "max_tokens": 20,
+                        }
+                    )
+                )
+            self.assertEqual(result["choices"][0]["message"]["content"], "OK")
+            self.assertEqual(captured["max_output_tokens"], 256)
+
+        asyncio.run(scenario())
+
+    def test_interactions_reject_model_calls_in_favor_of_chat_role(self):
+        async def scenario():
+            result = await self.proxy.create_interaction(
+                request_with_json({"model_role": "quality", "input": "调研"})
+            )
+            self.assertEqual(result.status_code, 400)
+
+        asyncio.run(scenario())
+
+    def test_interactions_research_role_is_background_and_stored(self):
+        async def scenario():
+            captured = {}
+
+            def create(**kwargs):
+                captured.update(kwargs)
+                return {"id": "ix_2", "status": "in_progress"}
+
+            client = SimpleNamespace(interactions=SimpleNamespace(create=create))
+            self.proxy._research_agent_cooldown_until = 0.0
+            with patch.object(self.proxy.genai, "Client", return_value=client):
+                result = await self.proxy.create_interaction(
+                    request_with_json({"research_role": "standard", "input": "趋势"})
+                )
+            self.assertEqual(result["status"], "in_progress")
+            self.assertEqual(captured["agent"], "deep-research-preview-04-2026")
+            self.assertTrue(captured["background"])
+            self.assertTrue(captured["store"])
+
+        asyncio.run(scenario())
+
+    def test_interactions_executes_grounded_fallback_when_agent_is_limited(self):
+        async def scenario():
+            class RateLimitError(Exception):
+                status_code = 429
+
+            def create(**_kwargs):
+                raise RateLimitError("no stateful quota")
+
+            def generate_content(**kwargs):
+                self.assertIsNotNone(kwargs["config"].tools[0].google_search)
+                return SimpleNamespace(
+                    text="完成的研究结果",
+                    usage_metadata=None,
+                    candidates=[],
+                )
+
+            client = SimpleNamespace(
+                interactions=SimpleNamespace(create=create),
+                models=SimpleNamespace(generate_content=generate_content),
+            )
+            self.proxy._research_agent_cooldown_until = 0.0
+            with patch.object(self.proxy.genai, "Client", return_value=client):
+                result = await self.proxy.create_interaction(
+                    request_with_json({"research_role": "standard", "input": "趋势"})
+                )
+            self.proxy._research_agent_cooldown_until = 0.0
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["output_text"], "完成的研究结果")
+            self.assertTrue(result["fallback"]["used"])
 
         asyncio.run(scenario())
 
@@ -136,6 +302,50 @@ class GeminiProxyToolTests(unittest.TestCase):
             self.assertEqual(result["data"][0]["b64_json"], "cG5n")
 
         asyncio.run(scenario())
+
+    def test_image_edit_uses_the_supplied_pixels_directly(self):
+        calls = []
+        source_io = io.BytesIO()
+        PILImage.new("RGB", (8, 6), "navy").save(source_io, format="PNG")
+        edited_io = io.BytesIO()
+        PILImage.new("RGB", (12, 9), "blue").save(edited_io, format="PNG")
+        source_bytes = source_io.getvalue()
+        edited_bytes = edited_io.getvalue()
+
+        def generate_content(**kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                candidates=[
+                    SimpleNamespace(
+                        content=SimpleNamespace(
+                            parts=[
+                                SimpleNamespace(
+                                    inline_data=SimpleNamespace(
+                                        mime_type="image/png", data=edited_bytes
+                                    )
+                                )
+                            ]
+                        )
+                    )
+                ]
+            )
+
+        client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+        source = base64.b64encode(source_bytes).decode("ascii")
+        with patch.object(self.proxy.genai, "Client", return_value=client):
+            result = self.proxy._edit_image_sync(
+                source,
+                "remove the watermark only",
+                self.proxy.IMAGE_MODEL_FALLBACK,
+            )
+
+        self.assertEqual((result[0], result[2]), ("image/png", self.proxy.IMAGE_MODEL_FALLBACK))
+        with PILImage.open(io.BytesIO(result[1])) as output:
+            self.assertEqual(output.size, (8, 6))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["model"], self.proxy.IMAGE_MODEL_FALLBACK)
+        self.assertEqual(len(calls[0]["contents"]), 2)
+        self.assertIn("Do not redraw", calls[0]["contents"][1].text)
 
     def test_gif_frame_falls_back_to_secondary_image_model(self):
         calls = []
