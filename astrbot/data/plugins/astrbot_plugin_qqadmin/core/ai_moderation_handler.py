@@ -45,6 +45,7 @@ class AIModerationHandler:
         )
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._last_evaluation: dict[tuple[str, str], float] = {}
+        self._bot_moderation_cache: dict[str, tuple[bool, float]] = {}
 
     async def _eligible(self, event) -> bool:
         group_id = str(event.get_group_id() or "")
@@ -54,21 +55,29 @@ class AIModerationHandler:
             return False
         if sender_id in {self_id, self.owner_id}:
             return False
-        try:
-            if not self.store.is_enabled(group_id):
-                return False
-            bot_info, sender_info = await asyncio.gather(
-                event.bot.get_group_member_info(
+        now = time.monotonic()
+        cached = self._bot_moderation_cache.get(group_id)
+        if cached is None or cached[1] <= now:
+            try:
+                bot_info = await event.bot.get_group_member_info(
                     group_id=int(group_id), user_id=int(self_id), no_cache=True
-                ),
-                event.bot.get_group_member_info(
-                    group_id=int(group_id), user_id=int(sender_id), no_cache=True
-                ),
+                )
+            except Exception:
+                self._bot_moderation_cache[group_id] = (False, now + 60)
+                logger.warning("[AIGroupMod] bot_role_lookup_failed")
+                return False
+            can_moderate = str(bot_info.get("role", "")) in {"admin", "owner"}
+            self._bot_moderation_cache[group_id] = (can_moderate, now + 60)
+        else:
+            can_moderate = cached[0]
+        if not can_moderate:
+            return False
+        try:
+            sender_info = await event.bot.get_group_member_info(
+                group_id=int(group_id), user_id=int(sender_id), no_cache=True
             )
         except Exception:
-            logger.warning("[AIGroupMod] eligibility_check_failed")
-            return False
-        if str(bot_info.get("role", "")) not in {"admin", "owner"}:
+            logger.debug("[AIGroupMod] sender_role_lookup_failed")
             return False
         return str(sender_info.get("role", "")) not in {"admin", "owner"}
 
@@ -130,13 +139,18 @@ class AIModerationHandler:
             return False
 
     async def handle(self, event) -> None:
-        if not await self._eligible(event):
+        group_id = str(event.get_group_id() or "")
+        sender_id = str(event.get_sender_id() or "")
+        self_id = str(event.get_self_id() or "")
+        if not group_id or not sender_id or sender_id in {self_id, self.owner_id}:
             return
-        group_id = str(event.get_group_id())
-        sender_id = str(event.get_sender_id())
+        if not self.store.is_enabled(group_id):
+            return
         text = str(getattr(event, "message_str", "") or "")
         recent_same = self._remember_and_count_same(group_id, sender_id, text)
         if not is_candidate(text, recent_same):
+            return
+        if not await self._eligible(event):
             return
         now = time.time()
         if not self._can_evaluate(group_id, sender_id, now):
@@ -176,3 +190,4 @@ class AIModerationHandler:
         self._history.clear()
         self._locks.clear()
         self._last_evaluation.clear()
+        self._bot_moderation_cache.clear()

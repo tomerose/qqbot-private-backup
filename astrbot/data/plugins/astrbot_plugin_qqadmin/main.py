@@ -247,7 +247,7 @@ class QQAdminPlugin(Star):
         await self.normal.set_group_name(event, group_name)
 
     @filter.command("撤回")
-    @perm_required(PermLevel.MEMBER)
+    @perm_required(PermLevel.ADMIN)
     async def delete_msg(self, event: AiocqhttpMessageEvent):
         "(引用消息)撤回 | 撤回 <@群友> <消息数量>"
         await self.normal.delete_msg(event)
