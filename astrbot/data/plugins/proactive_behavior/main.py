@@ -51,6 +51,7 @@ _LEGACY_PROMPT_MARKERS = (
     "【安全铁律——",
     "【安全底线】",
 )
+_MAX_CURRENT_INLINE_IMAGE_CHARS = 1_500_000
 
 
 def strip_legacy_prompt_noise(text: object) -> str:
@@ -64,9 +65,11 @@ def strip_legacy_prompt_noise(text: object) -> str:
 
 
 def clean_request_history(req) -> None:
-    """保留真实对话和多模态内容，只清掉历史里的重复规则。"""
+    """保留真实对话，移除会让后续普通回复超限的历史内联媒体。"""
     req.prompt = strip_legacy_prompt_noise(getattr(req, "prompt", ""))
-    for message in getattr(req, "contexts", None) or []:
+    contexts = getattr(req, "contexts", None) or []
+    last_context_index = len(contexts) - 1
+    for index, message in enumerate(contexts):
         if message.get("role") != "user":
             continue
         content = message.get("content")
@@ -78,6 +81,21 @@ def clean_request_history(req) -> None:
         for part in content:
             if isinstance(part, dict) and part.get("type") == "text":
                 part["text"] = strip_legacy_prompt_noise(part.get("text", ""))
+                continue
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            image = part.get("image_url")
+            url = str(image.get("url", "") if isinstance(image, dict) else "")
+            lowered = url.lower()
+            is_inline_image = lowered.startswith(("data:image/", "base64://"))
+            is_gif = lowered.startswith("data:image/gif")
+            if is_inline_image and (
+                is_gif
+                or index != last_context_index
+                or len(url) > _MAX_CURRENT_INLINE_IMAGE_CHARS
+            ):
+                part.clear()
+                part.update({"type": "text", "text": "[历史图片已省略]"})
 
 # ── 持久化文件 ─────────────────────────────────────────
 def _state_file() -> Path:

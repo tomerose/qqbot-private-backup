@@ -96,6 +96,30 @@ class ConversationGuardTests(unittest.TestCase):
         self.assertEqual(request.contexts[1]["content"][0]["text"], "好了吗")
         self.assertEqual(request.contexts[1]["content"][1]["type"], "image_url")
 
+    def test_historical_gif_is_omitted_but_current_image_is_kept(self):
+        request = Request()
+        request.prompt = "看一下"
+        request.contexts = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "之前那张"},
+                    {"type": "image_url", "image_url": {"url": "data:image/gif;base64,old"}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,current"}},
+                ],
+            },
+        ]
+
+        clean_request_history(request)
+
+        self.assertEqual(request.contexts[0]["content"][1], {"type": "text", "text": "[历史图片已省略]"})
+        self.assertEqual(request.contexts[1]["content"][0]["type"], "image_url")
+
     def test_all_known_legacy_persona_prefixes_are_removed(self):
         samples = [
             "你在哪\n\n【你是谁】你是小柠，22岁，金融+AI方向的女生。",
