@@ -271,6 +271,34 @@ class GeminiProxyToolTests(unittest.TestCase):
         self.assertEqual(trimmed[-1]["content"], "104")
         self.assertNotIn({"role": "system", "content": "old"}, trimmed)
 
+    def test_oversized_chat_context_omits_inline_media_before_model_request(self):
+        history_image = "data:image/png;base64," + "a" * (
+            self.proxy.CHAT_CONTEXT_BUDGET_BYTES + 1
+        )
+        messages = [
+            {"role": "system", "content": "persona"},
+            {
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": history_image}}],
+            },
+            {"role": "assistant", "content": "seen"},
+            {
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,current"}}],
+            },
+        ]
+
+        compacted = self.proxy._compact_chat_messages(messages)
+
+        self.assertLessEqual(
+            self.proxy._json_size(compacted), self.proxy.CHAT_CONTEXT_BUDGET_BYTES
+        )
+        self.assertEqual(compacted[1]["content"][0]["type"], "text")
+        self.assertEqual(
+            compacted[-1]["content"][0]["image_url"]["url"],
+            "data:image/png;base64,current",
+        )
+
     def test_image_generation_does_not_block_the_event_loop(self):
         async def scenario():
             started = threading.Event()

@@ -72,6 +72,8 @@ SEARCH_MODEL_ALIASES = {"gemini-2.5-flash-search", "gemini-3.5-flash-search"}
 MUSIC_MODEL = "lyria-3-clip-preview"
 MAX_MUSIC_BYTES = 20 * 1024 * 1024
 MAX_CHAT_REQUEST_BYTES = 24 * 1024 * 1024
+MAX_CHAT_INGRESS_BYTES = 64 * 1024 * 1024
+CHAT_CONTEXT_BUDGET_BYTES = 20 * 1024 * 1024
 MAX_CHAT_MESSAGES = 100
 CHAT_UPSTREAM_ERROR = "chat service temporarily unavailable"
 CHAT_RATE_LIMIT_ERROR = "model capacity is temporarily limited; please retry shortly"
@@ -281,6 +283,70 @@ def _validate_chat_messages(messages: object) -> list[dict]:
     return trimmed
 
 
+def _json_size(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _omit_inline_media(message: dict) -> int:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return 0
+    omitted = 0
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") not in {"image_url", "audio_url"}:
+            continue
+        media_key = item["type"]
+        media = item.get(media_key)
+        url = str(media.get("url", "") if isinstance(media, dict) else "")
+        if url.lower().startswith(("data:", "base64://")):
+            item.clear()
+            item.update({"type": "text", "text": "[Earlier inline media omitted]"})
+            omitted += 1
+    return omitted
+
+
+def _compact_chat_messages(messages: list[dict]) -> list[dict]:
+    """Keep oversized persisted media from turning an ordinary chat into HTTP 413."""
+    if _json_size(messages) <= CHAT_CONTEXT_BUDGET_BYTES:
+        return messages
+
+    compacted = json.loads(json.dumps(messages, ensure_ascii=False))
+    latest_user = next(
+        (index for index in range(len(compacted) - 1, -1, -1) if compacted[index].get("role") == "user"),
+        -1,
+    )
+    omitted = sum(
+        _omit_inline_media(message)
+        for index, message in enumerate(compacted)
+        if index != latest_user
+    )
+    if _json_size(compacted) > CHAT_CONTEXT_BUDGET_BYTES and latest_user >= 0:
+        omitted += _omit_inline_media(compacted[latest_user])
+
+    removed = 0
+    while _json_size(compacted) > CHAT_CONTEXT_BUDGET_BYTES:
+        latest_system = next(
+            (index for index in range(len(compacted) - 1, -1, -1) if compacted[index].get("role") == "system"),
+            -1,
+        )
+        protected = {latest_user, latest_system}
+        oldest = next((index for index in range(len(compacted)) if index not in protected), None)
+        if oldest is None:
+            raise RequestPayloadError("chat context remains too large after media trimming")
+        compacted.pop(oldest)
+        if oldest < latest_user:
+            latest_user -= 1
+        removed += 1
+    if omitted or removed:
+        logger.warning(
+            "Compacted oversized chat context: omitted_media=%d removed_messages=%d bytes=%d",
+            omitted,
+            removed,
+            _json_size(compacted),
+        )
+    return compacted
+
+
 def _sse(data: dict | str) -> str:
     payload = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
     return f"data: {payload}\n\n"
@@ -324,8 +390,8 @@ def _requires_deep_thinking(messages: list[dict]) -> bool:
 @app.post("/v1/chat/completions")
 async def chat(request: Request):
     try:
-        body = await _read_json_request(request)
-        messages = _validate_chat_messages(body.get("messages"))
+        body = await _read_json_request(request, MAX_CHAT_INGRESS_BYTES)
+        messages = _compact_chat_messages(_validate_chat_messages(body.get("messages")))
     except RequestPayloadError as exc:
         return JSONResponse(
             status_code=exc.status_code,
