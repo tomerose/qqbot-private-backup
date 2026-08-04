@@ -65,3 +65,4 @@ services/local_tts/tts_audio/
 astrbot/data/plugins/sing_command/
 scripts/send_sing_voice.py
 tests/test_sing_command.py
+weixin-private-login-qr.png
