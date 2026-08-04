@@ -16,6 +16,7 @@ from proactive_behavior.main import (  # noqa: E402
     clean_request_history,
 )
 from friend_core.persona_prompt import build_persona_prompt  # noqa: E402
+from runtime_config_fixture import ensure_runtime_configs  # noqa: E402
 
 
 class Event:
@@ -42,6 +43,10 @@ class Request:
 
 
 class ConversationGuardTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        ensure_runtime_configs(Path(__file__).resolve().parents[1])
+
     def test_persona_judgment_is_conditional_and_has_no_scripted_intimacy(self):
         prompt = build_persona_prompt(100)
         self.assertIn("检查前提、时间线和因果链", prompt)

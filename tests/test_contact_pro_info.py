@@ -26,6 +26,7 @@ from contact_pro_info.main import (  # noqa: E402
     WEIXIN_PRIVATE_HELP_REPLY,
     WEIXIN_PRIVATE_CAPABILITY_MEMORY,
 )
+from runtime_config_fixture import ensure_runtime_configs  # noqa: E402
 
 
 class FakeEvent:
@@ -53,6 +54,10 @@ async def collect(generator):
 
 
 class ContactProInfoTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        ensure_runtime_configs(PROJECT_ROOT)
+
     def test_weixin_private_help_never_claims_qq_membership_or_voice_delivery(self):
         async def scenario():
             plugin = ContactProInfo.__new__(ContactProInfo)
