@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 import requests
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import File, Music
+from astrbot.api.message_components import Music
 from astrbot.api.star import Context, Star, StarTools
 
 from ..draw_command.pro_access import Tier, get_tier

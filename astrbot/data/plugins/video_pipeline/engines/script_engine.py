@@ -10,7 +10,6 @@ import requests
 
 PROXY_CHAT = "http://127.0.0.1:3000/v1/chat/completions"
 GEMINI_RETRY_URL = PROXY_CHAT
-import os
 GEMINI_RETRY_KEY = "sk-gemini-vertex"
 
 

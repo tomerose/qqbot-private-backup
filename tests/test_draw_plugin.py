@@ -298,6 +298,40 @@ class DrawPluginTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_4k_rejected_before_proxy_when_quota_cannot_cover_cost(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self.build_plugin(Path(tmp))
+                sender = "2000000000"
+                day = time.strftime("%Y%m%d")
+                plugin._daily_usage[f"{sender}:{day}"] = 2
+                plugin._request_image = lambda *_args: self.fail("4K must be rejected before proxy")
+
+                replies = await collect(plugin.on_message(FakeEvent("/draw a cat --4k", sender)))
+
+                self.assertTrue(replies and "4K" in replies[0][1])
+                self.assertIn("只剩 1 次", replies[0][1])
+
+        asyncio.run(scenario())
+
+    def test_stale_dewatermark_session_does_not_crash_confirmation(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self.build_plugin(Path(tmp) / "draws")
+                scope = DrawCommand._edit_scope(FakeEvent("确认", "1211000567"))
+                plugin._edit_sessions.remember_intent(scope, "edit", "改蓝色")
+                meta = plugin._edit_sessions._read_meta(scope)
+                meta["intent_kind"] = "dewatermark"  # stale pre-removal session
+                plugin._edit_sessions._write_meta(scope, meta)
+                plugin._request_edit = lambda *_a: self.fail("stale dewatermark must not run editor")
+
+                replies = await collect(plugin.on_message(FakeEvent("确认", "1211000567")))
+
+                self.assertEqual(replies, [])
+                self.assertFalse(plugin._edit_sessions.get(scope).intent_kind == "edit")
+
+        asyncio.run(scenario())
+
     def test_generation_failure_returns_without_delivery_crash(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:

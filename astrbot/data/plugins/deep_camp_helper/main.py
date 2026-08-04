@@ -1,7 +1,7 @@
 """
 DEEP营助手 — 仅在群 820762428 生效
 """
-import sys, os
+import sys
 sys.path.insert(0, r"D:\Claudecoda学习\diedeepbirth\scripts")
 
 from astrbot.api import logger

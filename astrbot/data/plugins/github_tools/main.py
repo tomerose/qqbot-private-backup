@@ -14,7 +14,6 @@ from pathlib import Path
 import requests
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star, StarTools
 
 API = "https://api.github.com"
@@ -101,11 +100,13 @@ def _cache_path(key: str) -> Path:
 
 
 def _cache_get(key: str) -> dict | None:
+    import json
+
     path = _cache_path(key)
     if not path.is_file():
         return None
     try:
-        data = __import__("json").loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         if time.time() - float(data.get("_ts", 0)) < CACHE_TTL:
             return data.get("_payload")
     except Exception:

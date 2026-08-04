@@ -802,7 +802,6 @@ class XiaoningScheduled(Star):
 
     async def _push_zhoushen_daily(self):
         logger.info("[小柠定时] 周深每日报告")
-        import subprocess, tempfile
         today_str = datetime.now().strftime("%Y%m%d")
         output_dir = Path(__file__).resolve().parents[4] / "claude_workspace" / "zhoushen_daily"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -882,9 +881,7 @@ class XiaoningScheduled(Star):
         from docx import Document
         from docx.shared import Inches, Pt, Cm, RGBColor
         from docx.enum.text import WD_ALIGN_PARAGRAPH
-        from docx.enum.section import WD_ORIENT
         from docx.oxml.ns import qn
-        import random
 
         doc = Document()
 

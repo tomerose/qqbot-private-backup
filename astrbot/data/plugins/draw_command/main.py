@@ -62,6 +62,7 @@ except ImportError:
 
 DRAW_PROXY_URL = "http://127.0.0.1:3000/v1/images/generations"
 EDIT_PROXY_URL = "http://127.0.0.1:3000/v1/images/edits"
+EDIT_MODEL = "gemini-3.1-flash-image"  # edits use flash tier: faster, verified on Vertex
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_EDGE = 4096
 QQ_IMAGE_HOSTS = frozenset(
@@ -214,7 +215,7 @@ class DrawCommand(Star):
     def _request_edit(self, image_b64: str, prompt: str) -> bytes:
         response = requests.post(
             EDIT_PROXY_URL,
-            json={"image": image_b64, "prompt": prompt, "model": "gemini-3.1-flash-image"},
+            json={"image": image_b64, "prompt": prompt, "model": EDIT_MODEL},
             timeout=(30, 180),
         )
         response.raise_for_status()
@@ -427,12 +428,15 @@ class DrawCommand(Star):
             edit_kind = None
             if edit_prompt is not None:
                 edit_kind = "edit"
-            elif session.intent_kind and _EDIT_CONFIRM_RE.fullmatch(text.strip()):
+            elif session.intent_kind == "edit" and _EDIT_CONFIRM_RE.fullmatch(text.strip()):
+                # intent_kind whitelist: stale sessions from the removed
+                # dewatermark feature (TTL window) must never reach
+                # remember_intent, which raises on any non-"edit" kind
                 edit_kind = session.intent_kind
                 edit_prompt = session.intent_prompt
             elif (
                 ref_img
-                and session.intent_kind
+                and session.intent_kind == "edit"
                 and text.strip() in {"", "[图片]", "图片", "这张"}
             ):
                 edit_kind = session.intent_kind
@@ -554,7 +558,15 @@ class DrawCommand(Star):
 
         prompt, aspect, n_images, is_4k, style_prefix = parse_draw_options(prompt)
 
-        # 4K available to all users, costs 2× quota
+        # 4K available to all users, costs 2× quota; check BEFORE proxy so a
+        # generated 4K image is never discarded for insufficient quota
+        draw_cost = 2 if is_4k else 1
+        if used + draw_cost > limit:
+            event.stop_event()
+            yield event.plain_result(
+                f"今日额度只剩 {limit - used} 次，画 4K 需要 {draw_cost} 次，先画 2K 或明天再试。"
+            )
+            return
         image_size = "2K"
         if is_4k:
             image_size = "4K"
@@ -624,9 +636,9 @@ class DrawCommand(Star):
             # ponytail: don't stop the event — let Agent pick it up as fallback
             return
 
-        # 4K costs 2× normal quota
-        draw_cost = 2 if is_4k else 1
-        self._daily_usage[key] = used + draw_cost
+        # 4K costs 2× normal quota; clamp the stored count so the limit
+        # message never shows "4/3" (pre-check already rejected unaffordable 4K)
+        self._daily_usage[key] = min(used + draw_cost, limit)
         self._save_usage()
         # Deliver all images
         delivered_count = 0

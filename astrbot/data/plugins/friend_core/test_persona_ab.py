@@ -4,7 +4,6 @@
 跑一次：py -3.12 test_persona_ab.py
 结果写到 %TEMP%/persona_ab_result.txt
 """
-import json
 import os
 import sys
 import tempfile

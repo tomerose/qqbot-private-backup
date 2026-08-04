@@ -10,7 +10,6 @@ import re
 import time
 from pathlib import Path
 
-from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
 try:

@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import html
-import io
 import json
 import re
 import time
@@ -23,7 +22,6 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
 
-from ..draw_command.pro_access import get_tier, Tier
 try:
     from xiaoning_runtime import (
         ArtifactDeliveryResult,
@@ -216,7 +214,6 @@ def _classify_video_intent(text: str, prompt: str) -> str:
     Returns: 'generate' | 'search' | 'agent' | 'chat'
     Only called when regex routing is uncertain — adds ~1s latency.
     """
-    import json as _json
     classifier_prompt = (
         "你是一个意图分类器。用户提到了视频相关的内容，判断ta的真实意图：\n"
         "- generate: 用户想用AI生成一段原创视频（比如\"生成8s的猫视频\"、\"帮我做一段5秒的动画\"）\n"
@@ -537,7 +534,6 @@ class VideoCommand(Star):
         if not sender_id.isdigit():
             logger.warning("[VideoCmd] skip response without numeric sender")
             return
-        tier = get_tier(sender_id, self._pro_db_path())
 
         # Show help for empty prompt
         if prompt == "":

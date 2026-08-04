@@ -5,12 +5,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
-import re
 from pathlib import Path
 
 import requests
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import File, Plain
+from astrbot.api.message_components import File
 from astrbot.api.star import Context, Star
 try:
     from xiaoning_runtime import chat_response_content, defer_stop_event
@@ -30,11 +29,6 @@ class PdfAnalysis(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config)
         self.config = config or {}
-        project_root = Path(__file__).resolve().parents[4]
-        self._pro_db = (
-            project_root / "astrbot" / "data" / "plugin_data"
-            / "xiaoning_pro" / "pro_members.db"
-        )
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=960)
     @defer_stop_event
     async def on_message(self, event: AstrMessageEvent):

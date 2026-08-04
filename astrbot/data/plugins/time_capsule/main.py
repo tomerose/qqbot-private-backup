@@ -8,7 +8,6 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from astrbot.api.event import AstrMessageEvent, filter

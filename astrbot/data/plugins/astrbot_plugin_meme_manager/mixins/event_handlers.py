@@ -1,4 +1,3 @@
-import asyncio
 import os
 import random
 import re
@@ -15,7 +14,6 @@ from PIL import Image as PILImage
 from astrbot.api import logger
 from astrbot.api.all import *
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.event.filter import EventMessageType
 from astrbot.api.message_components import *
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.core.message.components import Plain, Image

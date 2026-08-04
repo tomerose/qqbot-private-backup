@@ -15,7 +15,6 @@ sys.path.insert(0, str(PLUGINS_DIR))
 sys.path.insert(0, str(ROOT / "astrbot"))
 
 from data.plugins.video_command.main import (  # noqa: E402
-    Tier,
     VideoCommand,
     _is_search_mode,
     _parse_duration,
@@ -133,8 +132,7 @@ class VideoCommandTests(unittest.TestCase):
             plugin._search_videos = lambda query: ("https://example.com/mbappe", [])
             event = Event()
             event.stopped = False
-            with patch("data.plugins.video_command.main.get_tier", return_value=Tier.ORDINARY):
-                replies = [reply async for reply in plugin.on_message(event)]
+            replies = [reply async for reply in plugin.on_message(event)]
             self.assertEqual(replies[0], "正在搜索 B 站和抖音公开视频，预计 5–15 秒…")
             self.assertIn("https://example.com/mbappe", replies[1])
             self.assertTrue(event.stopped)
@@ -259,8 +257,7 @@ class VideoCommandTests(unittest.TestCase):
             )
             event = Event()
             event.stopped = False
-            with patch("data.plugins.video_command.main.get_tier", return_value=Tier.ORDINARY):
-                replies = [reply async for reply in plugin.on_message(event)]
+            replies = [reply async for reply in plugin.on_message(event)]
             self.assertIn("https://www.bilibili.com/video/BV1test", replies[1])
             self.assertEqual(len(replies), 2)
             self.assertTrue(event.stopped)
@@ -294,9 +291,8 @@ class VideoCommandTests(unittest.TestCase):
             event = Event()
             event.stopped = False
             with patch("data.plugins.video_command.main.mirror_runtime_task_status", new=AsyncMock()) as mirror:
-                with patch("data.plugins.video_command.main.get_tier", return_value=Tier.ORDINARY):
-                    with patch("asyncio.to_thread", new=AsyncMock(side_effect=RuntimeError("offline"))):
-                        replies = [reply async for reply in plugin.on_message(event)]
+                with patch("asyncio.to_thread", new=AsyncMock(side_effect=RuntimeError("offline"))):
+                    replies = [reply async for reply in plugin.on_message(event)]
             # 开放契约：普通用户也能生成；无 tier 拒绝
             self.assertTrue(event.stopped)
             self.assertTrue(all("X 或 Pro" not in str(r) for r in replies))

@@ -36,9 +36,9 @@ except ImportError:
 # Kept as a compatibility export for existing plugin integrations and tests;
 # memory/task access itself is now available to every private user.
 try:
-    from draw_command.pro_access import get_tier, Tier
+    from draw_command.pro_access import get_tier, Tier  # noqa: F401  # compat export for tests/integrations
 except ImportError:
-    from data.plugins.draw_command.pro_access import get_tier, Tier
+    pass
 try:
     from xiaoning_runtime import is_private_user_key, private_user_key
 except ImportError:

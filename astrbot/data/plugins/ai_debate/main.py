@@ -9,7 +9,6 @@ from pathlib import Path
 
 import requests
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star
 try:
     from xiaoning_runtime import defer_stop_event

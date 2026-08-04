@@ -16,7 +16,7 @@ import re
 from datetime import datetime, timezone
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent
 try:
     from xiaoning_runtime import is_weixin_private, private_user_key
 except ImportError:

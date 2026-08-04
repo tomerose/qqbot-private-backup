@@ -14,7 +14,7 @@ import uuid
 import zipfile
 
 from astrbot.api import logger
-from astrbot.api.message_components import File, Image, Plain
+from astrbot.api.message_components import File, Image
 from astrbot.core.message.message_event_result import MessageChain
 
 

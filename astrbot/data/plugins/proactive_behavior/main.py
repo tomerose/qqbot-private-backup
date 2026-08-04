@@ -1,8 +1,6 @@
 """小柠关系上下文 — 只补充确实相关的会话事实。"""
 from __future__ import annotations
 
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 from astrbot.api import logger
@@ -10,7 +8,6 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
 try:
     from friend_core.relationship_state import (
-        NORMAL_MODE,
         QUIET_MODE,
         get_snapshot,
         load_state,
@@ -21,7 +18,6 @@ try:
     )
 except ImportError:
     from data.plugins.friend_core.relationship_state import (
-        NORMAL_MODE,
         QUIET_MODE,
         get_snapshot,
         load_state,

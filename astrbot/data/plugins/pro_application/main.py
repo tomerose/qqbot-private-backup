@@ -28,7 +28,7 @@ except ImportError:
     from data.plugins.xiaoning_runtime import defer_stop_event
 from astrbot.core.message.message_event_result import MessageChain
 
-from .pro_store import DEFAULT_PRO_DAYS, Application, ProStore, ProStoreError
+from .pro_store import Application, ProStore, ProStoreError
 
 
 REVIEWER_ID = "1211000567"

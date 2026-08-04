@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
 import traceback
 import uuid
@@ -28,13 +27,11 @@ except ImportError:
 
 try:
     from xiaoning_runtime import (
-        ArtifactDeliveryResult,
         deliver_local_artifact,
         mirror_runtime_task_status,
     )
 except ImportError:
     from data.plugins.xiaoning_runtime import (
-        ArtifactDeliveryResult,
         deliver_local_artifact,
         mirror_runtime_task_status,
     )

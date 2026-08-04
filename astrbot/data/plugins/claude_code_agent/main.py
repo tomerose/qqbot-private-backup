@@ -25,8 +25,6 @@ except ImportError:
 from .agent_core import (
     ApprovalRegistry,
     BACKEND_CLAUDE,
-    BACKEND_CODEX,
-    BACKEND_WORKBUDDY,
     DEFAULT_WORKSPACE,
     DEFAULT_WORK_DIR,
     DEFAULT_CODEX_MODEL,
@@ -60,7 +58,7 @@ from .natural_router import extract_natural_agent_text, route_natural_agent
 from .access_policy import AccessPolicy, Capability
 from .bounded_process_io import capture_bounded_process
 from .action_policy import ActionClass
-from .backend_router import BackendRoute, route_backend
+from .backend_router import route_backend
 from .backend_health import BackendHealthCache
 from .artifact_staging import (
     collect_staged_artifacts,

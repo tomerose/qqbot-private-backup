@@ -2,7 +2,7 @@
 链接任务管理器 - 处理提醒与任务的链接功能
 """
 
-from typing import Dict, List, AsyncGenerator
+from typing import AsyncGenerator
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import At, Face
