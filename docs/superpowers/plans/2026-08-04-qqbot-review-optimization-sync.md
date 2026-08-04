@@ -17,6 +17,7 @@
 - `sing_command` 及其测试在 `.gitignore`（本地实验，不提交）；修复只为本地 564 全绿
 - 仓库私有（tomerose/qqbot-private-backup）；push 前扫描密钥
 - 不重写 git 历史
+- **提交原子性（T2-T5 修订）**：每个测试更新任务必须把该测试依赖的 WIP 生产文件（工作区版本）一起提交，保证中间提交单独 checkout 也全绿。验证法：提交后 `git worktree add` 到该提交跑相关测试，缺文件则补进同一提交，直到绿。T2 至少含 `draw_command/*` + `pro_application/*` + `xiaoning_runtime.py` + `xiaoning_capabilities.py`（draw 测试 import 链）；T3 含 `emotional_chat/*`；T4 含 `pdf_analysis/*` + `video_command/*`；T5 含 `claude_code_agent/*` + `contact_pro_info/*`。T8 剩余 g1-g3 与散件照常。
 
 ---
 

@@ -24,11 +24,16 @@ node_modules/
 /_lyrics.txt
 /_song_*.wav
 /_uplifting_song.wav
+/tmp/
+/*.pdf
+/generate_*_audit.py
+/generate_audit*.py
 
 # Credentials and local environment
 .env
 .env.*
 !.env.example
+xiaoning.local.ps1
 *.token
 *.pem
 *.key
@@ -55,3 +60,8 @@ napcat-runtime/
 # Local agent task records and delivery artifacts
 claude_workspace/
 services/local_tts/tts_audio/
+
+# Local-only experiments that must not be published
+astrbot/data/plugins/sing_command/
+scripts/send_sing_voice.py
+tests/test_sing_command.py
