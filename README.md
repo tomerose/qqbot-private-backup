@@ -1,5 +1,7 @@
 # 小柠 QQBot 私有备份
 
+![CI](https://github.com/tomerose/qqbot-private-backup/actions/workflows/ci.yml/badge.svg)
+
 这是小柠的可复刻代码备份：AstrBot 插件、Gemini/Vertex 代理、本地 TTS、NapCat 启动入口和回归测试。聊天记录、QQ 登录态、API 密钥、模型配置和用户记忆不会进入 Git。
 
 ## 一键初始化（Windows 10/11）

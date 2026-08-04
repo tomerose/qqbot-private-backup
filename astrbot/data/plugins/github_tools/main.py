@@ -6,6 +6,7 @@ v2: 速率限制感知 + GraphQL 动态查询 + 结果缓存
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
