@@ -12,13 +12,13 @@ MAX_PROMPT_CHARS = 500
 _QQ_ID = re.compile(r"^[1-9]\d{4,11}$")
 _NATURAL_DRAW = re.compile(
     r"^(?:小柠[，,\s]*)?(?:帮我|请)?(?:"
-    r"(?:画|绘制|作图)(?:一张|一个)?(?:图片|图|海报|插画|封面)?"
+    r"(?:画|绘制|作图|做|制作)(?:一张|一个|张|个)?(?:图片|图|海报|插画|封面)?"
     r"|生成(?:一张|一个)(?:图片|图|海报|插画|封面))"
     r"[：:，,\s]*(.+)$",
     re.I,
 )
 _NATURAL_GENERATE_IMAGE = re.compile(
-    r"^(?:小柠[，,\s]*)?(?:帮我|请)?生成(?:一张|一个)"
+    r"^(?:小柠[，,\s]*)?(?:帮我|请)?(?:生成|做|制作)(?:一张|一个)"
     r"(.+?)(?:图片|海报|插画|封面|图)$",
     re.I,
 )
@@ -45,11 +45,87 @@ def parse_pro_user_ids(value: object) -> tuple[str, ...]:
     )
 
 
+_ASPECT_FLAGS = {
+    "--1:1": "1:1", "--square": "1:1",
+    "--9:16": "9:16", "--vertical": "9:16", "--portrait": "9:16",
+    "--16:9": "16:9", "--horizontal": "16:9", "--landscape": "16:9",
+    "--2:3": "2:3", "--3:2": "3:2",
+}
+_MULTI_RE = re.compile(r"\s+--(\d)\s*$", re.I)
+# P1: 4K flag — PRO exclusive, Gemini 3 Pro Image 4096x4096
+_4K_FLAG = "--4k"
+# P2: style presets — inject professional prompt prefixes
+_STYLE_FLAGS = {
+    "--style photo": "professional photograph, photorealistic, natural lighting, shallow depth of field, 8K detail — ",
+    "--style anime": "anime/manga illustration, vibrant colors, cel-shaded, studio quality — ",
+    "--style product": "product photography, studio lighting, clean white background, commercial quality — ",
+    "--style illustration": "digital illustration, detailed linework, concept art style — ",
+    "--style cinematic": "cinematic shot, dramatic lighting, film grain, anamorphic lens — ",
+    "--style watercolor": "watercolor painting, soft edges, artistic, flowing colors — ",
+    "--style oil": "oil painting, rich textures, classical composition, museum quality — ",
+}
+
+
+def parse_draw_options(prompt: str) -> tuple[str, str, int, bool, str]:
+    """Extract (clean_prompt, aspect_ratio, n_images, is_4k, style_prefix) from prompt text."""
+    # ── Style preset ──
+    style_prefix = ""
+    prompt_lower = prompt.lower()
+    for flag, prefix in _STYLE_FLAGS.items():
+        if flag in prompt_lower or prompt_lower.endswith(flag):
+            style_prefix = prefix
+            # Remove the flag from prompt (case-insensitive)
+            idx = prompt_lower.rfind(flag)
+            prompt = (prompt[:idx] + prompt[idx + len(flag):]).strip()
+            break
+
+    # ── Aspect ratio ──
+    aspect = "1:1"
+    for flag, ratio in _ASPECT_FLAGS.items():
+        if prompt.endswith(" " + flag):
+            prompt = prompt[: -len(flag)].strip()
+            aspect = ratio
+            break
+
+    # ── 4K flag ──
+    is_4k = False
+    if prompt.lower().endswith(" " + _4K_FLAG):
+        prompt = prompt[: -len(_4K_FLAG) - 1].strip()
+        is_4k = True
+
+    # ── Multi-image ──
+    n = 1
+    m = _MULTI_RE.search(prompt)
+    if m:
+        n = min(max(int(m.group(1)), 1), 4)
+        prompt = prompt[: m.start()].strip()
+
+    return prompt, aspect, n, is_4k, style_prefix
+
+
+_VIDEO_KEYWORD_CHECK = re.compile(r"视频|短片|小视频|动画|影片|sp\b|vid\b|video\b", re.I)
+# 防误判：用户要的是文档/文件，不是画图
+_DOCUMENT_KEYWORD_CHECK = re.compile(
+    r"(?:ppt|word|excel|pdf|docx?|xlsx?|pptx?|"
+    r"文档|报告|表格|幻灯片|演示文稿|简历|总结|计划书|方案|笔记|讲义"
+    r"|合同|申请书|策划|周报|月报|日报|纪要|论文|说明书|手册|课表|日程)",
+    re.I,
+)
+# 防误判：用户要的是歌曲/音乐，不是画图（"做一首歌"→music_command）
+_MUSIC_KEYWORD_CHECK = re.compile(
+    r"(?:歌曲|音乐|歌\b|唱歌|演唱|写歌|作曲|歌词|伴奏|melody|"
+    r"唱一首|唱首|唱个|写一首|写首|创作一首|做一首歌|生成一首歌)",
+    re.I,
+)
+
 def parse_draw_command(text: object) -> str | None:
     raw = str(text or "").strip()
     lowered = raw.lower()
     if lowered in {"生成图片", "帮我生成图片", "请生成图片", "画图"}:
         return "一张适合分享的高质量图片"
+    # Document requests are not drawing requests
+    if _DOCUMENT_KEYWORD_CHECK.search(raw):
+        return None
     prefixes = ("/draw", "/画图")
     prefix = next(
         (candidate for candidate in prefixes if lowered.startswith(candidate)), None
@@ -61,6 +137,12 @@ def parse_draw_command(text: object) -> str | None:
         if natural is None:
             return None
         prompt = " ".join(natural.group(1).split())
+        # ── 防误判：用户说的是视频，不是画图 ──
+        if _VIDEO_KEYWORD_CHECK.search(raw):
+            return None
+        # ── 防误判：用户要的是歌曲/音乐，不是画图 ──
+        if _MUSIC_KEYWORD_CHECK.search(raw):
+            return None
         if not prompt:
             raise DrawRequestError("请补充画面描述。")
         if len(prompt) > MAX_PROMPT_CHARS:
@@ -78,6 +160,53 @@ def parse_draw_command(text: object) -> str | None:
     if any(ord(char) < 32 for char in prompt):
         raise DrawRequestError("画面描述包含不支持的控制字符。")
     return prompt
+
+
+# ── Image editing natural language detection ──────────────────────
+
+_EDIT_PREFIXES = ("/edit", "/编辑图片", "/改图")
+_REMOVED_EDIT_TERMS = re.compile(r"(?:水印|watermark|dewatermark)", re.I)
+_NATURAL_EDIT = re.compile(
+    r"^(?:小柠[，,\s]*)?(?:帮我|请|给我|帮忙|来)?"
+    r"(?:把|将|给)"
+    r"(?:这张|这个|那张|那个|这张图|这个图|这张图片|这张照片|这个照片|它)"
+    r"(?:改[成为]?|变成?|换成?|转[换为]?[成为]?|p成|修[改为]?成)"
+    r"(.+)$",
+    re.I,
+)
+_NATURAL_REDRAW = re.compile(
+    r"^(?:小柠[，,\s]*)?(?:帮我|请|给我|麻烦|能不能|可以)?"
+    r"(?:把(?:这张|这个|那张|那个|这张图|这个图|这张图片|这张照片|它)?\s*)?"
+    r"(?:重新画|重画|重新绘制|重绘)(?:一张|一个|一下)?(?:成|为)?"
+    r"[：:，,\s]*(.*)$",
+    re.I,
+)
+_DEFAULT_REDRAW_PROMPT = "忠实重绘参考图，保留主体和构图，线条干净，输出清晰完整的高质量图片"
+
+
+def parse_edit_command(text: object) -> str | None:
+    """Detect image editing intent from /edit command only."""
+    raw = str(text or "").strip()
+    if _REMOVED_EDIT_TERMS.search(raw):
+        return None
+    lowered = raw.lower()
+    for prefix in _EDIT_PREFIXES:
+        if lowered.startswith(prefix):
+            prompt = raw[len(prefix):].strip()
+            return prompt if prompt else None
+    m = _NATURAL_EDIT.match(raw)
+    if m:
+        prompt = m.group(1).strip()
+        if prompt and len(prompt) <= MAX_PROMPT_CHARS:
+            return prompt
+    redraw = _NATURAL_REDRAW.match(raw)
+    if redraw:
+        prompt = redraw.group(1).strip()
+        if not prompt:
+            return _DEFAULT_REDRAW_PROMPT
+        if len(prompt) <= MAX_PROMPT_CHARS:
+            return f"以参考图为基础重新绘制：{prompt}"
+    return None
 
 
 class DrawRateLimiter:

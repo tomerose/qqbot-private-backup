@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import tempfile
 import unittest
@@ -14,7 +15,8 @@ PLUGIN_DIR = (
 )
 sys.path.insert(0, str(PLUGIN_DIR))
 
-from document_quality import inspect_docx_quality, requires_research_quality  # noqa: E402
+import document_quality  # noqa: E402
+from document_quality import inspect_docx_quality, render_docx, requires_research_quality  # noqa: E402
 
 
 def write_docx(path: Path, text: str, links=()):
@@ -75,6 +77,20 @@ class DocumentQualityTests(unittest.TestCase):
     def test_recent_github_report_is_research_quality(self):
         self.assertTrue(requires_research_quality("生成最近 AI 大事件的 Word 报告，参考 GitHub"))
         self.assertFalse(requires_research_quality("生成只包含 hello 的 Word"))
+
+    def test_render_falls_back_to_structural_only_when_soffice_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            document = Path(tmp) / "valid.docx"
+            write_docx(document, "正文内容")
+            qa_dir = Path(tmp) / "qa"
+            original = document_quality.SOFFICE_EXE
+            document_quality.SOFFICE_EXE = Path(tmp) / "definitely-missing-soffice.exe"
+            try:
+                decision = asyncio.run(render_docx(document, qa_dir))
+            finally:
+                document_quality.SOFFICE_EXE = original
+            self.assertTrue(decision.allowed)
+            self.assertEqual(decision.code, "docx_structural_only")
 
 
 if __name__ == "__main__":

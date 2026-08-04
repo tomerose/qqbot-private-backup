@@ -34,8 +34,21 @@ async def _read_bounded(
         remaining = limit - len(buffer)
         if remaining > 0:
             buffer.extend(chunk[:remaining])
-        if len(chunk) > remaining and not limit_signal.done():
-            limit_signal.set_result(stream_name)
+        if len(chunk) > remaining:
+            if not limit_signal.done():
+                limit_signal.set_result(stream_name)
+            # ponytail: buffer full — set the signal once, then drain
+            # silently until EOF or termination to keep the pipe alive
+            # while the watchdog kills the subprocess.
+            break
+    # Drain loop after limit: read + discard until EOF or pipe closes.
+    while True:
+        try:
+            chunk = await stream.read(64 * 1024)
+        except (OSError, ValueError, asyncio.CancelledError):
+            return
+        if not chunk:
+            return
 
 
 async def _default_terminate(proc: asyncio.subprocess.Process) -> None:

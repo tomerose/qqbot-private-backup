@@ -1,0 +1,14 @@
+# 日常Vlog模板 — 生活记录、日常分享
+name: "日常Vlog"
+description: "生活记录、日常分享、随手拍"
+style: "casual"
+duration_range: [15, 60]
+hook_required: false
+pace: "relaxed"
+visual_style: "real"
+voice_style: "gentle"
+subtitle_style: "clean"
+transitions: ["fade", "dissolve"]
+motion: "ken_burns"
+aspect_ratio: "9:16"
+script_hint: "轻松自然的日常叙述，像在跟朋友聊天，不刻意不夸张"

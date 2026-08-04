@@ -157,7 +157,7 @@ class BanproHandle:
         """设置刷屏禁言时长"""
         gid = event.get_group_id()
         if isinstance(time, int):
-            await self.db.set(gid, "word_ban_time", time)
+            await self.db.set(gid, "spamming_ban_time", time)
             msg = (
                 f"本群刷屏禁言时长已设为：{time} 秒"
                 if time > 0

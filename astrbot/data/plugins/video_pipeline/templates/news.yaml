@@ -1,0 +1,14 @@
+# 资讯速报模板 — 新闻、热点、事件解读
+name: "资讯速报"
+description: "新闻解读、热点分析、事件追踪"
+style: "neutral"
+duration_range: [30, 120]
+hook_required: true
+pace: "fast"
+visual_style: "mixed"
+voice_style: "male"
+subtitle_style: "clean"
+transitions: ["slide", "fade"]
+motion: "none"
+aspect_ratio: "16:9"
+script_hint: "新闻播报风格：标题→关键事实→背景→分析→结论，每场景一个信息点"

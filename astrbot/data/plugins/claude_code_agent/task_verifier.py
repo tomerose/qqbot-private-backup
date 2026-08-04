@@ -95,8 +95,32 @@ def select_verification_command(work_dir: Path) -> list[str] | None:
         scripts = package.get("scripts", {}) if isinstance(package, dict) else {}
         if isinstance(scripts, dict) and isinstance(scripts.get("test"), str):
             return ["npm", "test"]
+    go_mod = root / "go.mod"
+    if go_mod.is_file() and not go_mod.is_symlink():
+        return ["go", "test", "./..."]
+    cargo_toml = root / "Cargo.toml"
+    if cargo_toml.is_file() and not cargo_toml.is_symlink():
+        return ["cargo", "test"]
+    makefile = root / "Makefile"
+    if makefile.is_file() and not makefile.is_symlink():
+        try:
+            content = makefile.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            content = ""
+        if re.search(r"^\btest\s*:", content, re.MULTILINE):
+            return ["make", "test"]
     tests_dir = root / "tests"
     if tests_dir.is_dir() and not tests_dir.is_symlink():
+        # Prefer pytest if configured, else unittest discover.
+        if any((root / f).is_file() for f in ("pytest.ini", "conftest.py")):
+            return [sys.executable, "-m", "pytest", "tests", "-q"]
+        pyproject = root / "pyproject.toml"
+        if pyproject.is_file() and not pyproject.is_symlink():
+            try:
+                if "[tool.pytest]" in pyproject.read_text(encoding="utf-8"):
+                    return [sys.executable, "-m", "pytest", "tests", "-q"]
+            except (OSError, UnicodeError):
+                pass
         return [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
     return None
 
@@ -106,18 +130,22 @@ def verify_step(
     exit_code: int | None,
     deliverables: Sequence[object],
     verification_exit: int | None,
+    *,
+    response_text: str = "",
+    error_code: str = "",
 ) -> VerificationEvidence:
     if exit_code != 0:
-        return VerificationEvidence(False, "execution_failed")
+        code = str(error_code or "").strip()
+        return VerificationEvidence(False, code or "execution_failed")
+    if verification_exit not in {None, 0}:
+        return VerificationEvidence(False, "verification_failed")
     if step.expected_artifact and not deliverables:
         return VerificationEvidence(False, "artifact_missing")
     expected_suffixes = expected_artifact_suffixes(step.instruction)
-    if step.expected_artifact and expected_suffixes:
+    if step.expected_artifact and expected_suffixes and deliverables:
         delivered_suffixes = {
             Path(getattr(item, "path", "")).suffix.lower() for item in deliverables
         }
         if not delivered_suffixes.intersection(expected_suffixes):
             return VerificationEvidence(False, "artifact_type")
-    if verification_exit not in {None, 0}:
-        return VerificationEvidence(False, "verification_failed")
     return VerificationEvidence(True, "verified")

@@ -5,8 +5,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+from runtime_config_fixture import ensure_runtime_configs  # noqa: E402
+
 
 class RuntimePrivacyConfigTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        ensure_runtime_configs(ROOT)
+
     def test_astrbot_production_log_level_does_not_persist_info_chat_lines(self):
         config = json.loads(
             (ROOT / "astrbot" / "data" / "cmd_config.json").read_text(encoding="utf-8-sig")

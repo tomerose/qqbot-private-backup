@@ -10,6 +10,7 @@ from draw_command.draw_core import (  # noqa: E402
     DrawRateLimiter,
     DrawRequestError,
     parse_draw_command,
+    parse_edit_command,
     parse_pro_user_ids,
 )
 
@@ -37,6 +38,18 @@ class DrawCoreTests(unittest.TestCase):
         self.assertEqual(limiter.try_acquire("1211000567"), 45)
         now[0] = 160.1
         self.assertEqual(limiter.try_acquire("1211000567"), 0)
+
+    def test_removed_watermark_feature_never_becomes_an_edit(self):
+        self.assertIsNone(parse_edit_command("去水印"))
+        self.assertIsNone(parse_edit_command("帮我去s水印"))
+        self.assertIsNone(parse_edit_command("/edit 去掉watermark"))
+
+    def test_recognizes_redraw_followups(self):
+        self.assertIn("忠实重绘", parse_edit_command("重画"))
+        self.assertEqual(
+            parse_edit_command("重新画一个极简黑白线条的大耳狗小鸡头像"),
+            "以参考图为基础重新绘制：极简黑白线条的大耳狗小鸡头像",
+        )
 
 
 if __name__ == "__main__":

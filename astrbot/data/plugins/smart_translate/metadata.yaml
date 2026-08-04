@@ -1,0 +1,6 @@
+name: smart_translate
+display_name: 智能翻译
+short_desc: /translate 多语言翻译
+desc: 基于 Gemini 的智能翻译，支持常用语言互译。免费使用。
+version: v1.0.0
+author: lemon

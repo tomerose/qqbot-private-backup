@@ -1,0 +1,5 @@
+name: astrbot_plugin_xiaoning_memory
+desc: 小柠长期记忆 — Google Cloud Firestore 后端 (qqbot数据库)，LLM 自动提取+检索
+version: 1.1.0
+author: liu
+repo: null

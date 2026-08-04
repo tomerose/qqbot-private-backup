@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-PLUGIN_PARENT = Path(r"D:\Claudecoda学习\qqbot\astrbot\data\plugins")
+PLUGIN_PARENT = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugins"
 sys.path.insert(0, str(PLUGIN_PARENT))
 
 from astrbot_plugin_qqadmin.core.ai_moderation_handler import AIModerationHandler  # noqa: E402
@@ -60,8 +60,10 @@ class FakeBot:
         self.bot_role = bot_role
         self.sender_role = sender_role
         self.calls = []
+        self.member_info_calls = []
 
     async def get_group_member_info(self, group_id, user_id, no_cache=True):
+        self.member_info_calls.append((group_id, user_id))
         role = self.bot_role if user_id == 3806573022 else self.sender_role
         return {"role": role}
 
@@ -126,6 +128,13 @@ class AIModerationHandlerTests(unittest.IsolatedAsyncioTestCase):
                 await build_handler(bot, provider=provider).handle(FakeEvent(bot, sender_id))
                 self.assertEqual(bot.calls, [])
                 self.assertEqual(provider.prompts, [])
+
+    async def test_normal_chat_skips_member_lookup_and_model(self):
+        bot = FakeBot()
+        provider = FakeProvider()
+        await build_handler(bot, provider=provider).handle(FakeEvent(bot, text="今晚吃什么"))
+        self.assertEqual(bot.member_info_calls, [])
+        self.assertEqual(provider.prompts, [])
 
     async def test_valid_decision_recalls_then_uses_local_escalation_duration(self):
         bot = FakeBot()

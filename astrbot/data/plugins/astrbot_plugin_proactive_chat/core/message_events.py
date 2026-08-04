@@ -263,10 +263,8 @@ class EventsMixin:
                 f"[主动消息] 群聊活跃喵，{self._get_session_log_str(normalized_session_id, session_config)} 未找到可取消的主动消息任务（可能已被提前清理）喵。"
             )
 
-        # 重置沉默倒计时
-        await self._reset_group_silence_timer(normalized_session_id)
-
         # 清理计数与任务标记：用户发言后将未回复计数归零
+        should_schedule_group_reply = False
         async with self.data_lock:
             changed = False
             if normalized_session_id in self.session_data:
@@ -286,8 +284,37 @@ class EventsMixin:
                         or changed
                     )
 
+            # 群主动发言只在足够多的真实成员消息后才考虑，避免刚沉默就插话。
+            try:
+                required_messages = max(
+                    1, int(session_config.get("group_min_messages_before_proactive", 3))
+                )
+            except Exception:
+                required_messages = 3
+            session_state = self.session_data.setdefault(normalized_session_id, {})
+            try:
+                message_count = int(
+                    session_state.get("group_user_messages_since_proactive", 0)
+                )
+            except Exception:
+                message_count = 0
+            session_state["group_user_messages_since_proactive"] = message_count + 1
+            should_schedule_group_reply = message_count + 1 >= required_messages
+            changed = True
+            logger.debug(
+                f"[主动消息] {self._get_session_log_str(normalized_session_id, session_config)} "
+                f"已累计 {message_count + 1}/{required_messages} 条群成员消息喵。"
+            )
+
             if changed:
                 await self._save_data_internal()
+
+        if should_schedule_group_reply:
+            await self._schedule_group_reply_after_threshold(normalized_session_id)
+        else:
+            # Every real member message restarts the idle window. Without this,
+            # a group that has not yet received a bot reply never gets an idle trigger.
+            await self._reset_group_silence_timer(normalized_session_id)
 
     async def on_after_message_sent(self, event: AstrMessageEvent):
         """监听 Bot 发送消息后事件，重置群聊沉默倒计时。"""

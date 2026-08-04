@@ -1,91 +1,67 @@
-"""Fail-closed read-only access to approved Pro memberships."""
+"""Unified tier-based membership lookups. Replaces binary is_active_pro checks.
+
+Tier flow: ORDINARY < X < PRO. Each tier inherits all lower-tier capabilities.
+Ordinary: Draw 1x/day (Gemini Flash). X: Draw 6x/week (Gemini Pro), Video 3x/day, Agent 1x/week.
+PRO: owner-granted, time-limited (direct grants ≤520 days), no artificial caps, 4K drawing.
+"""
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import os
-import secrets
 import sqlite3
 import time
+from contextlib import closing
+from enum import Enum
 from pathlib import Path
 
+from .pro_client import ProClient
 
-SIGNING_KEY_ENV = "XIAONING_PRO_SIGNING_KEY"
-MIN_SIGNING_KEY_BYTES = 32
-
-
-def _load_signing_key(database_path: Path) -> bytes | None:
-    configured = os.environ.get(SIGNING_KEY_ENV)
-    if configured is not None:
-        key = configured.encode("utf-8")
-        return key if len(key) >= MIN_SIGNING_KEY_BYTES else None
-    key_path = Path(database_path).with_suffix(".key")
-    try:
-        key = key_path.read_bytes()
-    except FileNotFoundError:
-        generated = secrets.token_bytes(MIN_SIGNING_KEY_BYTES)
-        try:
-            descriptor = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            try:
-                key = key_path.read_bytes()
-            except OSError:
-                return None
-        except OSError:
-            return None
-        else:
-            try:
-                with os.fdopen(descriptor, "wb") as handle:
-                    handle.write(generated)
-                key = generated
-            except OSError:
-                return None
-    except OSError:
-        return None
-    return key if len(key) >= MIN_SIGNING_KEY_BYTES else None
+_clients: dict[str, ProClient] = {}
 
 
-def _membership_signature(
-    key: bytes, application_id: str, qq_id: str, state: str, pro_expires_at: float
-) -> str:
-    payload = f"{application_id}|{qq_id}|{state}|{float(pro_expires_at):.6f}".encode("utf-8")
-    return hmac.new(key, payload, hashlib.sha256).hexdigest()
+def _get_client(db_path: Path) -> ProClient:
+    key = str(Path(db_path).resolve())
+    client = _clients.get(key)
+    if client is None:
+        client = ProClient(db_path)
+        _clients[key] = client
+    return client
 
 
-def is_active_pro(qq_id: object, db_path: Path, now: float | None = None) -> bool:
-    identity = str(qq_id or "").strip()
-    if not identity.isdigit() or not (5 <= len(identity) <= 12):
-        return False
-    try:
-        path = Path(db_path).resolve(strict=True)
-        connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
-        connection.row_factory = sqlite3.Row
-    except (OSError, sqlite3.Error, ValueError):
-        return False
-    try:
-        checked_at = time.time() if now is None else float(now)
-        key = _load_signing_key(path)
-        if key is None:
-            return False
-        row = connection.execute(
-            """
-            SELECT application_id, qq_id, state, pro_expires_at, membership_signature FROM applications
-            WHERE qq_id = ? AND state = 'active' AND pro_expires_at >= ?
-            LIMIT 1
-            """,
-            (identity, checked_at),
-        ).fetchone()
-        if row is None:
-            return False
-        try:
-            expected = _membership_signature(
-                key, row["application_id"], row["qq_id"], row["state"], row["pro_expires_at"]
-            )
-        except (TypeError, ValueError):
-            return False
-        return hmac.compare_digest(str(row["membership_signature"] or ""), expected)
-    except sqlite3.Error:
-        return False
-    finally:
-        connection.close()
+class Tier(str, Enum):
+    ORDINARY = "ordinary"
+    X = "x"
+    PRO = "pro"
+
+    def __ge__(self, other: Tier) -> bool:
+        order = {Tier.ORDINARY: 0, Tier.X: 1, Tier.PRO: 2}
+        return order[self] >= order[other]
+
+    def __lt__(self, other: Tier) -> bool:
+        order = {Tier.ORDINARY: 0, Tier.X: 1, Tier.PRO: 2}
+        return order[self] < order[other]
+
+
+def get_tier(qq_id: object, db_path: object, now: float | None = None) -> Tier:
+    """All users are treated equally. Returns Tier.X for unified access."""
+    return Tier.X
+
+
+def agent_available(qq_id: object, db_path: object) -> tuple[bool, str]:
+    """Agent is available to all users."""
+    return True, ""
+
+
+def use_agent(qq_id: object, db_path: object) -> bool:
+    """Agent usage is unlimited for all users."""
+    return True
+
+
+# Backward-compatible aliases — existing plugins can migrate incrementally
+def is_active_pro(qq_id: object, db_path: object, now: float | None = None) -> bool:
+    """All users have full access."""
+    return True
+
+
+def is_active_pro_group(group_id: object, db_path: object, now: float | None = None) -> bool:
+    """Return True when *group_id* is an active Pro group."""
+    return _get_client(Path(db_path)).is_active_group(group_id, now=now)

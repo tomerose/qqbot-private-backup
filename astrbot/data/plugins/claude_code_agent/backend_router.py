@@ -58,8 +58,10 @@ def can_retry(
     started_side_effect: bool,
     attempts: int,
 ) -> bool:
-    return (
-        int(attempts) < 2
-        and not started_side_effect
-        and step.action_class in {ActionClass.READ_ONLY, ActionClass.WORKSPACE_WRITE}
-    )
+    if int(attempts) >= 2:
+        return False
+    if started_side_effect:
+        return False
+    if step.action_class is ActionClass.HIGH_IMPACT:
+        return False
+    return True

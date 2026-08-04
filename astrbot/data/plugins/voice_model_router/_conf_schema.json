@@ -4,6 +4,11 @@
     "type": "bool",
     "default": true
   },
+  "auto_voice_reply": {
+    "description": "收到语音消息时自动用语音回复（无需说'发语音'）；关闭则仅显式要求时发语音",
+    "type": "bool",
+    "default": true
+  },
   "authorized_voice": {
     "description": "仅在声线已获明确授权时允许启用 GPT-SoVITS",
     "type": "bool",

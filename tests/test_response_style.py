@@ -28,6 +28,11 @@ class ResponseStyleTests(unittest.TestCase):
 
         self.assertTrue(reply.startswith("未完成。"), reply)
 
+    def test_delivery_pending_is_not_reported_as_generation_failure(self):
+        reply = format_task_reply("delivery_pending", "文件未成功交付。")
+
+        self.assertTrue(reply.startswith("任务未完成，文件待交付。"), reply)
+
 
 if __name__ == "__main__":
     unittest.main()

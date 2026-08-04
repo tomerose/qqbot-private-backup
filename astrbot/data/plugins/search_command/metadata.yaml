@@ -1,0 +1,6 @@
+name: search_command
+display_name: 小柠搜索与行动包
+short_desc: 免费搜索/地图/计算；X/Pro研究、决策、行程报告返回QQ
+desc: 基于 Gemini 3.6、Google Search、Maps、URL Context 与代码执行。X每日3次行动包，Pro每日10次并独立复核，结果以Markdown文件返回QQ。
+version: v2.0.0
+author: lemon

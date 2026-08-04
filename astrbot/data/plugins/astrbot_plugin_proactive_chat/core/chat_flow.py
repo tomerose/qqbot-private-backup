@@ -15,6 +15,7 @@ from astrbot.core.agent.message import (
     UserMessageSegment,
 )
 
+from .llm_adapter import PROACTIVE_HISTORY_MARKER
 from ..utils.time_utils import is_quiet_time
 
 
@@ -68,7 +69,10 @@ class ProactiveCoreMixin:
         """主动消息任务完成后的收尾工作。"""
         try:
             # 存档对话历史（使用新对话管理 API）
-            user_msg_obj = UserMessageSegment(content=[TextPart(text=user_prompt)])
+            # Never persist the generated internal prompt as if the user said it.
+            user_msg_obj = UserMessageSegment(
+                content=[TextPart(text=PROACTIVE_HISTORY_MARKER)]
+            )
             assistant_msg_obj = AssistantMessageSegment(
                 content=[TextPart(text=assistant_response)]
             )
@@ -179,6 +183,16 @@ class ProactiveCoreMixin:
 
             schedule_conf = session_config.get("schedule_settings", {})
 
+            cooldown_seconds = int(
+                schedule_conf.get("min_interval_minutes", 30)
+            ) * 60
+            if not self._private_proactive_allowed(
+                normalized_session_id, cooldown_seconds
+            ):
+                logger.info("[主动消息] 私聊已进入安静或共享冷却期，延后本轮问候喵。")
+                await self._schedule_next_chat_and_save(normalized_session_id)
+                return
+
             # 未回复次数上限检查
             async with self.data_lock:
                 unanswered_count = self.session_data.get(normalized_session_id, {}).get(
@@ -222,6 +236,15 @@ class ProactiveCoreMixin:
             # 可能使用规范化后的会话 ID（由上下文准备阶段返回）
             session_id = request_package.get("session_id", session_id)
 
+            if self._has_crisis_context(history_messages):
+                logger.info("[主动消息] 最近上下文存在危机信号，跳过非请求式主动消息喵。")
+                parsed = self._parse_session_id(session_id)
+                if parsed and ("Group" in parsed[1] or "Guild" in parsed[1]):
+                    await self._reset_group_silence_timer(session_id)
+                else:
+                    await self._schedule_next_chat_and_save(session_id)
+                return
+
             # 记录任务开始状态快照
             # 用于检测 LLM 生成窗口内是否出现用户新消息
             task_start_state = {
@@ -239,7 +262,11 @@ class ProactiveCoreMixin:
                 unanswered_count,
             )
             if not response_text:
-                await self._schedule_next_chat_and_save(session_id)
+                parsed = self._parse_session_id(session_id)
+                if parsed and ("Group" in parsed[1] or "Guild" in parsed[1]):
+                    await self._reset_group_silence_timer(session_id)
+                else:
+                    await self._schedule_next_chat_and_save(session_id)
                 return
 
             # 检查生成期间是否有新消息
@@ -265,7 +292,16 @@ class ProactiveCoreMixin:
                 return
 
             # 发送消息与收尾
-            await self._send_proactive_message(session_id, response_text)
+            sent = await self._send_proactive_message(session_id, response_text)
+            if not sent:
+                parsed = self._parse_session_id(session_id)
+                if parsed and ("Group" in parsed[1] or "Guild" in parsed[1]):
+                    await self._reset_group_silence_timer(session_id)
+                else:
+                    await self._schedule_next_chat_and_save(session_id)
+                return
+
+            self._record_private_proactive_send(session_id)
 
             await self._finalize_and_reschedule(
                 session_id,
@@ -280,8 +316,10 @@ class ProactiveCoreMixin:
             is_group_session = parsed and ("Group" in parsed[1] or "Guild" in parsed[1])
             if is_group_session:
                 async with self.data_lock:
-                    if self._clear_session_schedule_state(session_id):
-                        await self._save_data_internal()
+                    state = self.session_data.setdefault(session_id, {})
+                    state["group_user_messages_since_proactive"] = 0
+                    self._clear_session_schedule_state(session_id)
+                    await self._save_data_internal()
 
         except Exception as e:
             error_type = type(e).__name__

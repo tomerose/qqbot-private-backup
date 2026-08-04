@@ -2,7 +2,8 @@ import sys
 from pathlib import Path
 import unittest
 
-PLUGIN_DIR = Path(r"D:\Claudecoda学习\qqbot\astrbot\data\plugins\astrbot_plugin_aiocensor")
+_PROJ_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_DIR = _PROJ_ROOT / "astrbot" / "data" / "plugins" / "astrbot_plugin_aiocensor"
 sys.path.insert(0, str(PLUGIN_DIR))
 
 from webui_control import webui_enabled  # noqa: E402

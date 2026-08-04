@@ -1,0 +1,6 @@
+name: web_studio
+display_name: 小柠网页工坊
+short_desc: X/Pro 在 QQ 中制作并发布真实 HTTPS 网页工具
+desc: 用自然语言生成安全的单文件网页，返回预览、HTML 文件和 Firebase HTTPS 链接；Pro 支持增强复核与原址修改。
+version: v1.1.0
+author: lemon

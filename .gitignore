@@ -1,6 +1,9 @@
 # Python and local tooling
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .venv/
 venv/
 node_modules/
@@ -14,14 +17,23 @@ node_modules/
 *.gz
 *.tmp
 *.bak
+*.pid
 *.db
 *.db-shm
 *.db-wal
+/_lyrics.txt
+/_song_*.wav
+/_uplifting_song.wav
+/tmp/
+/*.pdf
+/generate_*_audit.py
+/generate_audit*.py
 
 # Credentials and local environment
 .env
 .env.*
 !.env.example
+xiaoning.local.ps1
 *.token
 *.pem
 *.key
@@ -30,12 +42,9 @@ node_modules/
 astrbot/data/cmd_config.json
 astrbot/data/vertex-key.json
 data/cmd_config.json
-# This live plugin contains a hard-coded provider key.  A runnable,
-# environment-variable-based restoration template is tracked instead.
-astrbot/data/plugins/emotional_chat/main.py
-
 # AstrBot private runtime data
 astrbot/astrbot.log
+astrbot/plugin_data/
 astrbot/data/attachments/
 astrbot/data/config/
 astrbot/data/knowledge_base/
@@ -49,7 +58,11 @@ napcat/config/
 napcat-runtime/
 
 # Local agent task records and delivery artifacts
-claude_workspace/state/
-claude_workspace/jobs/
-claude_workspace/**/*.log
+claude_workspace/
 services/local_tts/tts_audio/
+
+# Local-only experiments that must not be published
+astrbot/data/plugins/sing_command/
+scripts/send_sing_voice.py
+tests/test_sing_command.py
+weixin-private-login-qr.png

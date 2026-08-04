@@ -5,12 +5,15 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
-os.environ["ASTRBOT_ROOT"] = r"D:\Claudecoda学习\qqbot\astrbot"
+_PROJ_ROOT = Path(__file__).resolve().parents[1]
+os.environ["ASTRBOT_ROOT"] = str(_PROJ_ROOT / "astrbot")
 
 from astrbot.api.message_components import File, Plain, Record
 
-PLUGINS_DIR = Path(r"D:\Claudecoda学习\qqbot\astrbot\data\plugins")
+PLUGINS_DIR = _PROJ_ROOT / "astrbot" / "data" / "plugins"
 sys.path.insert(0, str(PLUGINS_DIR))
 
 from voice_model_router.main import VoiceModelRouter  # noqa: E402
@@ -27,13 +30,18 @@ class FakeMessageObject:
 
 
 class FakeEvent:
-    def __init__(self, text, *, private=True, wake=True, components=None, result=None):
+    def __init__(
+        self, text, *, private=True, wake=True, components=None, result=None,
+        platform_name="",
+    ):
         self.message_str = text
         self._private = private
         self.is_at_or_wake_command = wake
         self.message_obj = FakeMessageObject(components or [Plain(text)])
         self._extra = {}
         self._result = result
+        if platform_name:
+            self.platform_meta = SimpleNamespace(name=platform_name)
 
     def is_private_chat(self):
         return self._private
@@ -84,6 +92,25 @@ class VoiceModelPluginTests(unittest.TestCase):
             await plugin.route_voice_request(event)
             self.assertIsNone(event.get_extra("voice_reply_requested"))
             self.assertIsNone(event.get_extra("selected_provider"))
+
+        asyncio.run(scenario())
+
+    def test_weixin_voice_request_keeps_a_truthful_text_reply(self):
+        async def scenario():
+            plugin = VoiceModelRouter.__new__(VoiceModelRouter)
+            result = FakeResult([Plain("我已经整理好了重点。")])
+            event = FakeEvent(
+                "请用语音回答我",
+                result=result,
+                platform_name="weixin_oc",
+            )
+
+            await plugin.route_voice_request(event)
+            await plugin.synthesize_voice_reply(event)
+
+            self.assertTrue(event.get_extra("voice_text_fallback"))
+            self.assertFalse(any(isinstance(item, Record) for item in result.chain))
+            self.assertEqual(result.chain[0].text, "微信这边暂时用文字回复：")
 
         asyncio.run(scenario())
 
@@ -147,7 +174,7 @@ class VoiceModelPluginTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_sent_voice_cleanup_deletes_only_generated_audio_inside_private_root(self):
+    def test_sent_voice_cleanup_delays_and_limits_generated_audio_to_private_root(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 base = Path(tmp)
@@ -164,11 +191,114 @@ class VoiceModelPluginTests(unittest.TestCase):
                     "_local_tts_audio_paths", [str(generated), str(outside)]
                 )
 
-                await plugin.cleanup_sent_voice(event)
+                with patch("voice_model_router.main.asyncio.create_task") as create_task:
+                    await plugin.cleanup_sent_voice(event)
 
-                self.assertFalse(generated.exists())
+                self.assertTrue(generated.exists())
                 self.assertTrue(outside.exists())
                 self.assertEqual(event.get_extra("_local_tts_audio_paths"), [])
+                create_task.assert_called_once()
+                scheduled = create_task.call_args.args[0]
+                scheduled.close()
+
+        asyncio.run(scenario())
+
+    def test_voice_message_auto_enables_voice_reply_in_private_chat(self):
+        async def scenario():
+            plugin = VoiceModelRouter.__new__(VoiceModelRouter)
+            plugin.config = {"auto_voice_reply": True}
+            # Simulate a voice message (Record component, non-empty text from STT)
+            event = FakeEvent(
+                "帮我查天气",
+                private=True,
+                components=[Record(file="voice.amr")],
+            )
+            await plugin.route_voice_request(event)
+            self.assertTrue(event.get_extra("voice_reply_requested"))
+            self.assertEqual(event.get_extra("selected_provider"), "gemini-2.5-flash")
+
+        asyncio.run(scenario())
+
+    def test_text_message_without_record_does_not_set_voice_reply(self):
+        async def scenario():
+            plugin = VoiceModelRouter.__new__(VoiceModelRouter)
+            plugin.config = {"auto_voice_reply": True}
+            event = FakeEvent("帮我查天气", private=True, components=[Plain("帮我查天气")])
+            await plugin.route_voice_request(event)
+            self.assertIsNone(event.get_extra("voice_reply_requested"))
+
+        asyncio.run(scenario())
+
+    def test_voice_message_in_group_without_at_does_not_set_voice_reply(self):
+        async def scenario():
+            plugin = VoiceModelRouter.__new__(VoiceModelRouter)
+            plugin.config = {"auto_voice_reply": True}
+            event = FakeEvent(
+                "帮我查天气",
+                private=False,
+                wake=False,
+                components=[Record(file="voice.amr")],
+            )
+            await plugin.route_voice_request(event)
+            self.assertIsNone(event.get_extra("voice_reply_requested"))
+
+        asyncio.run(scenario())
+
+    def test_group_reply_has_ten_percent_voice_chance(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                audio = Path(tmp) / "voice.wav"
+                write_wav(audio, b"\x01\x00" * 4)
+                plugin = VoiceModelRouter.__new__(VoiceModelRouter)
+                plugin.tts_client = FakeTTSClient([audio])
+                plugin.audio_root = Path(tmp)
+                result = FakeResult([Plain("普通群聊文字")])
+                event = FakeEvent("正常回答", private=False, wake=True, result=result)
+
+                with patch("voice_model_router.main.random.random", return_value=0.09):
+                    await plugin.synthesize_voice_reply(event)
+
+                self.assertTrue(event.get_extra("voice_reply_requested"))
+                self.assertTrue(any(isinstance(item, Record) for item in result.chain))
+
+        asyncio.run(scenario())
+
+    def test_group_reply_stays_text_outside_ten_percent_voice_chance(self):
+        async def scenario():
+            plugin = VoiceModelRouter.__new__(VoiceModelRouter)
+            plugin.tts_client = None
+            result = FakeResult([Plain("普通群聊文字")])
+            event = FakeEvent("正常回答", private=False, wake=True, result=result)
+
+            with patch("voice_model_router.main.random.random", return_value=0.10):
+                await plugin.synthesize_voice_reply(event)
+
+            self.assertEqual(len(result.chain), 1)
+            self.assertIsInstance(result.chain[0], Plain)
+
+        asyncio.run(scenario())
+
+    def test_qq_ai_voice_uses_the_real_group_and_removes_duplicate_text(self):
+        async def scenario():
+            action = AsyncMock(side_effect=[
+                [{"type": "推荐", "characters": [{"character_id": "1001", "character_name": "小柠"}]}],
+                {"message_id": "456"},
+            ])
+            plugin = VoiceModelRouter.__new__(VoiceModelRouter)
+            plugin._ai_characters_by_group = {}
+            plugin.tts_client = None
+            result = FakeResult([Plain("语音内容")])
+            event = FakeEvent("请发语音", private=False, wake=True, result=result)
+            event.bot = SimpleNamespace(call_action=action)
+            event.get_group_id = lambda: "1075963106"
+            event.set_extra("voice_reply_requested", True)
+
+            await plugin.synthesize_voice_reply(event)
+
+            self.assertEqual(result.chain, [])
+            self.assertTrue(event.get_extra("_qq_ai_voice_sent"))
+            self.assertEqual(action.await_args_list[0].kwargs["group_id"], "1075963106")
+            self.assertEqual(action.await_args_list[1].args[0], "send_group_ai_record")
 
         asyncio.run(scenario())
 

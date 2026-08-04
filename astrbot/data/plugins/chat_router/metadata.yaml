@@ -1,0 +1,4 @@
+name: chat_router
+desc: Route ordinary chat through the local Gemini provider.
+version: 1.0.0
+author: xiaoning

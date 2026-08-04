@@ -4,10 +4,37 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime
 from typing import Any
 
 from astrbot.api import logger
+
+try:
+    from friend_core.persona_prompt import (
+        sanitize_conversational_reply,
+        sanitize_unverified_artifact_reply,
+    )
+except ImportError:
+    from data.plugins.friend_core.persona_prompt import (
+        sanitize_conversational_reply,
+        sanitize_unverified_artifact_reply,
+    )
+
+try:
+    from emotional_chat.main import is_crisis_language
+except ImportError:
+    from data.plugins.emotional_chat.main import is_crisis_language
+
+
+PROACTIVE_HISTORY_MARKER = "[小柠主动消息记录]"
+_NO_SEND = "NO_SEND"
+_PROACTIVE_DEPENDENCY_RE = re.compile(
+    r"(?:想你|想死你|离不开你|只有你|你不回|等你回|必须回|快回|别不理我|"
+    r"没有你.{0,8}(?:不行|不行了|活不下去))",
+    re.I,
+)
+_GROUP_PRIVATE_RE = re.compile(r"(?:私聊|私信|QQ号|联系方式|你上次跟我说)", re.I)
 
 
 class LlmMixin:
@@ -32,6 +59,83 @@ class LlmMixin:
     context: Any
     timezone: Any
     telemetry: Any
+
+    @staticmethod
+    def _history_cue(history: list) -> str:
+        """Return a small user-authored cue for safe private-memory ranking."""
+        cues: list[str] = []
+        for message in reversed(history):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip() and content != PROACTIVE_HISTORY_MARKER:
+                cues.append(content.strip())
+            if len(cues) >= 2:
+                break
+        return "\n".join(reversed(cues))[:600]
+
+    async def _get_proactive_memory_block(self, session_id: str, history: list) -> str:
+        """Ask the loaded Xiaoning memory plugin for same-user X/Pro context only."""
+        parsed = self._parse_session_id(session_id)
+        if not parsed or ("Friend" not in parsed[1] and "Private" not in parsed[1]):
+            return ""
+        cue = self._history_cue(history)
+        if not cue:
+            return ""
+        try:
+            stars = self.context.get_all_stars()
+        except Exception:
+            return ""
+        for entry in stars:
+            plugin = getattr(entry, "star_cls", entry)
+            module_name = getattr(plugin.__class__, "__module__", "")
+            method = getattr(plugin, "build_proactive_memory_block", None)
+            if "xiaoning_memory" not in module_name or not callable(method):
+                continue
+            try:
+                result = method(parsed[2], cue)
+                if hasattr(result, "__await__"):
+                    result = await result
+                return str(result or "")
+            except Exception as exc:
+                logger.debug("[主动消息] 私聊记忆读取跳过: %s", type(exc).__name__)
+                return ""
+        return ""
+
+    def _sanitize_proactive_response(
+        self, text: object, session_id: str, request_text: str
+    ) -> str | None:
+        """Keep autonomous messages natural, bounded, and safe to send."""
+        cleaned = sanitize_conversational_reply(
+            sanitize_unverified_artifact_reply(text, request_text)
+        ).strip()
+        if not cleaned or cleaned.upper() == _NO_SEND:
+            return None
+        if len(cleaned) > 160 or _PROACTIVE_DEPENDENCY_RE.search(cleaned):
+            return None
+        parsed = self._parse_session_id(session_id)
+        if parsed and ("Group" in parsed[1] or "Guild" in parsed[1]):
+            if "@" in cleaned or _GROUP_PRIVATE_RE.search(cleaned):
+                return None
+            sentences = [
+                part.strip()
+                for part in re.split(r"(?<=[。！？!?])\s*|\n+", cleaned)
+                if part.strip()
+            ]
+            if len(sentences) > 2:
+                return None
+        return cleaned
+
+    @staticmethod
+    def _has_crisis_context(history: list) -> bool:
+        """Scheduled outreach never becomes an unsolicited crisis intervention."""
+        for message in history:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and is_crisis_language(content):
+                return True
+        return False
 
     def _parse_bool_setting(self, value: Any, default: bool) -> bool:
         if isinstance(value, bool):
@@ -96,6 +200,15 @@ class LlmMixin:
                 # 非字符串内容强制转字符串
                 msg_dict["content"] = str(content) if content is not None else ""
 
+            if msg_dict.get("content") == PROACTIVE_HISTORY_MARKER:
+                continue
+            if (
+                msg_dict.get("role") == "user"
+                and str(msg_dict.get("content", "")).startswith("[系统任务：")
+                and "主动" in str(msg_dict.get("content", ""))
+            ):
+                continue
+
             sanitized_history.append(msg_dict)
         return sanitized_history
 
@@ -127,6 +240,16 @@ class LlmMixin:
             count = 20
         count = max(0, min(count, 200))
 
+        # 主动消息只需要抓住最近的语境；把整段长期会话再次塞进模型会
+        # 稀释最近话题，也会把不必要的隐私内容带入一次新的主动触达。
+        try:
+            conversation_history_limit = int(
+                settings.get("conversation_history_limit", 40)
+            )
+        except Exception:
+            conversation_history_limit = 40
+        conversation_history_limit = max(1, min(conversation_history_limit, 100))
+
         try:
             max_chars = int(
                 settings.get(
@@ -150,6 +273,7 @@ class LlmMixin:
         return {
             "source_mode": source_mode,
             "platform_history_count": count,
+            "conversation_history_limit": conversation_history_limit,
             "platform_history_prompt": platform_history_prompt,
             "include_bot_messages": include_bot_messages,
             "bot_identifiers": bot_identifiers,
@@ -423,7 +547,7 @@ class LlmMixin:
                     "{{platform_history_lines}}\n"
                     "[真实平台聊天流水结束]\n\n"
                     "[最终指令]\n"
-                    "请结合以上聊天流水、当前时间、未回复次数与当前人格设定，用最像你自己的、最自然的方式，生成一句适合此刻发出的主动消息。"
+                    "请结合以上聊天流水、当前时间、未回复次数与当前人格设定，用最像你自己的、最自然的方式，生成最多两句、适合此刻发出的主动消息。"
                 )
 
             now_str = datetime.now(self.timezone).strftime("%Y年%m月%d日 %H:%M")
@@ -473,6 +597,17 @@ class LlmMixin:
         settings = context_settings or self._get_context_settings(session_id)
         source_mode = settings["source_mode"]
         conversation_count = len(conversation_history)
+        try:
+            conversation_history_limit = int(
+                settings.get("conversation_history_limit", 40)
+            )
+        except Exception:
+            conversation_history_limit = 40
+        conversation_history_limit = max(1, min(conversation_history_limit, 100))
+        conversation_history = conversation_history[
+            -conversation_history_limit:
+        ]
+        retained_conversation_count = len(conversation_history)
 
         platform_records_count = 0
         platform_injected_count = 0
@@ -531,6 +666,7 @@ class LlmMixin:
         source_mode_label = mode_label_map.get(source_mode, source_mode)
         logger.info(
             f"[主动消息] 上下文注入来源：{source_mode_label}，读取到对话历史 {conversation_count} 条，"
+            f"保留最新 {retained_conversation_count} 条，"
             f"平台流水原始记录 {platform_records_count} 条，注入上下文 {platform_injected_count} 条，"
             f"平台流水上下文长度 {platform_chars} 字，最终提供给模型的上下文共 {len(effective_history)} 条喵。"
         )
@@ -661,6 +797,11 @@ class LlmMixin:
                 context_settings=context_settings,
                 unanswered_count=current_unanswered_count,
             )
+            memory_block = await self._get_proactive_memory_block(
+                effective_session_id, effective_history_messages
+            )
+            if memory_block:
+                original_system_prompt = f"{original_system_prompt}\n\n{memory_block}"
 
             logger.info("[主动消息] 上下文与人格设定已准备完成喵。")
             if self.telemetry and self.telemetry.enabled:
@@ -749,9 +890,7 @@ class LlmMixin:
                     )
                 )
         except Exception as llm_error:
-            logger.error(f"[主动消息] 使用新 API 调用 LLM 失败喵: {llm_error}")
-            logger.info(f"[主动消息] 错误类型喵: {type(llm_error).__name__}")
-            logger.info(f"[主动消息] 错误详情喵: {str(llm_error)}")
+            logger.error("[主动消息] 使用新 API 调用 LLM 失败: %s", type(llm_error).__name__)
             if self.telemetry and self.telemetry.enabled:
                 # 新接口失败时单独记录，便于与 fallback_api 的失败率拆分分析。
                 self._track_task(
@@ -791,7 +930,7 @@ class LlmMixin:
                     logger.warning("[主动消息] 未找到 LLM Provider，放弃并重新调度喵。")
                     return None, final_user_simulation_prompt
             except Exception as fallback_error:
-                logger.error(f"[主动消息] 传统 API 回退也失败喵: {fallback_error}")
+                logger.error("[主动消息] 传统 API 回退失败: %s", type(fallback_error).__name__)
                 logger.info(
                     f"[主动消息] 回退错误类型喵: {type(fallback_error).__name__}"
                 )
@@ -810,7 +949,14 @@ class LlmMixin:
 
         # 仅在确实拿到 completion_text 时视为成功
         if llm_response_obj and llm_response_obj.completion_text:
-            response_text = llm_response_obj.completion_text.strip()
+            response_text = self._sanitize_proactive_response(
+                llm_response_obj.completion_text,
+                session_id,
+                final_user_simulation_prompt,
+            )
+            if not response_text:
+                logger.info("[主动消息] 本轮没有自然且安全的主动切口，跳过发送喵。")
+                return None, final_user_simulation_prompt
             if response_text == "[object Object]":
                 logger.error(
                     "[主动消息] 喵呜！LLM 返回了意料之外的 '[object Object]' 字符串喵！"

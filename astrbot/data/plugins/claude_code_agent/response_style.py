@@ -11,6 +11,7 @@ _PREFIXES = {
     "started": "已开始。",
     "approval_required": "需要你确认。",
     "completed": "已完成。",
+    "delivery_pending": "任务未完成，文件待交付。",
     "failed": "未完成。",
 }
 _SENTENCE = re.compile(r".*?(?:[。！？!?]+|$)", re.S)

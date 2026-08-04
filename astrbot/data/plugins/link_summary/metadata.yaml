@@ -1,0 +1,6 @@
+name: link_summary
+display_name: 链接摘要
+short_desc: 发送链接自动摘要
+desc: 发送 URL 自动用 Gemini 生成 200 字摘要。群聊需 @ 小柠。
+version: v1.0.0
+author: lemon

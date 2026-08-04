@@ -6,9 +6,39 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
+from astrbot.api.star import StarTools
+
+try:
+    from friend_core.relationship_state import (
+        can_send_proactive,
+        load_state,
+        record_proactive_send,
+        save_state,
+    )
+except ImportError:
+    from data.plugins.friend_core.relationship_state import (
+        can_send_proactive,
+        load_state,
+        record_proactive_send,
+        save_state,
+    )
+
+try:
+    from draw_command.pro_access import Tier, get_tier
+except ImportError:
+    from data.plugins.draw_command.pro_access import Tier, get_tier
+
+
+_PRO_DB = (
+    Path(__file__).resolve().parents[3]
+    / "plugin_data"
+    / "xiaoning_pro"
+    / "pro_members.db"
+)
 
 
 class ConfigMixin:
@@ -16,6 +46,22 @@ class ConfigMixin:
 
     config: dict
     session_override_manager: Any
+
+    def _private_proactive_allowed(self, session_id: str, cooldown_seconds: float) -> bool:
+        parsed = self._parse_session_id(session_id)
+        if not parsed or ("Friend" not in parsed[1] and "Private" not in parsed[1]):
+            return True
+        state_path = Path(StarTools.get_data_dir("proactive_behavior")) / "relationship_state.json"
+        return can_send_proactive(load_state(state_path), parsed[2], cooldown_seconds)
+
+    def _record_private_proactive_send(self, session_id: str) -> None:
+        parsed = self._parse_session_id(session_id)
+        if not parsed or ("Friend" not in parsed[1] and "Private" not in parsed[1]):
+            return
+        state_path = Path(StarTools.get_data_dir("proactive_behavior")) / "relationship_state.json"
+        state = load_state(state_path)
+        record_proactive_send(state, parsed[2])
+        save_state(state_path, state)
 
     async def _validate_config(self) -> None:
         """验证插件配置的完整性和有效性"""
@@ -27,7 +73,7 @@ class ConfigMixin:
             # 私聊配置校验
             if friend_settings.get("enable", False):
                 session_list = friend_settings.get("session_list", [])
-                if not session_list:
+                if not session_list and not friend_settings.get("all_x_pro_sessions", False):
                     logger.warning(
                         "[主动消息] 私聊主动消息已启用但未配置任何会话喵（session_list 为空）。"
                     )
@@ -71,7 +117,7 @@ class ConfigMixin:
         _, message_type, target_id = parsed
         # 根据消息类型路由到不同配置区块（私聊/群聊）
         # FriendMessage / PrivateMessage 均归为私聊配置
-        if "Friend" in message_type:
+        if "Friend" in message_type or "Private" in message_type:
             return self._get_typed_session_config(
                 session_id, target_id, "friend_settings", "friend"
             )
@@ -116,16 +162,32 @@ class ConfigMixin:
         if not settings.get("enable", False):
             return None
 
-        # 命中规则：支持完整 UMO、规范化 UMO 或纯 target_id 三种写法
+        # 命中规则：支持完整 UMO、规范化 UMO 或纯 target_id 三种写法。
+        # 私聊可额外覆盖所有已建立会话，或只覆盖 X/Pro 用户。
         session_list = settings.get("session_list", [])
         normalized_session_id = self._normalize_session_id(session_id)
         candidates = {session_id, normalized_session_id, target_id}
+        from_session_list = any(candidate in session_list for candidate in candidates)
+        all_x_pro = session_type == "friend" and bool(
+            settings.get("all_x_pro_sessions", False)
+        )
+        all_friend_sessions = session_type == "friend" and bool(
+            settings.get("all_friend_sessions", False)
+        )
+        eligible_x_pro = False
+        if all_x_pro and str(target_id).isdigit():
+            try:
+                eligible_x_pro = get_tier(str(target_id), _PRO_DB) >= Tier.X
+            except Exception:
+                eligible_x_pro = False
 
-        if any(candidate in session_list for candidate in candidates):
+        if from_session_list or eligible_x_pro or all_friend_sessions:
             # 返回深拷贝，避免调用方意外修改全局配置对象
             config_copy = copy.deepcopy(settings)
             config_copy["_session_type"] = session_type
-            config_copy["_from_session_list"] = True
+            config_copy["_from_session_list"] = from_session_list
+            config_copy["_all_x_pro_session"] = eligible_x_pro
+            config_copy["_all_friend_session"] = all_friend_sessions
             return config_copy
 
         return None

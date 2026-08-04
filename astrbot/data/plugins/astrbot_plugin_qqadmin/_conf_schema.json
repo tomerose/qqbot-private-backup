@@ -213,7 +213,7 @@
       "provider_id": {
         "description": "独立审核模型 Provider ID",
         "type": "string",
-        "default": "deepseek-chat"
+        "default": "gemini-2.5-flash"
       },
       "confidence_threshold": {
         "description": "最低处罚置信度",
@@ -406,7 +406,7 @@
           "高等级成员",
           "成员"
         ],
-        "default": "成员"
+        "default": "管理员"
       },
       "send_group_notice": {
         "description": "发布群公告",

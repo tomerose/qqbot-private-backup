@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-PLUGIN_DIR = Path(r"D:\Claudecoda学习\qqbot\astrbot\data\plugins\claude_code_agent")
-sys.path.insert(0, str(PLUGIN_DIR))
+_PLUGIN_DIR = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugins" / "claude_code_agent"
+sys.path.insert(0, str(_PLUGIN_DIR))
 
 from recovery_policy import assess_recovery  # noqa: E402
 

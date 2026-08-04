@@ -1,62 +1,131 @@
 """
-/think 命令 — 用 Gemini Pro 深度推理，暴露推理链+置信度
+/think — Gemini thinking for X/Pro users.
+
+Triggers: /think, /推理, or natural "深度思考/仔细分析/好好想想 + question"
 """
+
+import asyncio
+import re
+from pathlib import Path
+
 import requests
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
-from astrbot.api.message_components import Plain
 from astrbot.api import logger
 
-THINK_PROMPT = """你是高智商分析师。用中文回答。按以下格式输出：
+try:
+    from draw_command.pro_access import get_tier, Tier
+except ImportError:
+    from data.plugins.draw_command.pro_access import get_tier, Tier
 
-## 推理过程
-- 先拆解问题本质（第一性原理）
-- 列出关键变量和约束
-- 给出推理链条：A→B→C→D
-- 如果有多个角度，列出来（乐观/悲观/中性）
+GEMINI_PROXY = "http://127.0.0.1:3000/v1/chat/completions"
+REQUIRED_MSG = "深度思考需要 X 或 Pro 资格。添加小柠为 QQ 好友即可获得 X 资格。"
 
-## 结论
-- 核心结论一句话
-- 置信度：[高/中/低] — 依据什么
+THINK_SYSTEM = (
+    "用中文回答。你是严谨的分析师：给出结论、关键依据和不确定之处。"
+    "不要展示内部思维链或隐藏推理过程，不说废话。"
+)
 
-## 不确定的地方
-- 如果有什么你拿不准的，直接说"以下部分我不确定：..."
+_NATURAL_TRIGGERS = re.compile(
+    r"^(?:小柠[，,\s]*)?"
+    r"(?:深度思考|深入分析|仔细分析|好好想想|认真想|"
+    r"深度想|仔细想|认真分析|分析一下|推理一下)"
+    r"[：:，,\s]*(.{4,})$",
+    re.I,
+)
 
-逻辑严密，直击本质，不说废话。不确定就说不确定。"""
+def extract_question(message: str) -> str | None:
+    text = str(message or "").strip()
+    command = re.match(r"^/(?:think|推理)(?:\s+(.+))?$", text, re.I)
+    if command:
+        return (command.group(1) or "").strip()
+    natural = _NATURAL_TRIGGERS.match(text)
+    return natural.group(1).strip() if natural else None
 
 
 class DeepThink(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
+        project_root = Path(__file__).resolve().parents[4]
+        self._pro_db = (
+            project_root / "astrbot" / "data" / "plugin_data"
+            / "xiaoning_pro" / "pro_members.db"
+        )
 
-    async def on_message(self, ctx: Context):
-        msg = ctx.get_message_text().strip()
-        if not msg.startswith("/think ") and not msg.startswith("/推理 "):
+    def _think_config(self, sender_id: str) -> tuple[str, str, str, str]:
+        """Return the single supported chat backend."""
+        return GEMINI_PROXY, "sk-gemini-vertex", "gemini-3.6-flash", "Gemini 3.6 Flash"
+
+    @staticmethod
+    def _call_think(question: str, *, api_base: str, api_key: str,
+                    model: str) -> str:
+        """Call Gemini with explicit thinking enabled."""
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": THINK_SYSTEM},
+                {"role": "user", "content": question},
+            ],
+            "max_tokens": 4096,
+        }
+        # Gemini thinking mode via proxy
+        if "gemini" in model.lower():
+            payload["thinking"] = True
+        response = requests.post(
+            api_base,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            json=payload,
+            timeout=120,
+        )
+        response.raise_for_status()
+        data = response.json()
+        content = data["choices"][0]["message"]["content"]
+
+        # Older proxy responses may contain a visible thought block.
+        if "━━━━━━━━━━" in content:
+            content = content.rsplit("━━━━━━━━━━", 1)[-1].strip()
+        if len(content) > 3500:
+            content = content[:3400] + "\n\n…（截断）"
+        return content
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=965)
+    async def on_message(self, ctx: AstrMessageEvent):
+        if not (ctx.is_private_chat() or ctx.is_at_or_wake_command):
+            return
+        getter = getattr(ctx, "get_message_str", None)
+        if not callable(getter):
+            getter = getattr(ctx, "get_message_text", None)
+        msg = str(getter() if callable(getter) else "").strip()
+        if not msg:
             return
 
-        question = msg.split(" ", 1)[1].strip() if " " in msg else msg[7:].strip()
-        yield ctx.reply(Plain("思考中，稍等..."))
+        question = extract_question(msg)
+        if question is None:
+            return
+        if not question:
+            yield ctx.plain_result("用法：/think <问题>")
+            return
+
+        sender_id = str(getattr(ctx, "get_sender_id", lambda: "")() or "")
+        try:
+            tier = get_tier(sender_id, self._pro_db)
+        except Exception:
+            tier = Tier.ORDINARY
+        if tier < Tier.X:
+            yield ctx.plain_result(REQUIRED_MSG)
+            return
+        api_base, api_key, model, label = self._think_config(sender_id)
+        yield ctx.plain_result(f"🤔 深度思考中（{label}），稍等…")
 
         try:
-            r = requests.post(
-                "http://127.0.0.1:3000/v1/chat/completions",
-                json={
-                    "model": "gemini-2.5-pro",
-                    "messages": [
-                        {"role": "system", "content": THINK_PROMPT},
-                        {"role": "user", "content": question},
-                    ],
-                    "max_tokens": 2000,
-                },
-                timeout=90,
+            content = await asyncio.to_thread(
+                self._call_think, question,
+                api_base=api_base, api_key=api_key, model=model,
             )
-            data = r.json()
-            ans = data["choices"][0]["message"]["content"]
-
-            # Truncate if too long for QQ
-            if len(ans) > 2000:
-                ans = ans[:1900] + "\n\n...(截断，太长了)"
-
-            yield ctx.reply(Plain(ans))
-        except Exception as e:
-            logger.error(f"DeepThink failed: {e}")
-            yield ctx.reply(Plain(f"脑子卡住了，待会再试: {str(e)[:50]}"))
+            yield ctx.plain_result(content)
+        except Exception as exc:
+            logger.error("DeepThink failed: %s", type(exc).__name__)
+            yield ctx.plain_result("脑子卡住了，待会再试。")

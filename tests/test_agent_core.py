@@ -5,11 +5,12 @@ from pathlib import Path
 
 import unittest
 
-os.environ["ASTRBOT_ROOT"] = r"D:\Claudecoda学习\qqbot\astrbot"
+_PROJ_ROOT = Path(__file__).resolve().parents[1]
+os.environ["ASTRBOT_ROOT"] = str(_PROJ_ROOT / "astrbot")
 
 from astrbot.api.message_components import At, Plain
 
-PLUGIN_DIR = Path(r"D:\Claudecoda学习\qqbot\astrbot\data\plugins\claude_code_agent")
+PLUGIN_DIR = _PROJ_ROOT / "astrbot" / "data" / "plugins" / "claude_code_agent"
 sys.path.insert(0, str(PLUGIN_DIR))
 
 from agent_core import (  # noqa: E402
@@ -36,6 +37,7 @@ from agent_core import (  # noqa: E402
     redact_sensitive_text,
     referenced_workspace_files,
     upload_aiocqhttp_group_file,
+    upload_aiocqhttp_private_file,
     validate_work_dir,
     validate_task,
 )
@@ -93,9 +95,16 @@ class AgentCoreTests(unittest.TestCase):
         self.assertIn("--allow-dangerously-skip-permissions", command)
         self.assertIn("bypassPermissions", command)
         self.assertIn("default", command)
+        # ponytail: agent gets full host Claude Code capability.
+        self.assertIn("--settings", command)
+        self.assertIn("--append-system-prompt", command)
+        self.assertIn("--add-dir", command)
         self.assertNotIn("--allowedTools", command)
         self.assertNotIn("--max-budget-usd", command)
         self.assertNotIn("--max-turns", command)
+        # Task is passed via -p, not mixed with the preamble.
+        task_index = command.index("执行任务")
+        self.assertEqual(command[task_index - 1], "-p")
 
     def test_codex_and_workbuddy_commands_use_full_permission_cli_flags(self):
         cwd = Path(r"D:\project")
@@ -103,7 +112,7 @@ class AgentCoreTests(unittest.TestCase):
         codex = build_backend_command(BACKEND_CODEX, "执行任务", cwd, output)
         self.assertIn("exec", codex)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", codex)
-        self.assertEqual(codex[codex.index("-m") + 1], "gpt-5.4-mini")
+        self.assertEqual(codex[codex.index("-m") + 1], "gpt-5.6-terra")
         self.assertEqual(codex[codex.index("-C") + 1], str(cwd))
         self.assertIn("--skip-git-repo-check", codex)
         workbuddy = build_backend_command(BACKEND_WORKBUDDY, "执行任务", cwd, output)
@@ -111,6 +120,19 @@ class AgentCoreTests(unittest.TestCase):
         self.assertIn("--dangerously-skip-permissions", workbuddy)
         self.assertIn("bypassPermissions", workbuddy)
         self.assertIn("执行任务", workbuddy[-1])
+
+    def test_public_codex_command_uses_workspace_sandbox(self):
+        command = build_backend_command(
+            BACKEND_CODEX,
+            "生成报告",
+            Path(r"D:\job"),
+            Path(r"D:\job\outputs"),
+            trusted_runtime=False,
+        )
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
+        self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
+        self.assertIn("--ignore-user-config", command)
+        self.assertIn("--add-dir", command)
 
     def test_execution_prompt_denies_unapproved_side_effects_and_never_exports_secrets(self):
         safe = build_backend_command(
@@ -172,6 +194,10 @@ class AgentCoreTests(unittest.TestCase):
         self.assertNotIn("workspaces", cleaned)
         self.assertIn("[本机路径]", cleaned)
 
+    def test_redact_local_paths_preserves_web_urls(self):
+        url = "https://www.youtube.com/watch?v=mbappe"
+        self.assertEqual(redact_local_paths(url), url)
+
     def test_sensitive_text_redacts_paths_and_credentials(self):
         raw = (
             r"文件在 C:\Users\liu\secret.txt，"
@@ -211,17 +237,43 @@ class AgentCoreTests(unittest.TestCase):
 
     def test_latest_approval_is_scoped_one_time_and_ignores_expired_entries(self):
         registry = ApprovalRegistry(ttl_seconds=300)
-        registry.issue("1211000567", "group:123", "删除 A", "claude", Path(r"D:\work"), now=1000)
-        newest = registry.issue("1211000567", "group:123", "删除 B", "codex", Path(r"D:\work"), now=1010)
-        registry.issue("1211000567", "group:999", "删除 C", "claude", Path(r"D:\work"), now=1020)
+        registry.issue(
+            "1211000567", "group:123", "删除 A", "claude", Path(r"D:\work"),
+            now=1000, task_id="job1", step_digest="a" * 64,
+        )
+        newest = registry.issue(
+            "1211000567", "group:123", "删除 B", "codex", Path(r"D:\work"),
+            now=1010, task_id="job2", step_digest="b" * 64,
+        )
+        registry.issue(
+            "1211000567", "group:999", "删除 C", "claude", Path(r"D:\work"),
+            now=1020, task_id="job3", step_digest="c" * 64,
+        )
 
-        self.assertIsNone(registry.consume_latest("other", "group:123", now=1021))
-        approved = registry.consume_latest("1211000567", "group:123", now=1021)
-        self.assertEqual(approved.token, newest.token)
+        # No-task filter → multiple candidates → ambiguity guard returns None.
+        self.assertIsNone(registry.consume_latest("1211000567", "group:123", now=1021))
+        # Explicit task_id filter → single match → consumed.
+        approved = registry.consume_latest(
+            "1211000567", "group:123", now=1021,
+            task_id="job2", step_digest="b" * 64,
+        )
+        self.assertIsNotNone(approved)
         self.assertEqual(approved.task, "删除 B")
+        # One remaining candidate → no-filter OK (single candidate, unambiguous).
         older = registry.consume_latest("1211000567", "group:123", now=1022)
+        self.assertIsNotNone(older)
         self.assertEqual(older.task, "删除 A")
+        # Expired: nothing left.
         self.assertIsNone(registry.consume_latest("1211000567", "group:123", now=1401))
+
+    def test_latest_approval_works_with_single_candidate_no_filter(self):
+        registry = ApprovalRegistry(ttl_seconds=300)
+        registry.issue("1211000567", "group:123", "删除 A", "claude", Path(r"D:\work"),
+                        now=1000, task_id="job1", step_digest="a" * 64)
+        # Single candidate → no-filter OK.
+        approved = registry.consume_latest("1211000567", "group:123", now=1001)
+        self.assertIsNotNone(approved)
+        self.assertEqual(approved.task, "删除 A")
 
     def test_sensitive_deliverables_are_never_returned(self):
         self.assertTrue(is_sensitive_deliverable(Path("outputs/.env")))
@@ -314,7 +366,35 @@ class AgentCoreTests(unittest.TestCase):
             self.assertEqual(bot.calls[0][0], "upload_group_file")
             self.assertEqual(bot.calls[0][1]["group_id"], 945598390)
             self.assertEqual(bot.calls[0][1]["name"], "answer.pdf")
-            self.assertEqual(bot.calls[0][1]["file"], str(path.resolve()))
+            self.assertEqual(
+                bot.calls[0][1]["file"],
+                str(path.resolve()),
+            )
+
+    def test_private_file_delivery_uses_onebot_upload_action(self):
+        import asyncio
+        import tempfile
+
+        class FakeBot:
+            def __init__(self):
+                self.calls = []
+
+            async def call_action(self, action, **kwargs):
+                self.calls.append((action, kwargs))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "answer.pdf"
+            path.write_bytes(b"pdf")
+            bot = FakeBot()
+            asyncio.run(upload_aiocqhttp_private_file(bot, "1211000567", path))
+            self.assertEqual(len(bot.calls), 1)
+            self.assertEqual(bot.calls[0][0], "upload_private_file")
+            self.assertEqual(bot.calls[0][1]["user_id"], 1211000567)
+            self.assertEqual(bot.calls[0][1]["name"], "answer.pdf")
+            self.assertEqual(
+                bot.calls[0][1]["file"],
+                str(path.resolve()),
+            )
 
     def test_group_command_requires_at_self_and_private_command_does_not(self):
         self.assertEqual(

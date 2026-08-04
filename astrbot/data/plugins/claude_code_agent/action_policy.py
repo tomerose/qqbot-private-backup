@@ -31,15 +31,24 @@ _HIGH_IMPACT = re.compile(
     re.I,
 )
 _WORKSPACE_WRITE = re.compile(
-    r"新建|创建|生成|写入|编写|修改|编辑|修复|实现|重构|更新|添加|增加|"
+    r"新建|创建|生成|写入|编写|写|修改|编辑|修复|实现|重构|更新|添加|增加|"
     r"复制|保存|导出|"
+    r"制作|做|整理|产出|产出物|交付物|产出文件|输出|"
+    r"弄|搞|整|"
     r"\b(?:create|generate|write|modify|edit|fix|implement|refactor|update|add|"
-    r"copy|save|export)\b",
+    r"copy|save|export|make|build|do)\b",
+    re.I,
+)
+_READ_ONLY = re.compile(
+    r"读取|查看|搜索|查找|检查|解释|总结|分析|审查|审计|列出|比较|核对|"
+    r"回答|告诉|说明|描述|介绍|"
+    r"\b(?:read|view|search|find|inspect|explain|summarize|analyse|analyze|"
+    r"review|audit|list|compare|check|tell|describe|show)\b",
     re.I,
 )
 _EXECUTION = re.compile(
-    r"运行|执行|测试|构建|编译|打包|启动脚本|调用脚本|命令|"
-    r"\b(?:run|execute|test|build|compile|package|script|command)\b",
+    r"测试|构建|编译|打包|"
+    r"\b(?:test|build|compile|package)\b",
     re.I,
 )
 _READ_ONLY = re.compile(

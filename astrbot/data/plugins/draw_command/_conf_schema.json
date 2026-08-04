@@ -1,8 +1,13 @@
 {
-  "pro_user_ids": {
-    "description": "Pro QQ 白名单（逗号分隔）",
+  "pro_operator_ids": {
+    "description": "画图操作员 QQ（逗号分隔，不通过 Pro 申请流程）",
     "type": "string",
     "default": "1211000567"
+  },
+  "pro_user_ids": {
+    "description": "已废弃 — 请使用 pro_operator_ids。向下兼容保留。",
+    "type": "string",
+    "default": ""
   },
   "cooldown_seconds": {
     "description": "单用户作图冷却秒数",

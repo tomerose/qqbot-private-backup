@@ -65,7 +65,7 @@ class QQAdminPlugin(Star):
             self.ai_moderation = AIModerationHandler(
                 context=self.context,
                 store=self.ai_moderation_store,
-                provider_id=str(ai_cfg.get("provider_id", "deepseek-chat")),
+                provider_id=str(ai_cfg.get("provider_id", "gemini-2.5-flash")),
                 timeout_seconds=float(ai_cfg.get("timeout_seconds", 8)),
                 context_messages=int(ai_cfg.get("context_messages", 8)),
                 owner_id=OWNER_ID,
@@ -99,7 +99,7 @@ class QQAdminPlugin(Star):
 
     async def _set_ai_moderation(self, event: AiocqhttpMessageEvent, enabled: bool):
         if not self._is_ai_moderation_owner(event):
-            await event.send(event.plain_result("只有小姚可以修改 AI 群管状态。"))
+            await event.send(event.plain_result("只有小柠可以修改 AI 群管状态。"))
             event.stop_event()
             return
         if event.is_private_chat():
@@ -125,7 +125,7 @@ class QQAdminPlugin(Star):
     @filter.command("AI群管状态")
     async def ai_moderation_status(self, event: AiocqhttpMessageEvent):
         if not self._is_ai_moderation_owner(event):
-            await event.send(event.plain_result("只有小姚可以查看 AI 群管状态。"))
+            await event.send(event.plain_result("只有小柠可以查看 AI 群管状态。"))
         elif event.is_private_chat():
             await event.send(event.plain_result("请在目标群内查看 AI 群管状态。"))
         elif self.ai_moderation_store is None:
@@ -247,7 +247,7 @@ class QQAdminPlugin(Star):
         await self.normal.set_group_name(event, group_name)
 
     @filter.command("撤回")
-    @perm_required(PermLevel.MEMBER)
+    @perm_required(PermLevel.ADMIN)
     async def delete_msg(self, event: AiocqhttpMessageEvent):
         "(引用消息)撤回 | 撤回 <@群友> <消息数量>"
         await self.normal.delete_msg(event)

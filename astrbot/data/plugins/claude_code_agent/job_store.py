@@ -12,7 +12,7 @@ from pathlib import Path
 TERMINAL_STATES = {"completed", "failed", "cancelled", "timeout", "recovery_blocked"}
 ACTIVE_STATES = {
     "planned", "queued", "awaiting_approval", "executing", "running",
-    "recovering", "verifying", "delivering",
+    "recovering", "verifying", "delivering", "delivery_pending",
 }
 ALLOWED_STATES = TERMINAL_STATES | ACTIVE_STATES | {"interrupted"}
 _DELIVERY_DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -24,7 +24,8 @@ _TRANSITIONS = {
     "running": {"verifying", "failed", "cancelled", "timeout", "interrupted"},
     "recovering": {"running", "verifying", "failed", "cancelled", "timeout", "interrupted"},
     "verifying": {"delivering", "failed", "cancelled", "timeout", "interrupted"},
-    "delivering": {"completed", "failed", "interrupted"},
+    "delivering": {"delivery_pending", "completed", "failed", "interrupted"},
+    "delivery_pending": {"completed", "failed", "interrupted"},
     "interrupted": {"recovering", "recovery_blocked"},
 }
 
@@ -63,6 +64,22 @@ class JobStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS task_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    sender_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    evidence TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    replayed INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_task_events_replayed ON task_events(replayed, created_at)"
+            )
             self._migrate(conn)
 
     @staticmethod
@@ -78,6 +95,16 @@ class JobStore:
         for name, declaration in additions.items():
             if name not in columns:
                 conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+        # task_events migration
+        try:
+            te_columns = {row[1] for row in conn.execute("PRAGMA table_info(task_events)")}
+        except Exception:
+            te_columns = set()
+        if "sender_id" not in te_columns:
+            try:
+                conn.execute("ALTER TABLE task_events ADD COLUMN sender_id TEXT NOT NULL DEFAULT ''")
+            except Exception:
+                pass
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=5)
@@ -224,7 +251,44 @@ class JobStore:
             rows = conn.execute(
                 """SELECT job_id, task_digest, backend, state, stage, recovery,
                     delivery_digest, step_index, step_count, updated_at FROM jobs
+                    WHERE state = 'interrupted' ORDER BY created_at, job_id"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_recoverable(self) -> list[dict]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """SELECT job_id, task_digest, backend, state, stage, recovery,
+                    delivery_digest, step_index, step_count, updated_at FROM jobs
                     WHERE state IN ('interrupted', 'queued') ORDER BY created_at, job_id"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_active_for(
+        self,
+        owner_id: str,
+        scope: str = "",
+        *,
+        limit: int = 5,
+    ) -> list[dict]:
+        """Return privacy-safe active metadata visible to one user/session."""
+        clauses = [
+            "owner_fingerprint = ?",
+            "state IN ({})".format(",".join("?" for _ in ACTIVE_STATES | {"interrupted"})),
+        ]
+        params: list[object] = [_digest(owner_id)[:16], *(ACTIVE_STATES | {"interrupted"})]
+        normalized_scope = str(scope or "").strip()
+        if normalized_scope:
+            clauses.append("scope_fingerprint = ?")
+            params.append(_digest(normalized_scope)[:16])
+        params.append(max(1, min(int(limit), 20)))
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""SELECT job_id, backend, state, stage, recovery,
+                    delivery_digest, step_index, step_count, updated_at
+                    FROM jobs WHERE {' AND '.join(clauses)}
+                    ORDER BY updated_at DESC LIMIT ?""",
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -252,3 +316,49 @@ class JobStore:
                 "SELECT * FROM jobs WHERE job_id = ?", (str(job_id),)
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def record_task_event(
+        self,
+        job_id: str,
+        status: str,
+        evidence: str = "",
+        sender_id: str = "",
+        now: float | None = None,
+    ) -> None:
+        """Local fallback queue for cross-dialog task events when Firestore is unreachable."""
+        timestamp = time.time() if now is None else float(now)
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                """INSERT INTO task_events (job_id, sender_id, status, evidence, created_at)
+                    VALUES (?, ?, ?, ?, ?)""",
+                (str(job_id), str(sender_id)[:20], str(status)[:40], str(evidence)[:200], timestamp),
+            )
+
+    def pending_task_events(self, limit: int = 50) -> list[dict]:
+        """Return unreplayed local task events so the memory plugin can catch up."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """SELECT id, job_id, sender_id, status, evidence, created_at FROM task_events
+                    WHERE replayed = 0 ORDER BY created_at LIMIT ?""",
+                (max(1, min(int(limit), 200)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_task_events_replayed(self, event_ids: list[int]) -> None:
+        if not event_ids:
+            return
+        with closing(self._connect()) as conn, conn:
+            conn.executemany(
+                "UPDATE task_events SET replayed = 1 WHERE id = ?",
+                [(int(eid),) for eid in event_ids],
+            )
+
+    def cleanup_task_events(self, before_days: int = 7) -> int:
+        """Delete replayed events older than N days. Returns count deleted."""
+        cutoff = time.time() - float(before_days) * 86400
+        with closing(self._connect()) as conn, conn:
+            cursor = conn.execute(
+                "DELETE FROM task_events WHERE replayed = 1 AND created_at < ?",
+                (cutoff,),
+            )
+            return int(cursor.rowcount)

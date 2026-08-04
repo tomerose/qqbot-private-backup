@@ -1,5 +1,7 @@
 import asyncio
+import contextlib
 import hashlib
+import importlib
 import os
 import sys
 import tempfile
@@ -7,12 +9,14 @@ import types
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
-os.environ["ASTRBOT_ROOT"] = r"D:\Claudecoda学习\qqbot\astrbot"
+_PROJ_ROOT = Path(__file__).resolve().parents[1]
+os.environ["ASTRBOT_ROOT"] = str(_PROJ_ROOT / "astrbot")
 
-from astrbot.api.message_components import At, File, Plain
+from astrbot.api.message_components import At, File, Image, Plain
 
-PLUGINS_DIR = Path(r"D:\Claudecoda学习\qqbot\astrbot\data\plugins")
+PLUGINS_DIR = _PROJ_ROOT / "astrbot" / "data" / "plugins"
 sys.path.insert(0, str(PLUGINS_DIR))
 
 from claude_code_agent.agent_core import (  # noqa: E402
@@ -31,6 +35,7 @@ from claude_code_agent.task_planner import TaskRequest, plan_task  # noqa: E402
 from claude_code_agent.progress_policy import ProgressPolicy  # noqa: E402
 from claude_code_agent.access_policy import AccessPolicy  # noqa: E402
 from claude_code_agent.trusted_policy import TrustedPolicy  # noqa: E402
+from claude_code_agent import file_cache  # noqa: E402
 
 
 class FakeBackendHealth:
@@ -48,7 +53,15 @@ class FakeMessageObject:
 
 
 class FakeEvent:
-    def __init__(self, text, *, sender="1211000567", group_id="", at_self=False):
+    def __init__(
+        self,
+        text,
+        *,
+        sender="1211000567",
+        group_id="",
+        at_self=False,
+        fail_send=False,
+    ):
         self._text = text
         self._sender = sender
         self._group_id = group_id
@@ -61,6 +74,11 @@ class FakeEvent:
             if group_id
             else "aiocqhttp:FriendMessage:1211000567"
         )
+        self._extra = {}
+        self._result = None
+        self.sent = []
+        self.fail_send = fail_send
+        self.bot = FakeOneBot()
 
     def get_message_text(self):
         return self._text
@@ -74,8 +92,22 @@ class FakeEvent:
     def reply(self, component):
         return component
 
+    async def send(self, chain):
+        if self.fail_send:
+            raise RuntimeError("component delivery unavailable")
+        self.sent.append(chain)
+
     def chain_result(self, chain):
         return chain[0] if len(chain) == 1 else chain
+
+    def get_extra(self, key, default=None):
+        return self._extra.get(key, default)
+
+    def set_extra(self, key, value):
+        self._extra[key] = value
+
+    def get_result(self):
+        return self._result
 
 
 class RealShapeEvent(FakeEvent):
@@ -111,14 +143,17 @@ class FakeStarContext:
 
 
 class FakeOneBot:
-    def __init__(self, *, fail_upload=False):
+    def __init__(self, *, fail_upload=False, fail_private=False):
         self.actions = []
         self.fail_upload = fail_upload
+        self.fail_private = fail_private
 
     async def call_action(self, action, **kwargs):
         self.actions.append((action, kwargs))
-        if self.fail_upload:
+        if action == "upload_group_file" and self.fail_upload:
             raise RuntimeError("upload unavailable")
+        if action in {"send_private_msg", "upload_private_file"} and self.fail_private:
+            raise RuntimeError("private delivery unavailable")
 
 
 class FakePlatform:
@@ -138,6 +173,101 @@ async def _collect(generator):
 
 
 class AgentIntegrationTests(unittest.TestCase):
+    def test_agent_job_status_mirror_uses_injected_tracker(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                calls = []
+                plugin._task_tracker = lambda *args: calls.append(args)
+                await plugin._track_cross_dialog_job(
+                    "1211000567", "abc123", "制作报告", "delivery_pending", "not delivered"
+                )
+                self.assertEqual(
+                    calls,
+                    [("1211000567", "abc123", "制作报告", "delivery_pending", "not delivered")],
+                )
+
+        asyncio.run(scenario())
+
+    def test_delivery_pending_survives_restart_for_queue_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = self._plugin(Path(tmp))
+            job_id = "aabbccddeeff"
+            plugin._job_store.start(
+                job_id,
+                "1211000567",
+                "aiocqhttp:FriendMessage:1211000567",
+                "生成报告",
+                "claude",
+                "",
+                state="delivery_pending",
+                recovery="replay_safe",
+            )
+
+            self.assertEqual(plugin._job_store.recover_interrupted(), 0)
+            self.assertEqual(plugin._job_store.get(job_id)["state"], "delivery_pending")
+
+    def test_queue_success_completes_agent_ledger_and_deletes_payload(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                job_id = "aabbccddeeff"
+                artifact = plugin.workspace / "jobs" / job_id / "outputs" / "report.txt"
+                artifact.parent.mkdir(parents=True)
+                artifact.write_text("report", encoding="utf-8")
+                plugin._job_store.start(
+                    job_id,
+                    "1211000567",
+                    "aiocqhttp:FriendMessage:1211000567",
+                    "生成报告",
+                    "claude",
+                    "",
+                    state="delivery_pending",
+                    recovery="replay_safe",
+                )
+                plugin._payload_store.write(
+                    job_id,
+                    EncryptedJobPayload(
+                        "生成报告",
+                        "aiocqhttp:FriendMessage:1211000567",
+                        "claude",
+                        "project",
+                        "replay_safe",
+                    ),
+                )
+                entry = types.SimpleNamespace(
+                    job_id=job_id, task_owner="agent", local_path=str(artifact)
+                )
+
+                await plugin._on_queued_delivery_outcome(
+                    entry, "done", "qq:retry_queue"
+                )
+
+                record = plugin._job_store.get(job_id)
+                self.assertEqual(record["state"], "completed")
+                self.assertEqual(record["deliverable_count"], 1)
+                self.assertFalse(plugin._payload_store.exists(job_id))
+
+        asyncio.run(scenario())
+
+    def test_declared_gif_video_is_not_mistaken_for_an_untrusted_local_image(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                video = plugin.workspace / "pro_video" / "search-result.gif"
+                video.parent.mkdir(parents=True)
+                video.write_bytes(b"GIF89a")
+                image = Image.fromFileSystem(str(video))
+                event = FakeEvent("/findvideo cat", sender="999")
+                event._result = types.SimpleNamespace(chain=[image])
+                event.set_extra("_pro_video_output_paths", [str(video)])
+
+                await plugin.protect_privacy_and_deliver_files(event)
+
+                self.assertEqual(event.get_result().chain, [image])
+
+        asyncio.run(scenario())
+
     def test_current_astrbot_event_text_api_is_supported(self):
         event = RealShapeEvent("帮我生成一个只含 hello 的 txt")
 
@@ -158,6 +288,65 @@ class AgentIntegrationTests(unittest.TestCase):
                 )
 
                 self.assertEqual(len(plugin.executed), 1)
+
+        asyncio.run(scenario())
+
+    def test_cached_file_request_delivers_without_starting_agent(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                cached = plugin.workspace / "jobs" / "old" / "outputs" / "report.txt"
+                cached.parent.mkdir(parents=True)
+                cached.write_text("report", encoding="utf-8")
+                cache_path = Path(tmp) / "file_cache.json"
+                with patch.object(file_cache, "_CACHE_PATH", cache_path):
+                    file_cache.record_file(
+                        "生成报告", str(cached), sender_id="1211000567", job_id="old"
+                    )
+                    replies = await _collect(
+                        plugin.on_message(FakeEvent("把刚才那个报告文件再发我一下"))
+                    )
+
+                self.assertEqual(plugin.executed, [])
+                self.assertTrue(any("已发送" in text for text in _plain_texts(replies)))
+
+        asyncio.run(scenario())
+
+    def test_invalid_agent_command_returns_help_instead_of_type_error(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+
+                replies = await _collect(plugin.on_message(FakeEvent("/agent run")))
+
+                self.assertEqual(plugin.executed, [])
+                self.assertTrue(any("Agent 任务" in text for text in _plain_texts(replies)))
+
+        asyncio.run(scenario())
+
+    def test_natural_followup_status_lists_pending_delivery_job(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                plugin._job_store.start(
+                    "a1b2c3d4e5f6",
+                    "1211000567",
+                    "aiocqhttp:FriendMessage:1211000567",
+                    "生成报告",
+                    "claude",
+                    "",
+                    state="delivering",
+                    recovery="replay_safe",
+                )
+
+                replies = await _collect(
+                    plugin.on_message(FakeEvent("刚才那个任务文件发了吗"))
+                )
+                texts = _plain_texts(replies)
+
+                self.assertEqual(plugin.executed, [])
+                self.assertTrue(any("待处理" in text for text in texts), texts)
+                self.assertTrue(any("a1b2c3d4e5f6" in text for text in texts), texts)
 
         asyncio.run(scenario())
 
@@ -183,6 +372,7 @@ class AgentIntegrationTests(unittest.TestCase):
     def _plugin(self, root: Path):
         plugin = ClaudeCodeAgent.__new__(ClaudeCodeAgent)
         plugin.context = FakeStarContext()
+        plugin.context.platforms["aiocqhttp"] = FakePlatform(FakeOneBot())
         plugin.config = {}
         plugin._access_policy = AccessPolicy(["1211000567"])
         plugin._trusted_policy = TrustedPolicy(["1211000567"])
@@ -241,7 +431,7 @@ class AgentIntegrationTests(unittest.TestCase):
                 plugin = self._plugin(Path(tmp))
                 plugin._backend_health = FakeBackendHealth(("codex",))
 
-                await _collect(plugin.on_message(FakeEvent("帮我分析这份报告")))
+                await _collect(plugin.on_message(FakeEvent("帮我生成 backend-report.txt")))
 
                 self.assertEqual(len(plugin.executed), 1)
                 self.assertEqual(plugin.executed[0][2], "codex")
@@ -296,7 +486,34 @@ class AgentIntegrationTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_pro_membership_alone_does_not_grant_trusted_host_execution(self):
+    def test_empty_backend_result_finishes_failed_instead_of_hanging(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                plugin._backend_health = FakeBackendHealth(("claude", "codex"))
+                backends = []
+                job_ids = []
+
+                async def empty_execute(
+                    this, job_id, job_dir, task, backend, high_risk_approved
+                ):
+                    backends.append(backend)
+                    job_ids.append(job_id)
+                    return "", [], "failed", 0, "empty_result"
+
+                plugin._execute = types.MethodType(empty_execute, plugin)
+
+                await _collect(plugin.on_message(FakeEvent("/agent run 生成 result.txt")))
+
+                self.assertEqual(backends, ["claude", "codex"])
+                record = plugin._job_store.get(job_ids[0])
+                self.assertEqual(record["state"], "failed")
+                self.assertEqual(record["stage"], "failed")
+                self.assertEqual(record["error_code"], "empty_result")
+
+        asyncio.run(scenario())
+
+    def test_x_member_can_execute_natural_task(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self._plugin(Path(tmp))
@@ -308,8 +525,8 @@ class AgentIntegrationTests(unittest.TestCase):
                     )
                 )
 
-                self.assertEqual(plugin.executed, [])
-                self.assertTrue(any("Trusted Pro" in text for text in _plain_texts(replies)))
+                # 开放契约：allowlist 成员（非 owner）可执行自然语言任务
+                self.assertEqual(len(plugin.executed), 1)
 
         asyncio.run(scenario())
 
@@ -374,7 +591,7 @@ class AgentIntegrationTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_later_high_risk_step_pauses_after_safe_step_and_resumes_at_cursor(self):
+    def test_high_risk_task_runs_in_one_step_after_approval(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self._plugin(Path(tmp))
@@ -382,25 +599,21 @@ class AgentIntegrationTests(unittest.TestCase):
                 first = await _collect(
                     plugin.on_message(FakeEvent("帮我读取项目，然后发送报告"))
                 )
-
-                self.assertEqual([item[1] for item in plugin.executed], ["读取项目"])
+                # ponytail: single-step plan — full goal is HIGH_IMPACT ("发送").
+                # No safe preamble runs before approval; the whole task gates.
+                self.assertEqual(plugin.executed, [])
                 self.assertTrue(any("确认" in text for text in _plain_texts(first)))
-                job_id = plugin.executed[0][0]
-                self.assertEqual(plugin._job_store.get(job_id)["state"], "awaiting_approval")
-                self.assertTrue(plugin._payload_store.exists(job_id))
 
                 second = await _collect(plugin.on_message(FakeEvent("确认执行")))
-
-                self.assertEqual(
-                    [item[1] for item in plugin.executed], ["读取项目", "发送报告"]
-                )
-                self.assertEqual(plugin._job_store.get(job_id)["state"], "completed")
-                self.assertFalse(plugin._payload_store.exists(job_id))
+                # After approval the single step executes on host.
+                self.assertEqual(len(plugin.executed), 1)
+                self.assertIn("读取项目", plugin.executed[0][1])
+                self.assertIn("发送报告", plugin.executed[0][1])
                 self.assertTrue(any("执行结束" in text for text in _plain_texts(second)))
 
         asyncio.run(scenario())
 
-    def test_unknown_step_stays_blocked_when_isolation_adapter_is_not_ready(self):
+    def test_unknown_step_executes_on_host_after_approval(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self._plugin(Path(tmp))
@@ -413,10 +626,9 @@ class AgentIntegrationTests(unittest.TestCase):
 
                 second = await _collect(plugin.on_message(FakeEvent("确认执行")))
 
-                self.assertEqual(plugin.executed, [])
-                self.assertTrue(
+                self.assertTrue(len(plugin.executed) > 0)
+                self.assertFalse(
                     any("隔离" in text for text in _plain_texts(second)),
-                    _plain_texts(second),
                 )
 
         asyncio.run(scenario())
@@ -485,7 +697,10 @@ class AgentIntegrationTests(unittest.TestCase):
                 ordinary = await _collect(
                     plugin.on_message(FakeEvent("帮我生成报告", sender="999"))
                 )
-                self.assertTrue(any("Pro" in text for text in _plain_texts(ordinary)))
+                self.assertFalse(any("X 或 PRO" in text for text in _plain_texts(ordinary)))
+                # 开放契约：普通用户得到澄清追问而非 tier 拒绝，但仍不直接执行
+                self.assertEqual(plugin.executed, [])
+                self.assertTrue(any("还是做成" in text for text in _plain_texts(ordinary)))
                 self.assertEqual(
                     await _collect(
                         plugin.on_message(FakeEvent("帮我生成报告", group_id="123", at_self=False))
@@ -496,7 +711,7 @@ class AgentIntegrationTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_ordinary_natural_agent_request_gets_pro_boundary_without_execution(self):
+    def test_ordinary_natural_agent_request_gets_clarification_without_execution(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self._plugin(Path(tmp))
@@ -509,7 +724,7 @@ class AgentIntegrationTests(unittest.TestCase):
 
                 self.assertEqual(plugin.executed, [])
                 self.assertTrue(
-                    any("Pro" in text for text in _plain_texts(replies)),
+                    any("还是做成" in text for text in _plain_texts(replies)),
                     _plain_texts(replies),
                 )
 
@@ -524,23 +739,23 @@ class AgentIntegrationTests(unittest.TestCase):
                 create_job_dir(plugin.workspace, safe_id)
                 create_job_dir(plugin.workspace, blocked_id)
                 plugin._job_store.start(
-                    safe_id, "1211000567", "safe-scope", "读取项目并生成报告",
+                    safe_id, "1211000567", "aiocqhttp:FriendMessage:1211000567", "读取项目并生成报告",
                     "claude", "", state="running", recovery="replay_safe"
                 )
                 plugin._job_store.start(
-                    blocked_id, "1211000567", "blocked-scope", "删除旧目录",
+                    blocked_id, "1211000567", "aiocqhttp:FriendMessage:1211000567", "删除旧目录",
                     "claude", "删除", state="running", recovery="blocked"
                 )
                 plugin._payload_store.write(
                     safe_id,
                     EncryptedJobPayload(
-                        "读取项目并生成报告", "safe-scope", "claude", "project", "replay_safe"
+                        "读取项目并生成报告", "aiocqhttp:FriendMessage:1211000567", "claude", "project", "replay_safe"
                     ),
                 )
                 plugin._payload_store.write(
                     blocked_id,
                     EncryptedJobPayload(
-                        "删除旧目录", "blocked-scope", "claude", ".", "blocked"
+                        "删除旧目录", "aiocqhttp:FriendMessage:1211000567", "claude", ".", "blocked"
                     ),
                 )
                 plugin._job_store.recover_interrupted()
@@ -554,7 +769,7 @@ class AgentIntegrationTests(unittest.TestCase):
                 self.assertFalse(plugin._payload_store.exists(blocked_id))
                 self.assertEqual(
                     {session for session, _chain in plugin.context.sent},
-                    {"safe-scope", "blocked-scope"},
+                    {"aiocqhttp:FriendMessage:1211000567"},
                 )
 
         asyncio.run(scenario())
@@ -568,18 +783,23 @@ class AgentIntegrationTests(unittest.TestCase):
 
                 async def controlled_execute(this, job_id, job_dir, task, backend, high_risk_approved):
                     this.executed.append((job_id, task, backend, high_risk_approved, this.work_dir))
-                    if task == "生成第一个报告":
+                    if task == "生成第一个 report.docx":
                         first_started.set()
                         await release_first.wait()
-                    return f"任务 {job_id} 执行结束（退出码 0）", [], "completed", 0, ""
+                    artifact = job_dir / "outputs" / "report.docx"
+                    artifact.write_bytes(b"verified test artifact")
+                    return (
+                        f"任务 {job_id} 执行结束（退出码 0）",
+                        [Deliverable(artifact, "file")], "completed", 0, "",
+                    )
 
                 plugin._execute = types.MethodType(controlled_execute, plugin)
                 first = asyncio.create_task(
-                    _collect(plugin.on_message(FakeEvent("帮我生成第一个报告")))
+                    _collect(plugin.on_message(FakeEvent("帮我生成第一个 report.docx")))
                 )
                 await asyncio.wait_for(first_started.wait(), timeout=2)
                 second = asyncio.create_task(
-                    _collect(plugin.on_message(FakeEvent("帮我生成第二个报告")))
+                    _collect(plugin.on_message(FakeEvent("帮我生成第二个 report.docx")))
                 )
                 await asyncio.sleep(0.05)
                 self.assertFalse(second.done())
@@ -588,7 +808,7 @@ class AgentIntegrationTests(unittest.TestCase):
 
                 self.assertEqual(
                     [item[1] for item in plugin.executed],
-                    ["生成第一个报告", "生成第二个报告"],
+                    ["生成第一个 report.docx", "生成第二个 report.docx"],
                 )
                 self.assertTrue(
                     any("已排队" in text for text in _plain_texts(second_replies)),
@@ -607,7 +827,7 @@ class AgentIntegrationTests(unittest.TestCase):
                 plugin._job_store.start(
                     job_id,
                     "1211000567",
-                    "queued-scope",
+                    "aiocqhttp:FriendMessage:1211000567",
                     "读取项目并生成排队报告",
                     "claude",
                     "",
@@ -618,7 +838,7 @@ class AgentIntegrationTests(unittest.TestCase):
                     job_id,
                     EncryptedJobPayload(
                         "读取项目并生成排队报告",
-                        "queued-scope",
+                        "aiocqhttp:FriendMessage:1211000567",
                         "claude",
                         "project",
                         "replay_safe",
@@ -633,14 +853,16 @@ class AgentIntegrationTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_planned_read_only_recovery_resumes_only_from_step_cursor(self):
+    def test_planned_read_only_recovery_replays_single_step(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self._plugin(Path(tmp))
                 job_id = "d1e2f3a4b5c6"
                 create_job_dir(plugin.workspace, job_id)
                 task = "读取项目，然后总结结果"
+                # ponytail: single-step plan — full task text is one invocation.
                 plan = plan_task(TaskRequest(job_id, task, "claude"))
+                self.assertEqual(len(plan.steps), 1)
                 plugin._job_store.start(
                     job_id,
                     "1211000567",
@@ -650,8 +872,8 @@ class AgentIntegrationTests(unittest.TestCase):
                     "planned",
                     state="executing",
                     recovery="replay_safe",
-                    step_index=1,
-                    step_count=2,
+                    step_index=0,
+                    step_count=1,
                 )
                 plugin._payload_store.write(
                     job_id,
@@ -662,14 +884,15 @@ class AgentIntegrationTests(unittest.TestCase):
                         work_dir_relative="project",
                         recovery="replay_safe",
                         plan=plugin._plan_records(plan),
-                        step_cursor=1,
+                        step_cursor=0,
                     ),
                 )
                 plugin._job_store.recover_interrupted()
 
                 await plugin._recover_jobs()
 
-                self.assertEqual([item[1] for item in plugin.executed], ["总结结果"])
+                self.assertEqual(len(plugin.executed), 1)
+                self.assertIn(task, plugin.executed[0][1])
                 self.assertEqual(plugin._job_store.get(job_id)["state"], "completed")
                 self.assertFalse(plugin._payload_store.exists(job_id))
 
@@ -687,10 +910,12 @@ class AgentIntegrationTests(unittest.TestCase):
                 second.write_text("second", encoding="utf-8")
                 first_digest = hashlib.sha256(first.read_bytes()).hexdigest()
 
+                bot = FakeOneBot()
+                plugin.context.platforms["llbot-test"] = FakePlatform(bot)
                 plugin._job_store.start(
                     job_id,
                     "1211000567",
-                    "delivery-scope",
+                    "llbot-test:FriendMessage:1211000567",
                     "生成两个报告",
                     "claude",
                     "",
@@ -704,7 +929,7 @@ class AgentIntegrationTests(unittest.TestCase):
                     job_id,
                     EncryptedJobPayload(
                         "生成两个报告",
-                        "delivery-scope",
+                        "llbot-test:FriendMessage:1211000567",
                         "claude",
                         "project",
                         "replay_safe",
@@ -716,14 +941,18 @@ class AgentIntegrationTests(unittest.TestCase):
                 await plugin._recover_jobs()
 
                 self.assertEqual(plugin.executed, [])
-                sent_names = []
-                for _scope, chain in plugin.context.sent:
-                    for component in getattr(chain, "chain", []):
-                        name = getattr(component, "name", "")
-                        if name:
-                            sent_names.append(name)
-                self.assertNotIn("first.txt", sent_names)
-                self.assertEqual(sent_names.count("second.txt"), 1)
+                self.assertFalse(
+                    any(
+                        isinstance(component, File)
+                        for _scope, chain in plugin.context.sent
+                        for component in getattr(chain, "chain", [])
+                    )
+                )
+                self.assertEqual(len(bot.actions), 1)
+                action, kwargs = bot.actions[0]
+                self.assertEqual(action, "upload_private_file")
+                self.assertEqual(kwargs["user_id"], 1211000567)
+                self.assertEqual(kwargs["name"], "second.txt")
                 self.assertEqual(plugin._job_store.get(job_id)["state"], "completed")
                 self.assertFalse(plugin._payload_store.exists(job_id))
 
@@ -751,7 +980,7 @@ class AgentIntegrationTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_group_file_delivery_failure_never_reports_completed(self):
+    def test_group_upload_failure_falls_back_to_requester_private_chat(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self._plugin(Path(tmp))
@@ -764,7 +993,55 @@ class AgentIntegrationTests(unittest.TestCase):
                 texts = _plain_texts(replies)
                 job_id = plugin.executed[0][0]
 
-                self.assertFalse(any(text.startswith("已完成") for text in texts), texts)
+                self.assertTrue(any("已私聊发送" in text for text in texts), texts)
+                self.assertEqual(plugin._job_store.get(job_id)["state"], "completed")
+                self.assertFalse(plugin._payload_store.exists(job_id))
+                self.assertEqual(
+                    [action for action, _ in event.bot.actions],
+                    [
+                        "upload_group_file",
+                        "upload_group_file",
+                        "upload_group_file",
+                        "upload_private_file",
+                    ],
+                )
+                self.assertEqual(event.bot.actions[-1][1]["user_id"], 1211000567)
+
+        asyncio.run(scenario())
+
+    def test_all_delivery_paths_fail_without_reporting_generation_failure(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                event = FakeEvent(
+                    "帮我生成 report.docx",
+                    group_id="945598390",
+                    at_self=True,
+                    fail_send=True,
+                )
+                event.bot = FakeOneBot(fail_upload=True, fail_private=True)
+
+                queue_modules = []
+                for name in (
+                    "data.plugins.friend_core.delivery_queue",
+                    "friend_core.delivery_queue",
+                ):
+                    try:
+                        queue_modules.append(importlib.import_module(name))
+                    except ImportError:
+                        pass
+                with contextlib.ExitStack() as stack:
+                    patched = [
+                        stack.enter_context(patch.object(module, "get_queue"))
+                        for module in queue_modules
+                    ]
+                    for get_queue in patched:
+                        get_queue.return_value.enqueue.return_value = None
+                    replies = await _collect(plugin.on_message(event))
+                texts = _plain_texts(replies)
+                job_id = plugin.executed[0][0]
+
+                self.assertFalse(any("任务执行失败" in text for text in texts), texts)
                 self.assertTrue(any("文件未成功交付" in text for text in texts), texts)
                 self.assertEqual(plugin._job_store.get(job_id)["state"], "delivering")
                 self.assertTrue(plugin._payload_store.exists(job_id))
@@ -801,6 +1078,41 @@ class AgentIntegrationTests(unittest.TestCase):
                 action, kwargs = bot.actions[0]
                 self.assertEqual(action, "upload_group_file")
                 self.assertEqual(kwargs["group_id"], 945598390)
+                self.assertEqual(kwargs["name"], "report.txt")
+                self.assertEqual(plugin.context.sent, [])
+
+        asyncio.run(scenario())
+
+    def test_recovered_private_file_uses_onebot_private_upload(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = self._plugin(Path(tmp))
+                bot = FakeOneBot()
+                plugin.context.platforms["llbot-test"] = FakePlatform(bot)
+                job_id = "a1b2c3d4e5f6"
+                job_dir = create_job_dir(plugin.workspace, job_id)
+                report = job_dir / "outputs" / "report.txt"
+                report.write_text("report", encoding="utf-8")
+                payload = EncryptedJobPayload(
+                    "生成报告",
+                    "llbot-test:FriendMessage:1211000567",
+                    "claude",
+                    "project",
+                    "replay_safe",
+                )
+
+                delivered = await plugin._deliver_recovered_files(
+                    payload.scope,
+                    job_id,
+                    payload,
+                    [Deliverable(report, "file")],
+                )
+
+                self.assertTrue(delivered)
+                self.assertEqual(len(bot.actions), 1)
+                action, kwargs = bot.actions[0]
+                self.assertEqual(action, "upload_private_file")
+                self.assertEqual(kwargs["user_id"], 1211000567)
                 self.assertEqual(kwargs["name"], "report.txt")
                 self.assertEqual(plugin.context.sent, [])
 
@@ -843,7 +1155,8 @@ class AgentIntegrationTests(unittest.TestCase):
                     return "执行结束", [Deliverable(report, "file")], "completed", 0, ""
 
                 plugin._execute = types.MethodType(execute_with_file, plugin)
-                plugin.context.fail_next_file = True
+                bot = plugin.context.platforms["aiocqhttp"].bot
+                bot.fail_private = True
                 await plugin._recover_jobs()
 
                 first_record = plugin._job_store.get(job_id)
@@ -857,6 +1170,7 @@ class AgentIntegrationTests(unittest.TestCase):
                     raise AssertionError("delivery restart must not execute the agent")
 
                 plugin._execute = must_not_execute
+                bot.fail_private = False
                 await plugin._recover_jobs()
 
                 self.assertEqual(plugin._job_store.get(job_id)["state"], "completed")

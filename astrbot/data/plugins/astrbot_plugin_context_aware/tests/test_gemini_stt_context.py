@@ -74,6 +74,10 @@ def install_astrbot_stubs() -> dict[str, types.ModuleType]:
             self.url = url
             self.file = file
 
+    class Face:
+        def __init__(self, id: str = ""):
+            self.id = id
+
     class At:
         def __init__(self, qq: str, name: str = ""):
             self.qq = qq
@@ -101,6 +105,7 @@ def install_astrbot_stubs() -> dict[str, types.ModuleType]:
     agent_message_mod.TextPart = TextPart
     message_components_mod.Plain = Plain
     message_components_mod.Image = Image
+    message_components_mod.Face = Face
     message_components_mod.At = At
     message_components_mod.AtAll = AtAll
     message_components_mod.Reply = Reply
@@ -197,6 +202,30 @@ class ContextAwareGeminiSTTTest(unittest.IsolatedAsyncioTestCase):
         await plugin.on_message(event)
 
         self.assertTrue(plugin._sessions.has_session(event.unified_msg_origin))
+
+    async def test_empty_at_bot_is_recorded_as_an_explicit_prompt(self):
+        plugin = self.mod.Main(FakeContext(), {"enable": True, "only_group_chat": True})
+        event = FakeEvent()
+        event.extras = {}
+        event.get_messages = lambda: [self.mod.At("bot")]
+
+        await plugin.on_message(event)
+
+        messages = plugin.get_recent_messages(event.unified_msg_origin, count=1)
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["content"], "[用户只@了你，未附文字]")
+
+    async def test_qq_face_is_recorded_with_its_meaning(self):
+        plugin = self.mod.Main(FakeContext(), {"enable": True, "only_group_chat": True})
+        event = FakeEvent()
+        event.extras = {}
+        event.get_messages = lambda: [self.mod.Face("14")]
+
+        await plugin.on_message(event)
+
+        messages = plugin.get_recent_messages(event.unified_msg_origin, count=1)
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["content"], "[QQ表情:微笑]")
 
     async def test_llm_request_fallback_and_message_handler_do_not_duplicate_voice(self):
         plugin = self.mod.Main(FakeContext(), {"enable": True, "only_group_chat": True})

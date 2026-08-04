@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-PLUGIN_PARENT = Path(r"D:\Claudecoda学习\qqbot\astrbot\data\plugins")
+PLUGIN_PARENT = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugins"
 sys.path.insert(0, str(PLUGIN_PARENT))
 
 from astrbot_plugin_qqadmin.core.ai_moderation_store import AIModerationStore  # noqa: E402

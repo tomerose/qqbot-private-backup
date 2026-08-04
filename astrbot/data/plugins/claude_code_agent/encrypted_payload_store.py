@@ -39,6 +39,7 @@ class EncryptedJobPayload:
     delivery_cursor: tuple[str, ...] = ()
     plan: tuple[dict[str, object], ...] = ()
     step_cursor: int = 0
+    trusted_runtime: bool = False
 
 
 class _DataBlob(ctypes.Structure):
@@ -199,6 +200,8 @@ def _validate_payload(payload: EncryptedJobPayload) -> EncryptedJobPayload:
     step_cursor = int(payload.step_cursor)
     if step_cursor < 0 or step_cursor > len(normalized_plan):
         raise ValueError("任务步骤游标无效")
+    if type(payload.trusted_runtime) is not bool:
+        raise ValueError("任务运行边界无效")
     return EncryptedJobPayload(
         task=task,
         scope=scope,
@@ -208,6 +211,7 @@ def _validate_payload(payload: EncryptedJobPayload) -> EncryptedJobPayload:
         delivery_cursor=cursor,
         plan=tuple(normalized_plan),
         step_cursor=step_cursor,
+        trusted_runtime=payload.trusted_runtime,
     )
 
 

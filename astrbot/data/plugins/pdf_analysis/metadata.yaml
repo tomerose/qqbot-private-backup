@@ -1,0 +1,6 @@
+name: pdf_analysis
+display_name: PDF 分析
+short_desc: 发送 PDF 文件自动分析
+desc: 发送可提取文字的 PDF/TXT/MD 文件，返回结构化摘要；扫描版 PDF 暂不支持。
+version: v1.0.0
+author: lemon

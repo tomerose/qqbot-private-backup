@@ -6,9 +6,14 @@ import base64
 from dataclasses import dataclass
 
 
-IMAGE_MODEL_PRIMARY = "gemini-2.5-flash-image"
-IMAGE_MODEL_FALLBACK = "gemini-2.5-flash-image"
+IMAGE_MODEL_PRIMARY = "gemini-3-pro-image"      # X/Pro — best quality, Pro-tier composition
+IMAGE_MODEL_FALLBACK = "gemini-3.1-flash-image"  # fallback — faster, still good
+IMAGE_MODEL_PREMIUM = "gemini-3-pro-image"       # kept for backward compat
+IMAGE_MODEL_ULTRA   = "gemini-3-pro-image"
 IMAGE_MODELS = frozenset({IMAGE_MODEL_PRIMARY, IMAGE_MODEL_FALLBACK})
+# ponytail: Imagen disabled — project solar-modem-496213-f5 has no Imagen quota.
+# Google will sunset all Imagen models 2026-06-30. All gen uses Gemini native image.
+IMAGEN_MODELS: frozenset[str] = frozenset()
 MAX_IMAGE_PROMPT_CHARS = 500
 _SIZE_TO_ASPECT_RATIO = {
     "512x512": "1:1",
@@ -18,6 +23,8 @@ _SIZE_TO_ASPECT_RATIO = {
     "1024x576": "16:9",
     "576x1024": "9:16",
 }
+# 4K resolution — PRO exclusive, Gemini 3 Pro Image supports up to 4096x4096
+_4K_ASPECT_RATIOS = frozenset({"1:1", "16:9", "9:16", "2:3", "3:2"})
 
 
 class ImageRequestError(ValueError):
@@ -29,10 +36,18 @@ class ImageRequest:
     prompt: str
     model: str
     aspect_ratio: str
+    image_size: str  # "2K" (default) or "4K" (PRO exclusive)
 
 
 def image_model_attempts(model: str) -> tuple[str, ...]:
-    """Return each configured model at most once."""
+    """Return each configured model at most once, with appropriate fallback."""
+    if model in IMAGEN_MODELS:
+        # Imagen 4 → Imagen 3 → stop; don't cross to Gemini models
+        chain = [model]
+        if model != IMAGE_MODEL_PREMIUM:
+            chain.append(IMAGE_MODEL_PREMIUM)
+        return tuple(dict.fromkeys(chain))
+    # Gemini image: primary → 2.5 flash-image fallback
     return tuple(dict.fromkeys((model, IMAGE_MODEL_FALLBACK)))
 
 
@@ -49,10 +64,14 @@ def normalize_image_request(body: object) -> ImageRequest:
     requested_model = str(body.get("model", "")).strip()
     model = requested_model if requested_model in IMAGE_MODELS else IMAGE_MODEL_PRIMARY
     size = str(body.get("size", "1024x1024")).lower().replace(" ", "")
+    image_size = str(body.get("image_size", "2K")).upper()
+    if image_size not in ("2K", "4K"):
+        image_size = "2K"
     return ImageRequest(
         prompt=prompt,
         model=model,
         aspect_ratio=_SIZE_TO_ASPECT_RATIO.get(size, "1:1"),
+        image_size=image_size,
     )
 
 

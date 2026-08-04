@@ -74,6 +74,16 @@ class TaskVerifierTests(unittest.TestCase):
         self.assertTrue(verify_step(step, 0, [], None).verified)
         self.assertFalse(verify_step(step, 2, [], None).verified)
 
+    def test_failed_execution_preserves_specific_backend_error_code(self):
+        step = TaskStep(
+            "job123", 0, "璇诲彇椤圭洰", ActionClass.READ_ONLY, False
+        )
+
+        evidence = verify_step(step, 1, [], None, error_code="empty_result")
+
+        self.assertFalse(evidence.verified)
+        self.assertEqual(evidence.code, "empty_result")
+
     def test_selects_only_known_project_verification_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -87,6 +97,13 @@ class TaskVerifierTests(unittest.TestCase):
             (root / "tests").mkdir()
             command = select_verification_command(root)
             self.assertEqual(command[1:], ["-m", "unittest", "discover", "-s", "tests"])
+
+    def test_go_project_takes_priority_over_generic_tests_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "go.mod").write_text("module example.com/demo\n", encoding="utf-8")
+            (root / "tests").mkdir()
+            self.assertEqual(select_verification_command(root), ["go", "test", "./..."])
 
     def test_project_verification_runs_only_for_code_change_or_test_steps(self):
         read_step = TaskStep(

@@ -2,7 +2,8 @@ import sys
 import unittest
 from pathlib import Path
 
-PLUGIN_PARENT = Path(r"D:\Claudecoda学习\qqbot\astrbot\data\plugins")
+_PROJ_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_PARENT = _PROJ_ROOT / "astrbot" / "data" / "plugins"
 sys.path.insert(0, str(PLUGIN_PARENT))
 
 from astrbot_plugin_qqadmin.core.ai_moderation_policy import (  # noqa: E402

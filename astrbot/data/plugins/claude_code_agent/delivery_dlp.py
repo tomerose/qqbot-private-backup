@@ -20,8 +20,11 @@ TEXT_SUFFIXES = {
     ".json", ".yaml", ".yml", ".xml", ".rels", ".csv", ".log", ".ini",
     ".toml", ".html", ".css", ".sql", ".sh", ".ps1", ".bat", ".cmd",
     ".java", ".c", ".cc", ".cpp", ".h", ".hpp", ".go", ".rs",
+    # Office document internals — python-pptx / python-docx / openpyxl generate these
+    ".bin", ".vml", ".emf", ".wmf",
 }
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+VIDEO_SUFFIXES = {".mp4", ".webm", ".mkv", ".mov", ".m4v"}
 ARCHIVE_SUFFIXES = {".zip", ".docx", ".xlsx", ".pptx"}
 NESTED_ARCHIVE_SUFFIXES = ARCHIVE_SUFFIXES | {".7z", ".rar", ".tar", ".gz"}
 SENSITIVE_FILE_NAMES = {
@@ -171,6 +174,21 @@ def _image_has_metadata(path: Path) -> bool | None:
         return None
 
 
+def _is_valid_video(path: Path) -> bool:
+    """Reject arbitrary binaries renamed with a supported video suffix."""
+    try:
+        with path.open("rb") as source:
+            header = source.read(16)
+    except OSError:
+        return False
+    suffix = path.suffix.lower()
+    if suffix in {".mp4", ".mov", ".m4v"}:
+        return len(header) >= 12 and header[4:8] == b"ftyp"
+    if suffix in {".webm", ".mkv"}:
+        return header.startswith(b"\x1a\x45\xdf\xa3")
+    return False
+
+
 def strip_image_metadata(path: Path, root: Path) -> bool:
     checked = _resolved_inside(path, root)
     if checked is None:
@@ -233,6 +251,9 @@ def inspect_deliverable(
         if metadata is None:
             return DLPDecision(False, "invalid_image")
         return DLPDecision(not metadata, "clean" if not metadata else "image_metadata")
+    if suffix in VIDEO_SUFFIXES:
+        valid = _is_valid_video(resolved)
+        return DLPDecision(valid, "clean" if valid else "invalid_video")
     if suffix not in TEXT_SUFFIXES:
         return DLPDecision(False, "unsupported_type")
     try:

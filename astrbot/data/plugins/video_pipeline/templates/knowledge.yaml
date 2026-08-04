@@ -1,0 +1,14 @@
+# 知识科普模板 — 适合教程、科普、技能分享
+name: "知识科普"
+description: "教程、科普、知识分享类视频"
+style: "cinematic"
+duration_range: [30, 180]
+hook_required: true
+pace: "fast"
+visual_style: "mixed"
+voice_style: "narration"
+subtitle_style: "dynamic"
+transitions: ["fade", "slide"]
+motion: "ken_burns"
+aspect_ratio: "16:9"
+script_hint: "口语化教学风格，每场景一个知识点，用类比和例子帮助理解"

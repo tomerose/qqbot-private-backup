@@ -1,9 +1,13 @@
 """小柠回归广播 — 发所有群+最近5个私聊"""
-import requests, json
+import os
 
-BASE = "http://127.0.0.1:5700"
-TOKEN = "lemon-secret-token"
-HEADERS = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
+import requests
+
+BASE = os.environ.get("NAPCAT_HTTP_BASE", "http://127.0.0.1:5700").strip().rstrip("/")
+TOKEN = os.environ.get("NAPCAT_HTTP_TOKEN", "").strip()
+HEADERS = {"Content-Type": "application/json"}
+if TOKEN:
+    HEADERS["Authorization"] = f"Bearer {TOKEN}"
 
 MSG = "小柠回来啦！成长了变得更聪明了，想和我聊天吗？"
 

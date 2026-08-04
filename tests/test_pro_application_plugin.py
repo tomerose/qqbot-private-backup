@@ -17,10 +17,22 @@ REVIEWER = "1211000567"
 APPLICANT = "2000000000"
 
 
+class FakeBot:
+    def __init__(self, friends=()):
+        self.friends = {str(item) for item in friends}
+
+    async def call_action(self, action: str):
+        if action != "get_friend_list":
+            raise AssertionError(action)
+        return [{"user_id": item} for item in self.friends]
+
+
 class FakeEvent:
-    def __init__(self, text: str, sender: str):
+    def __init__(self, text: str, sender: str, *, private: bool = True, friends=()):
         self.text = text
         self.sender = sender
+        self.private = private
+        self.bot = FakeBot(friends)
         self.unified_msg_origin = f"llbot-test:FriendMessage:{sender}"
         self.stopped = False
 
@@ -35,6 +47,9 @@ class FakeEvent:
 
     def plain_result(self, text):
         return text
+
+    def is_private_chat(self):
+        return self.private
 
 
 class FakeContext:
@@ -64,107 +79,115 @@ class ProApplicationPluginTests(unittest.TestCase):
         self.plugin.context = self.context
         self.plugin.store = ProStore(Path(self.temp.name) / "pro_members.db", reviewer_id=REVIEWER)
         self.plugin._clock = lambda: 1_000.0
+        self.plugin._auth_sessions: dict[str, float] = {REVIEWER: float("inf")}
+        self.plugin._auth_failures: dict[str, tuple[int, float]] = {}
+        self.plugin._invite_lock = asyncio.Lock()
+        self.plugin._invite_file = Path(self.temp.name) / "invites.json"
 
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_apply_returns_safe_email_template_without_agent_access(self):
-        event = FakeEvent("/pro apply", APPLICANT)
-
-        replies = asyncio.run(collect(self.plugin.on_message(event)))
-
-        self.assertTrue(event.stopped)
-        self.assertEqual(len(replies), 1)
-        self.assertIn("portelamicheli636@gmail.com", replies[0])
-        self.assertIn("APP-", replies[0])
-        self.assertIn("不包含本机 Agent", replies[0])
-
-    def test_only_reviewer_can_approve_and_code_is_private(self):
-        apply_reply = asyncio.run(
-            collect(self.plugin.on_message(FakeEvent("/pro apply", APPLICANT)))
-        )[0]
-        application_id = re.search(r"APP-[A-Z0-9]+", apply_reply).group(0)
-        asyncio.run(
-            collect(self.plugin.on_message(FakeEvent(f"/pro sent {application_id}", APPLICANT)))
+    def test_invite_flow_grants_bound_user_without_exposing_other_status(self):
+        created = asyncio.run(
+            collect(self.plugin.on_message(FakeEvent(f"/invite {APPLICANT} x 30", REVIEWER)))
         )
-
-        denied = asyncio.run(
-            collect(self.plugin.on_message(FakeEvent(f"/pro approve {application_id}", "3000000000")))
-        )
-        self.assertIn("无权", denied[0])
-        self.assertEqual(self.context.sent, [])
-
-        approval_requested = asyncio.run(
-            collect(self.plugin.on_message(FakeEvent(f"/pro approve {application_id} 90", REVIEWER)))
-        )
-        self.assertIn("/pro confirm", approval_requested[0])
-        self.assertEqual(self.context.sent, [])
-
-        approved = asyncio.run(
-            collect(self.plugin.on_message(FakeEvent(f"/pro confirm {application_id}", REVIEWER)))
-        )
-        self.assertNotRegex(approved[0], r"[A-Za-z0-9_-]{12,}")
-        self.assertEqual(self.context.sent[0][0], f"llbot-test:FriendMessage:{APPLICANT}")
-        code = re.search(r"/pro verify ([A-Za-z0-9_-]+)", chain_text(self.context.sent[0][1])).group(1)
-
-        verified = asyncio.run(
-            collect(self.plugin.on_message(FakeEvent(f"/pro verify {code}", APPLICANT)))
-        )
-        self.assertIn("已开通", verified[0])
-
-    def test_status_is_limited_to_requesting_qq(self):
-        asyncio.run(collect(self.plugin.on_message(FakeEvent("/pro apply", APPLICANT))))
+        code = re.search(r"XIAONING-[A-F0-9]+", created[0]).group(0)
 
         other = asyncio.run(
-            collect(self.plugin.on_message(FakeEvent("/pro status", "3000000000")))
+            collect(self.plugin.on_message(FakeEvent(f"/redeem {code}", "3000000000")))
         )
-        own = asyncio.run(
+        redeemed = asyncio.run(
+            collect(self.plugin.on_message(FakeEvent(f"/redeem {code}", APPLICANT)))
+        )
+        status = asyncio.run(
             collect(self.plugin.on_message(FakeEvent("/pro status", APPLICANT)))
         )
 
-        self.assertIn("暂无", other[0])
-        self.assertIn("待发送邮件", own[0])
-        self.assertNotIn(APPLICANT, own[0])
+        self.assertIn("与你不同", other[0])
+        self.assertIn("X", redeemed[0])
+        self.assertIn("当前资格：X", status[0])
+        self.assertNotIn(APPLICANT, status[0])
 
-    def test_failed_private_code_delivery_returns_application_to_review(self):
-        apply_reply = asyncio.run(
-            collect(self.plugin.on_message(FakeEvent("/pro apply", APPLICANT)))
-        )[0]
-        application_id = re.search(r"APP-[A-Z0-9]+", apply_reply).group(0)
-        asyncio.run(
-            collect(self.plugin.on_message(FakeEvent(f"/pro sent {application_id}", APPLICANT)))
-        )
-        self.context.deliver = False
-
-        asyncio.run(
-            collect(self.plugin.on_message(FakeEvent(f"/pro approve {application_id}", REVIEWER)))
-        )
-        replies = asyncio.run(
-            collect(self.plugin.on_message(FakeEvent(f"/pro confirm {application_id}", REVIEWER)))
-        )
-
-        self.assertIn("未送达", replies[0])
-        self.assertEqual(self.plugin.store.status_for(APPLICANT, now=1_001).state, "awaiting_review")
-
-    def test_only_reviewer_can_read_minimal_audit(self):
-        apply_reply = asyncio.run(
-            collect(self.plugin.on_message(FakeEvent("/pro apply", APPLICANT)))
-        )[0]
-        application_id = re.search(r"APP-[A-Z0-9]+", apply_reply).group(0)
-        asyncio.run(
-            collect(self.plugin.on_message(FakeEvent(f"/pro sent {application_id}", APPLICANT)))
-        )
-
+    def test_only_authenticated_reviewer_can_generate_invites(self):
         denied = asyncio.run(
-            collect(self.plugin.on_message(FakeEvent(f"/pro audit {application_id}", "3000000000")))
+            collect(self.plugin.on_message(FakeEvent(f"/invite {APPLICANT} pro 30", "3000000000")))
         )
-        allowed = asyncio.run(
-            collect(self.plugin.on_message(FakeEvent(f"/pro audit {application_id}", REVIEWER)))
+        self.plugin._auth_sessions.clear()
+        unauthenticated = asyncio.run(
+            collect(self.plugin.on_message(FakeEvent(f"/invite {APPLICANT} pro 30", REVIEWER)))
         )
 
-        self.assertIn("无权", denied[0])
-        self.assertIn("created", allowed[0])
-        self.assertNotIn(APPLICANT, allowed[0])
+        self.assertIn("拥有者", denied[0])
+        self.assertIn("/pro auth", unauthenticated[0])
+        self.assertFalse(self.plugin._invite_file.exists())
+
+    def test_invite_cannot_be_replayed_after_used_flag_tampering(self):
+        created = asyncio.run(
+            collect(self.plugin.on_message(FakeEvent(f"/invite {APPLICANT} pro 30", REVIEWER)))
+        )
+        code = re.search(r"XIAONING-[A-F0-9]+", created[0]).group(0)
+        asyncio.run(collect(self.plugin.on_message(FakeEvent(f"/redeem {code}", APPLICANT))))
+
+        import json
+        data = json.loads(self.plugin._invite_file.read_text(encoding="utf-8"))
+        data["codes"][code]["used"] = False
+        self.plugin._invite_file.write_text(json.dumps(data), encoding="utf-8")
+
+        replay = asyncio.run(
+            collect(self.plugin.on_message(FakeEvent(f"/redeem {code}", APPLICANT)))
+        )
+        self.assertIn("无效", replay[0])
+
+    def test_x_duration_is_clamped_and_management_stays_private(self):
+        group_reply = asyncio.run(
+            collect(
+                self.plugin.on_message(
+                    FakeEvent(f"/invite {APPLICANT} x 365", REVIEWER, private=False)
+                )
+            )
+        )
+        private_reply = asyncio.run(
+            collect(self.plugin.on_message(FakeEvent(f"/invite {APPLICANT} x 365", REVIEWER)))
+        )
+
+        self.assertIn("私聊", group_reply[0])
+        self.assertIn("X 90 天", private_reply[0])
+
+    def test_friend_check_grants_persistent_x_once(self):
+        event = FakeEvent("你好", APPLICANT, friends={APPLICANT})
+        asyncio.run(self.plugin._quick_friend_grant(event, APPLICANT))
+        membership = self.plugin.store.status_for(APPLICANT, now=1_000)
+
+        self.assertEqual(membership.tier, "x")
+        self.assertGreater(membership.pro_expires_at, 1_000 + 365 * 86400)
+
+        asyncio.run(self.plugin._quick_friend_grant(event, APPLICANT))
+        events = self.plugin.store.audit_for(
+            f"FRIEND-X-{APPLICANT}", REVIEWER, now=1_000
+        )
+        self.assertEqual(sum(item.event_type == "claimed_friend_x" for item in events), 1)
+
+    def test_non_friend_is_not_granted_x(self):
+        asyncio.run(self.plugin._quick_friend_grant(FakeEvent("你好", APPLICANT), APPLICANT))
+        self.assertIsNone(self.plugin.store.status_for(APPLICANT, now=1_000))
+
+    def test_friend_check_does_not_replace_existing_pro(self):
+        self.plugin.store.grant(
+            APPLICANT,
+            REVIEWER,
+            30,
+            now=1_000,
+            tier="pro",
+        )
+        asyncio.run(
+            self.plugin._quick_friend_grant(
+                FakeEvent("你好", APPLICANT, friends={APPLICANT}), APPLICANT
+            )
+        )
+        self.assertEqual(
+            self.plugin.store.status_for(APPLICANT, now=1_000).tier,
+            "pro",
+        )
 
 
 if __name__ == "__main__":

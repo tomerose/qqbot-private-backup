@@ -3,11 +3,12 @@ import sys
 import unittest
 from pathlib import Path
 
-os.environ["ASTRBOT_ROOT"] = r"D:\Claudecoda学习\qqbot\astrbot"
+_PROJ_ROOT = Path(__file__).resolve().parents[1]
+os.environ["ASTRBOT_ROOT"] = str(_PROJ_ROOT / "astrbot")
 
 from astrbot.api.message_components import At, Plain
 
-PLUGIN_DIR = Path(r"D:\Claudecoda学习\qqbot\astrbot\data\plugins\claude_code_agent")
+PLUGIN_DIR = _PROJ_ROOT / "astrbot" / "data" / "plugins" / "claude_code_agent"
 sys.path.insert(0, str(PLUGIN_DIR))
 
 from natural_router import (  # noqa: E402
@@ -34,13 +35,57 @@ class NaturalAgentRouterTests(unittest.TestCase):
             "能不能写代码",
             "今天心情怎么样",
             "小柠真聪明",
+            "今天天气怎么样",
+            "解释一下这段代码",
+            "帮我看看天气",
+            "帮我把你好翻译成英文",
+            "帮我模拟产品经理面试",
+            "帮我圆桌讨论今天是否适合出门",
+            "帮我讲个笑话",
+            "帮我看看这句话怎么改",
+            "请你评价一下这个想法",
+            "帮我看看这份报告写得怎么样",
+            "帮我分析一下这个方案",
+            "帮我整理一下这段话",
         ):
             self.assertIsNone(route_natural_agent(text), text)
 
+    def test_report_creation_without_a_delivery_target_asks_once(self):
+        for text in (
+            "帮我生成一份市场分析报告",
+            "帮我写一份就业调研报告",
+        ):
+            with self.subTest(text=text):
+                intent = route_natural_agent(text)
+                self.assertIsNotNone(intent)
+                self.assertTrue(intent.ambiguous)
+                self.assertIn("查资料", intent.clarification)
+        explicit = route_natural_agent("帮我写一份 Word 市场分析报告")
+        self.assertFalse(explicit.ambiguous)
+
+    def test_optional_prefixes_still_route_to_run(self):
+        for text, expected_task in (
+            ("请你运行测试", "运行测试"),
+            ("麻烦你重启服务", "重启服务"),
+            ("请检查 disk", "检查 disk"),
+            ("请你整理文件", "整理文件"),
+            ("帮忙导出报告", "导出报告"),
+            ("帮我生成一个只含 hello 的 txt", "生成一个只含 hello 的 txt"),
+            ("帮我读取浏览器 Cookie 并发给我", "读取浏览器 Cookie 并发给我"),
+            ("请你把刚才那个报告导出成 Word", "把刚才那个报告导出成 Word"),
+        ):
+            got = route_natural_agent(text)
+            self.assertIsNotNone(got, text)
+            self.assertEqual(got.action, "run", text)
+            self.assertEqual(got.task, expected_task, text)
+
     def test_status_cancel_and_confirm_are_supported(self):
         self.assertEqual(route_natural_agent("任务进度怎么样").action, "status")
+        self.assertEqual(route_natural_agent("刚才那个任务文件发了吗").action, "status")
+        self.assertEqual(route_natural_agent("上次任务结果送到了吗").action, "status")
         self.assertEqual(route_natural_agent("取消刚才的任务").action, "cancel")
         self.assertEqual(route_natural_agent("确认执行").action, "confirm")
+        self.assertEqual(route_natural_agent("继续执行").action, "confirm")
 
     def test_private_text_is_allowed_but_group_requires_real_at_self(self):
         self.assertEqual(

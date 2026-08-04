@@ -5,7 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-PLUGIN_DIR = Path(r"D:\Claudecoda学习\qqbot\astrbot\data\plugins\claude_code_agent")
+_PROJ_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_DIR = _PROJ_ROOT / "astrbot" / "data" / "plugins" / "claude_code_agent"
 sys.path.insert(0, str(PLUGIN_DIR))
 
 from encrypted_payload_store import (  # noqa: E402
