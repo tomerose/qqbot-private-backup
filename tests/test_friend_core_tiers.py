@@ -54,7 +54,7 @@ class FriendCoreTierTests(unittest.TestCase):
         plugin._group_help_llm = False
         return plugin
 
-    def test_voice_persona_uses_authoritative_tier(self):
+    def test_voice_persona_uses_authoritative_tier_for_memory_boundary(self):
         async def scenario():
             plugin = self._plugin()
             event = Event()
@@ -62,12 +62,12 @@ class FriendCoreTierTests(unittest.TestCase):
             request = SimpleNamespace(system_prompt="基础")
             with patch("friend_core.main.get_tier", return_value=Tier.X):
                 await plugin.inject_persona(event, request)
-            self.assertIn("【当前用户资格】X", request.system_prompt)
             self.assertIn("本人记忆来个性化", request.system_prompt)
+            self.assertNotIn("【当前用户资格】", request.system_prompt)
 
         asyncio.run(scenario())
 
-    def test_group_help_never_offers_a_capability_above_sender_tier(self):
+    def test_group_help_can_offer_a_clear_capability_to_all_members(self):
         async def collect(plugin, event):
             return [item async for item in plugin.offer_group_help(event)]
 
@@ -77,7 +77,14 @@ class FriendCoreTierTests(unittest.TestCase):
         )
         plugin = self._plugin()
         with patch("friend_core.main.get_tier", return_value=Tier.ORDINARY):
-            self.assertEqual(asyncio.run(collect(plugin, event)), [])
+            replies = asyncio.run(collect(plugin, event))
+        self.assertEqual(len(replies), 1)
+        self.assertIn("文件", replies[0])
+        event = Event(private=False, text="谁会处理这个表格文件，帮我看看")
+        event.extra["_context_aware_current_message_record"] = SimpleNamespace(
+            talking_to="group"
+        )
+        plugin = self._plugin()
         with patch("friend_core.main.get_tier", return_value=Tier.X):
             replies = asyncio.run(collect(plugin, event))
         self.assertEqual(len(replies), 1)

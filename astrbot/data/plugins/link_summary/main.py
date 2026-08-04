@@ -49,7 +49,6 @@ class LinkSummary(Star):
     async def on_message(self, event: AstrMessageEvent):
         text = self._msg(event)
 
-        # Group chat: require @mention, /summary, NL, or Pro group
         is_private = event.is_private_chat()
         has_nl = bool(_NL_SUMMARY.search(text))
         if not is_private:
@@ -62,7 +61,6 @@ class LinkSummary(Star):
 
         urls = URL_RE.findall(text)
         if not urls:
-            # NL trigger but no URL in this message — check reply for URL
             if has_nl or _is_public_read_command(text):
                 reply = getattr(event, "get_reply_obj", None)
                 if callable(reply):
@@ -85,7 +83,7 @@ class LinkSummary(Star):
                 requests.post,
                 PROXY,
                 json={
-                    "model": "gemini-3.5-flash",
+                    "model": "gemini-3.6-flash",
                     "url_context": True,
                     "google_search": True,
                     "messages": [

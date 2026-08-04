@@ -1,4 +1,4 @@
-"""Route chat to the low-cost Gemini Flash provider."""
+"""Route every ordinary chat through the local Gemini provider."""
 
 import asyncio
 import random
@@ -11,10 +11,14 @@ from astrbot.api.star import Context, Star
 
 # ── 群消息自动回复概率 ──────────────────────────────────────────
 # 仅对未 @mention、未被其他插件拦截的群聊消息生效。设为 0 关闭。
-GROUP_AUTO_REPLY_PROBABILITY = 0.15
+GROUP_AUTO_REPLY_PROBABILITY = 0.30
 
 # 高活跃群：主动回复概率更高，能帮上忙时积极展示能力
-_HIGH_ENGAGEMENT_GROUPS = {"945598390": 0.40}
+# 1058848055 是生米群——粉丝群气氛靠接话
+_HIGH_ENGAGEMENT_GROUPS = {
+    "945598390": 0.40,
+    "1058848055": 0.30,
+}
 # 高频聊天用户：这些用户的群消息更大概率触发回复
 _FREQUENT_CHATTERS = frozenset({
     "3431017350", "1410546630", "3174222673",
@@ -34,6 +38,29 @@ _URGENT_LANGUAGE_RE = re.compile(
     r"kill\s*myself|suicide)",
     re.IGNORECASE,
 )
+
+# Groups where questions always get a search-backed reply
+_SEARCH_GROUPS = frozenset({"500009290"})
+
+_QUESTION_RE = re.compile(
+    r"[？?]$|"
+    r"(?:什么|怎么|如何|为什么|为啥|谁|哪[个些种]?|多少|多久|几点|几时|"
+    r"行不行|好不好|对不对|可不可以|能不能|有没有|是不是|"
+    r"帮我查|帮我搜|帮我找|查一下|搜一下|找一下|"
+    r"是什么意思|是什么|怎么用|怎么做|怎么办|怎么弄|怎么搞|"
+    r"介绍|科普|解释|说说|讲讲|讲一下|说一下|"
+    r"推荐|建议|哪个好|应该|值得)",
+    re.IGNORECASE,
+)
+
+
+def _is_question(text: str) -> bool:
+    """Heuristic question detection for auto-search routing."""
+    if not text:
+        return False
+    if len(text) > 200:
+        return False  # 长文不是简单提问
+    return bool(_QUESTION_RE.search(text))
 
 
 class ChatRouter(Star):
@@ -133,7 +160,6 @@ class ChatRouter(Star):
         if not umo:
             return
 
-        group_id = str(getattr(event, "get_group_id", lambda: "")() or "").strip()
         target = "gemini-2.5-flash"
         if self._routes.get(umo) == target:
             return
@@ -163,6 +189,10 @@ class ChatRouter(Star):
         # ── per-group + per-user probability ──
         group_id = str(getattr(event, "get_group_id", lambda: "")() or "").strip()
         sender_id = str(getattr(event, "get_sender_id", lambda: "")() or "").strip()
+        # Questions in search groups always get a reply
+        text = str(getattr(event, "get_message_str", lambda: "")() or "")
+        if group_id in _SEARCH_GROUPS and _is_question(text):
+            return
         prob = float(GROUP_AUTO_REPLY_PROBABILITY)
         if sender_id in _HIGH_ENGAGEMENT_USERS:
             prob = _HIGH_ENGAGEMENT_USERS[sender_id]

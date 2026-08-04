@@ -17,6 +17,10 @@ from datetime import datetime, timezone
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
+try:
+    from xiaoning_runtime import is_weixin_private, private_user_key
+except ImportError:
+    from data.plugins.xiaoning_runtime import is_weixin_private, private_user_key
 
 try:
     from google.cloud import firestore
@@ -140,9 +144,9 @@ class CommitmentTracker:
         try:
             batch.commit()
         except Exception as e:
-            logger.debug(f"[CommitmentTracker] store fail {qq_id}: {e}")
+            logger.debug("[CommitmentTracker] store fail: %s", type(e).__name__)
             return 0
-        logger.info(f"[CommitmentTracker] {qq_id} +{len(promises)} 承诺")
+        logger.info("[CommitmentTracker] stored %d commitments", len(promises))
         return len(promises)
 
     # ── Retrieve & auto-expire ─────────────────────────────────────
@@ -157,7 +161,7 @@ class CommitmentTracker:
                 "created_at", direction="DESCENDING"
             ).stream()
         except Exception as e:
-            logger.debug(f"[CommitmentTracker] query fail {qq_id}: {e}")
+            logger.debug("[CommitmentTracker] query fail: %s", type(e).__name__)
             return []
 
         now = datetime.now(timezone.utc)
@@ -217,7 +221,7 @@ class CommitmentTracker:
             batch.commit()
         except Exception:
             return 0
-        logger.info(f"[CommitmentTracker] {qq_id} 兑现 {len(matched)} 条")
+        logger.info("[CommitmentTracker] fulfilled %d commitments", len(matched))
         return len(matched)
 
     # ── Injection ──────────────────────────────────────────────────
@@ -270,7 +274,7 @@ async def on_llm_request_extract(event: AstrMessageEvent, req) -> None:
     Also checks for time-based promises → schedules real Firestore-backed reminders.
     """
     tracker = get_tracker()
-    sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+    sender = private_user_key(event)
     if len(sender) < 5:
         return
 
@@ -302,9 +306,13 @@ async def on_llm_request_extract(event: AstrMessageEvent, req) -> None:
     if promises:
         tracker.store(sender, promises, context_msg[:80])
     elif following_up:
-        logger.info("[CommitmentTracker] %s 正在追问未兑现约定", sender)
+        logger.info("[CommitmentTracker] checking overdue commitments")
 
     # ── Time-based promise → scheduled action (Google ecosystem) ──
+    # Personal WeChat delivery is tied to a live context token.  Do not create
+    # a durable reminder until that transport has recipient-visible proof.
+    if is_weixin_private(event):
+        return
     try:
         from .scheduled_actions import extract_scheduled_action, get_store
         result = extract_scheduled_action(context_msg, last_assistant_text)
@@ -322,7 +330,7 @@ async def on_llm_request_inject(event: AstrMessageEvent, req) -> None:
     Runs at priority -6 (after persona -5, before memory -10).
     """
     tracker = get_tracker()
-    sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+    sender = private_user_key(event)
     if len(sender) < 5:
         return
     user_text = str(getattr(event, "get_message_str", lambda: "")() or "")

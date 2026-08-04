@@ -101,14 +101,14 @@ class DeliveryQueueTests(unittest.TestCase):
         entry = DeliveryEntry(
             sender_id="1211000567",
             job_id="task123",
-            task_desc="去除图片水印",
+            task_desc="编辑图片背景",
             task_owner="draw",
         )
 
         asyncio.run(queue._track_delivery_outcome(entry, "done", "qq:retry_queue"))
 
         queue._task_tracker.assert_called_once_with(
-            "1211000567", "task123", "去除图片水印", "done", "qq:retry_queue", "draw"
+            "1211000567", "task123", "编辑图片背景", "done", "qq:retry_queue", "draw"
         )
 
     def test_owner_handler_receives_final_queue_outcome(self):

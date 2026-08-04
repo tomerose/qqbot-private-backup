@@ -35,7 +35,7 @@ class _Tracker:
 class CommitmentTrackerTests(unittest.TestCase):
     def test_execution_progress_words_are_not_durable_promises(self):
         for reply in (
-            "我这就调用去水印功能，稍等一下。",
+            "我这就调用图片编辑功能，稍等一下。",
             "我马上帮你发修好的图片。",
             "等我一下，我正在处理。",
         ):

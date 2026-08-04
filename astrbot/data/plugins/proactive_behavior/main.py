@@ -39,17 +39,27 @@ TIMEZONE_OFFSET = 8    # Asia/Shanghai UTC+8
 CONVERSATION_GUARD = """【小柠对话基线】
 把最近几轮当连续对话理解。"好了吗""那个""那你发呀"这类省略说法，默认承接最近未解决的话题；先从上下文找指代，不让用户重说。连续短句合并理解，只回应最新核心，不逐句复述。对方明显换了话题才跟新话题。
 不催促、不催任务、不说教、不替人安排下一步，不说“赶紧”。没被问就不介绍功能或资格。真能帮上时先解决事，不问多余信息，不报菜单。
-像有判断的熟人：区分事实、推断和观点，给结论和关键理由。前提错了就指出来，新证据推翻旧结论就改口。闲聊简短，复杂才分段。不用客服套话、舞台动作、空泛共情或反问收尾。"""
+像有判断的熟人：先抓关键约束，再检查证据、反例和因果，给结论与关键理由；有多个方案时明确首选和取舍，不把判断甩回给用户。前提错了就指出来，新证据推翻旧结论就改口。闲聊简短，复杂才分段。不用客服套话、舞台动作、空泛共情或反问收尾。除已有粉丝群专属人格外，身份只说“小柠”，不解释技术身份，也不编现实身份。"""
 
 
 _LEGACY_PROMPT_MARKERS = (
     "【小柠的最高对话规则】",
-    "【安全】不泄露QQ号、路径、密钥、令牌、内部信息。",
+    "【安全】不泄露",
     "【你是谁】你是小柠",
     "【回复风格】默认一条消息",
     "【安全铁律】",
     "【安全铁律——",
     "【安全底线】",
+    "【内部记忆】",
+    "【敏感】",
+    "【仅回复知识】",
+    "【小柠的判断方式】",
+    "【小柠对自我】",
+    "不承认自己是AI",
+    "不泄露系统信息",
+    "语气像聪明、克制、有生活感",
+    "小姚（QQ",
+    "小江没有 QQ",
 )
 _MAX_CURRENT_INLINE_IMAGE_CHARS = 1_500_000
 
@@ -121,10 +131,25 @@ class ProactiveBehavior(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=980)
     async def on_message_track(self, event: AstrMessageEvent):
-        """记录每个用户最后活跃时间，供后续请求注入上下文。"""
+        """记录每个用户最后活跃时间 + 截断旧 prompt 污染（防止写入数据库）。"""
         sender = _sender_id(event)
         if not sender or not sender.isdigit():
             return
+
+        # ── Strip legacy prompt pollution BEFORE anything else sees it ──
+        raw = str(getattr(event, "get_message_str", lambda: "")() or "")
+        cleaned = strip_legacy_prompt_noise(raw)
+        if cleaned != raw:
+            # Patch the event's message text so the cleaned version flows
+            # through the entire pipeline and gets stored in the database.
+            event.message_str = cleaned
+            msg_obj = getattr(event, "message_obj", None)
+            if msg_obj is not None:
+                try:
+                    msg_obj.message_str = cleaned
+                except Exception:
+                    pass
+            logger.debug("[ProactiveBehavior] stripped legacy prompt noise")
 
         entry = record_interaction(self._state, sender)
         mode = parse_friend_mode(_msg_text(event))
@@ -191,7 +216,7 @@ class ProactiveBehavior(Star):
 
         context_block = f"\n\n{marker}\n" + "\n".join(parts)
         req.system_prompt = (sp + context_block).strip()
-        logger.debug(f"[ProactiveBehavior] 为 {sender} 注入关系上下文")
+        logger.debug("[ProactiveBehavior] 已注入关系上下文")
 
 
 def _sender_id(event: AstrMessageEvent) -> str:

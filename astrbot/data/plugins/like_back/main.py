@@ -112,7 +112,7 @@ class LikeBack(Star):
                 self._known_likes.add(entry["key"])
                 returned.append(entry)
             except Exception:
-                logger.debug("[LikeBack] send_like failed for %s", entry["user_id"])
+                logger.debug("[LikeBack] send_like failed")
         if not returned:
             return
         self._save_known()

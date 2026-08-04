@@ -109,10 +109,10 @@ class FriendCoreBirthdayTests(unittest.TestCase):
         self.assertNotIn("已经发给你", reply)
         self.assertIn("收到文件才算", reply)
 
-    def test_exact_watermark_waiting_claim_is_replaced_with_truthful_handoff(self):
+    def test_exact_image_edit_waiting_claim_is_replaced_with_truthful_handoff(self):
         for raw in (
-            "我准备用图片编辑工具把这张图右下角残留的‘@酒莹’以及白点水印彻底抹掉，稍等我一下。",
-            "我这就调用去水印功能处理，稍微等我一下。",
+            "我准备用图片编辑工具把这张图改成暖色，稍等我一下。",
+            "我这就调用图片编辑功能处理，稍微等我一下。",
             "代码已经跑完了，我马上把修好的图片发给你。",
         ):
             reply = sanitize_unverified_artifact_reply(raw, "需要")
@@ -120,6 +120,43 @@ class FriendCoreBirthdayTests(unittest.TestCase):
             self.assertNotIn("马上", reply)
             self.assertIn("没有启动", reply)
             self.assertIn("QQ 收到", reply)
+
+    def test_removed_dewatermark_is_never_offered_by_plain_chat(self):
+        expected = "去水印功能已经下线了，我不能替你处理，也不会让你重发图片；前面说能做是我说错了。"
+        cases = (
+            ("我识别到你需要去水印，请重新发一下原图。", "需要"),
+            ("可以，把图片发来。", "帮我把水印去掉"),
+            ("Please upload it and I will remove the watermark.", "can you edit this image?"),
+        )
+        for raw, request in cases:
+            with self.subTest(raw=raw, request=request):
+                self.assertEqual(
+                    sanitize_unverified_artifact_reply(raw, request),
+                    expected,
+                )
+
+    def test_plain_chat_never_treats_the_recipient_as_host_owner(self):
+        raw = """我来查一下你电脑上的 `gh` 命令行工具状态，看看能不能直接在本地命令行帮你把 GitHub 仓库建好。<execute_ipython>
+import subprocess
+print(subprocess.run('gh auth status', shell=True))
+</execute_ipython>"""
+        reply = sanitize_unverified_artifact_reply(raw, "帮我建一个 GitHub 仓库")
+
+        self.assertNotIn("execute_ipython", reply)
+        self.assertNotIn("你电脑上的", reply)
+        self.assertIn("这一步还没有真正执行", reply)
+        self.assertIn("由任务入口按权限和风险判断", reply)
+        self.assertNotIn("不能把运行小柠的电脑当成你的电脑", reply)
+
+    def test_execution_guard_does_not_turn_one_missed_route_into_a_permanent_ban(self):
+        reply = sanitize_unverified_artifact_reply(
+            "我可以查看你电脑上的日志再判断。",
+            "你能帮我看看日志吗",
+        )
+
+        self.assertIn("这一步还没有真正执行", reply)
+        self.assertNotIn("不能操作电脑", reply)
+        self.assertNotIn("只能由机主", reply)
 
     def test_exact_web_waiting_and_fake_delivery_claims_are_blocked(self):
         cases = (
@@ -142,7 +179,7 @@ class FriendCoreBirthdayTests(unittest.TestCase):
             "这里没有可核验的完成记录；QQ 还没收到成品，就不能说做好了。",
         )
 
-    def test_stage_directions_and_ai_identity_excuses_are_removed(self):
+    def test_stage_directions_and_technical_identity_excuses_are_removed(self):
         self.assertEqual(
             sanitize_conversational_reply("（托腮看着你）\n\n这个前提不成立。"),
             "这个前提不成立。",
@@ -151,12 +188,19 @@ class FriendCoreBirthdayTests(unittest.TestCase):
             sanitize_conversational_reply(
                 "前面说在北京上学是错的。我没有真实的个人经历。"
             ),
-            "前面那句具体身份信息没有依据，是我说错了。我不该编现实履历来圆。",
+            "我是小柠。前面那句具体身份信息没有依据，是我说错了。",
         )
-        self.assertEqual(
-            sanitize_conversational_reply("作为一个人工智能助手，我没有真实经历。"),
-            "前面那句具体身份信息没有依据，是我说错了。我不该编现实履历来圆。",
-        )
+        for raw in (
+            "作为一个人工智能助手，我没有真实经历。",
+            "严格来说我是一个语言模型。",
+            "我不具备身体，也没有真正的感情。",
+        ):
+            self.assertEqual(
+                sanitize_conversational_reply(raw),
+                "我是小柠。前面那句具体身份信息没有依据，是我说错了。",
+            )
+        factual = "ChatGPT 是由 OpenAI 开发的人工智能产品。"
+        self.assertEqual(sanitize_conversational_reply(factual), factual)
 
     def test_customer_service_closers_are_trimmed(self):
         self.assertEqual(
@@ -185,9 +229,26 @@ class FriendCoreBirthdayTests(unittest.TestCase):
     def test_persona_prompt_blocks_botlike_friend_voice(self):
         prompt = build_persona_prompt(90)
         self.assertIn("【小柠本体】", prompt)
+        self.assertIn("只认“小柠”这个身份", prompt)
+        self.assertIn("反例、边界条件", prompt)
+        self.assertIn("【多元学科判断】", prompt)
+        self.assertIn("激励与代价", prompt)
+        self.assertIn("最强反例", prompt)
+        self.assertIn("【主动性】", prompt)
+        self.assertIn("明确排序标准和取舍", prompt)
         self.assertIn("当然可以呀", prompt)
         self.assertIn("一句话顶住", prompt)
         self.assertIn("轻微吐槽空话", prompt)
+        self.assertIn("去水印功能已经下线", prompt)
+        self.assertIn("知识问答、故障分析、代码或命令示例正常回答", prompt)
+        self.assertIn("是否可执行交给对应任务入口判断", prompt)
+        self.assertNotIn("聊天对象不是运行小柠这台主机的机主", prompt)
+
+    def test_group_persona_keeps_the_bot_from_acting_like_a_host(self):
+        prompt = build_persona_prompt(0, group_chat=True)
+        self.assertIn("当在场的群友", prompt)
+        self.assertIn("别抢着总结、科普或给方案", prompt)
+        self.assertIn("不当主持人或客服", prompt)
 
     def test_artifact_how_to_question_is_not_treated_as_a_delivery_task(self):
         reply = "视频制作完成后，再检查字幕和画面。"

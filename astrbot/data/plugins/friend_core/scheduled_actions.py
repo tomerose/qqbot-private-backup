@@ -193,11 +193,10 @@ class ScheduledActionStore:
                 "status": "pending",
                 "created_at": datetime.now(timezone.utc),
             })
-            logger.info("[ScheduledAction] %s @ %s: %s", qq_id,
-                        fire_at.strftime("%m-%d %H:%M"), action_text[:50])
+            logger.info("[ScheduledAction] scheduled @ %s", fire_at.strftime("%m-%d %H:%M"))
             return True
         except Exception as e:
-            logger.debug("[ScheduledAction] store fail: %s", e)
+            logger.debug("[ScheduledAction] store fail: %s", type(e).__name__)
             return False
 
     def poll_and_execute(self) -> int:
@@ -229,11 +228,11 @@ class ScheduledActionStore:
                             )
                         doc.reference.update({"status": "done", "executed_at": now})
                         executed += 1
-                        logger.info("[ScheduledAction] FIRED %s: %s", qq_id, action_text[:50])
+                        logger.info("[ScheduledAction] FIRED")
                     except Exception as e:
-                        logger.debug("[ScheduledAction] execute fail: %s", e)
+                        logger.debug("[ScheduledAction] execute fail: %s", type(e).__name__)
         except Exception as e:
-            logger.debug("[ScheduledAction] poll fail: %s", e)
+            logger.debug("[ScheduledAction] poll fail: %s", type(e).__name__)
         return executed
 
     def cleanup_old(self, max_age_days: int = 7) -> int:

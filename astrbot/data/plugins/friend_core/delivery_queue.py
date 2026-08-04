@@ -126,7 +126,7 @@ class DeliveryQueue:
                 )
                 return cursor.lastrowid
         except Exception as e:
-            logger.warning("[DeliveryQueue] local enqueue failed: %s", e)
+            logger.warning("[DeliveryQueue] local enqueue failed: %s", type(e).__name__)
             return None
 
     def register_outcome_handler(self, owner: str, callback: Any) -> None:
@@ -147,9 +147,7 @@ class DeliveryQueue:
                 await result
         except Exception:
             logger.debug(
-                "[DeliveryQueue] owner outcome callback failed: %s/%s",
-                entry.task_owner,
-                entry.job_id,
+                "[DeliveryQueue] owner outcome callback failed",
             )
 
     @property
@@ -163,7 +161,7 @@ class DeliveryQueue:
                 project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE
             )
         except Exception as e:
-            logger.warning(f"[DeliveryQueue] Firestore连接失败: {e}")
+            logger.warning("[DeliveryQueue] Firestore连接失败: %s", type(e).__name__)
             return None
         return self._db
 
@@ -177,7 +175,7 @@ class DeliveryQueue:
         if not sender_id.isdigit():
             return None
         if not Path(local_path).is_file():
-            logger.warning("[DeliveryQueue] enqueue skipped: file missing %s", local_path)
+            logger.warning("[DeliveryQueue] enqueue skipped: file missing")
             return None
 
         # ── Local SQLite: always works, no network dependency ──
@@ -189,7 +187,7 @@ class DeliveryQueue:
         if row_id is None:
             return None
         local_doc_id = f"local-{row_id}"
-        logger.info("[DeliveryQueue] ENQUEUED(local) %s → QQ %s", file_name, sender_id)
+        logger.info("[DeliveryQueue] ENQUEUED(local)")
 
         # ── Firestore: best-effort mirror ──
         if self.db and sender_id.isdigit():
@@ -207,7 +205,7 @@ class DeliveryQueue:
                     "created_at": now,
                 })
             except Exception as e:
-                logger.debug("[DeliveryQueue] Firestore mirror skipped: %s", e)
+                logger.debug("[DeliveryQueue] Firestore mirror skipped: %s", type(e).__name__)
 
         return local_doc_id
 
@@ -241,7 +239,7 @@ class DeliveryQueue:
                     (status, retry_count, next_at, row_id),
                 )
         except Exception as e:
-            logger.debug("[DeliveryQueue] local update fail: %s", e)
+            logger.debug("[DeliveryQueue] local update fail: %s", type(e).__name__)
 
     def _local_cleanup(self, before_days: int = 7) -> None:
         import sqlite3
@@ -276,19 +274,17 @@ class DeliveryQueue:
             if success:
                 self._local_update_entry(row["id"], "delivered")
                 await self._track_delivery_outcome(entry, "done", "qq:retry_queue")
-                logger.info("[DeliveryQueue] DELIVERED(local) %s → QQ %s",
-                            entry.file_name, entry.sender_id)
+                logger.info("[DeliveryQueue] DELIVERED(local)")
             else:
                 new_count = entry.retry_count + 1
                 if new_count >= MAX_RETRIES:
                     self._local_update_entry(row["id"], "failed_permanent", new_count)
                     await self._track_delivery_outcome(entry, "failed", "delivery_retries_exhausted")
-                    logger.warning("[DeliveryQueue] FAILED(local) %s → QQ %s",
-                                   entry.file_name, entry.sender_id)
+                    logger.warning("[DeliveryQueue] FAILED(local)")
                 else:
                     next_at = now + BASE_DELAY_SECONDS * (2 ** new_count)
                     self._local_update_entry(row["id"], "pending", new_count, next_at)
-                    logger.info("[DeliveryQueue] RETRY(local) #%d %s", new_count, entry.file_name)
+                    logger.info("[DeliveryQueue] RETRY(local) #%d", new_count)
             processed += 1
 
         # ── Firestore entries (best-effort mirror) ──
@@ -306,8 +302,7 @@ class DeliveryQueue:
                         })
                         await self._track_delivery_outcome(entry, "done", "qq:retry_queue")
                         await self._notify_delivered(entry)
-                        logger.info("[DeliveryQueue] DELIVERED %s → QQ %s",
-                                    entry.file_name, entry.sender_id)
+                        logger.info("[DeliveryQueue] DELIVERED")
                     else:
                         new_count = entry.retry_count + 1
                         if new_count >= MAX_RETRIES:
@@ -317,17 +312,16 @@ class DeliveryQueue:
                             })
                             await self._track_delivery_outcome(entry, "failed", "delivery_retries_exhausted")
                             await self._notify_failed(entry)
-                            logger.warning("[DeliveryQueue] FAILED PERMANENT %s → QQ %s",
-                                           entry.file_name, entry.sender_id)
+                            logger.warning("[DeliveryQueue] FAILED PERMANENT")
                         else:
                             next_at = now + BASE_DELAY_SECONDS * (2 ** new_count)
                             await asyncio.to_thread(doc.reference.update, {
                                 "retry_count": new_count, "next_retry_at": next_at,
                             })
-                            logger.info("[DeliveryQueue] RETRY #%d %s", new_count, entry.file_name)
+                            logger.info("[DeliveryQueue] RETRY #%d", new_count)
                     processed += 1
             except Exception as e:
-                logger.debug("[DeliveryQueue] Firestore poll skipped: %s", e)
+                logger.debug("[DeliveryQueue] Firestore poll skipped: %s", type(e).__name__)
 
         # Periodic cleanup
         if processed > 0:
@@ -346,7 +340,7 @@ class DeliveryQueue:
                     if float((doc.to_dict() or {}).get("next_retry_at", 0)) <= now
                 ][:100]
             except Exception as exc:
-                logger.debug("[DeliveryQueue] collection-group query unavailable: %s", exc)
+                logger.debug("[DeliveryQueue] collection-group query unavailable: %s", type(exc).__name__)
 
         due: list[Any] = []
         for user_doc in self.db.collection("users").limit(500).stream():
@@ -382,7 +376,7 @@ class DeliveryQueue:
                 return bool(result)
             return False
         except Exception as e:
-            logger.debug("[DeliveryQueue] _try_deliver error: %s", e)
+            logger.debug("[DeliveryQueue] _try_deliver error: %s", type(e).__name__)
             return False
 
     async def _track_delivery_outcome(

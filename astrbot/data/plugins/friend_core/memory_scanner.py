@@ -28,6 +28,7 @@ PROXY_CHAT = "http://127.0.0.1:3000/v1/chat/completions"
 FIRESTORE_PROJECT = "solar-modem-496213-f5"
 FIRESTORE_DATABASE = "qqbot"
 SCAN_INTERVAL_SECONDS = 1800  # 30 minutes
+FIRESTORE_SCAN_TIMEOUT_SECONDS = 12
 
 # Prompt: extract time-sensitive events from memories
 EVENT_EXTRACTION_PROMPT = """分析以下用户的记忆列表。找出其中包含时间承诺/计划/事件/截止日的条目。
@@ -79,7 +80,7 @@ class MemoryScanner:
 
     async def scan_all_users(self) -> list[dict[str, Any]]:
         """Scan all users' memories, return list of check-in tasks to send now."""
-        if not self.db:
+        if firestore is None:
             return []
 
         now = time.time()
@@ -89,14 +90,15 @@ class MemoryScanner:
 
         tasks: list[dict[str, Any]] = []
         try:
-            users_ref = self.db.collection("users").stream()
-            for user_doc in users_ref:
-                qq_id = user_doc.id
-                memories = self._read_memories(qq_id)
-                if not memories:
-                    continue
+            snapshots = await asyncio.wait_for(
+                asyncio.to_thread(self._read_all_memories),
+                timeout=FIRESTORE_SCAN_TIMEOUT_SECONDS,
+            )
+            for qq_id, memories in snapshots:
                 user_tasks = await self._extract_events(qq_id, memories)
                 tasks.extend(user_tasks)
+        except TimeoutError:
+            logger.warning("[FriendCore] memory scan timed out")
         except Exception as e:
             logger.warning(f"[FriendCore] 记忆扫描异常: {e}")
 
@@ -108,6 +110,17 @@ class MemoryScanner:
             }
 
         return tasks
+
+    def _read_all_memories(self) -> list[tuple[str, list[dict]]]:
+        """Read Firestore snapshots outside AstrBot's event loop."""
+        if not self.db:
+            return []
+        snapshots = []
+        for user_doc in self.db.collection("users").stream():
+            memories = self._read_memories(user_doc.id)
+            if memories:
+                snapshots.append((user_doc.id, memories))
+        return snapshots
 
     def _read_memories(self, qq_id: str) -> list[dict]:
         """Read all memories for a user from Firestore."""
@@ -142,7 +155,7 @@ class MemoryScanner:
                 requests.post,
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-2.5-flash",
+                    "model": "gemini-3.6-flash",
                     "messages": [
                         {"role": "system", "content": EVENT_EXTRACTION_PROMPT},
                         {"role": "user", "content": memory_text[:3000]},
@@ -157,7 +170,7 @@ class MemoryScanner:
             if not isinstance(events, list):
                 return []
         except Exception as e:
-            logger.debug(f"[FriendCore] 事件提取失败 for {qq_id}: {e}")
+            logger.debug("[FriendCore] 事件提取失败: %s", type(e).__name__)
             return []
 
         # Filter: dedup + time-relevant + not already sent

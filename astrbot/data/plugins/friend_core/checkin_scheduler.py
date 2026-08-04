@@ -100,6 +100,6 @@ class CheckinScheduler:
                 return
             if await self._send_checkin_fn(qq_id, prompt):
                 self._scanner.mark_sent(qq_id, task["memory_key"])
-                logger.info(f"[FriendCore] 关怀已发送 → {qq_id}: {prompt[:40]}...")
+                logger.info("[FriendCore] 关怀已发送")
         except Exception as e:
-            logger.warning(f"[FriendCore] 关怀发送失败 {qq_id}: {e}")
+            logger.warning("[FriendCore] 关怀发送失败: %s", type(e).__name__)

@@ -1,4 +1,4 @@
 name: chat_router
-desc: Route private Pro chat to enhanced Gemini and all other chat to DeepSeek.
+desc: Route ordinary chat through the local Gemini provider.
 version: 1.0.0
 author: xiaoning

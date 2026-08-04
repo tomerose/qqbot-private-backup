@@ -30,7 +30,9 @@ except ImportError:
 from .checkin_scheduler import CheckinScheduler
 from .commitment_tracker import on_llm_request_extract, on_llm_request_inject
 from .persona_prompt import (
+    CHALLENGER_BLOCK,
     build_persona_prompt,
+    challenger_triggered,
     sanitize_conversational_reply,
     sanitize_unverified_artifact_reply,
 )
@@ -47,6 +49,10 @@ from .relationship_state import (
     record_proactive_send,
     save_state,
 )
+try:
+    from xiaoning_runtime import private_user_key
+except ImportError:
+    from data.plugins.xiaoning_runtime import private_user_key
 
 try:
     from draw_command.pro_access import Tier, get_tier
@@ -161,8 +167,6 @@ class FriendCore(Star):
 
     async def _send_memory_checkin(self, qq_id: str, message: str) -> bool:
         """Send a due memory check-in through the same opt-out and cooldown gate."""
-        if self._tier_for(qq_id) < Tier.X:
-            return False
         state_path = Path(StarTools.get_data_dir("proactive_behavior")) / "relationship_state.json"
         state = load_state(state_path)
         if not can_send_proactive(state, qq_id, 6 * 3600):
@@ -193,23 +197,19 @@ class FriendCore(Star):
         # Membership has one authority: the signed local X/Pro store.
         sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
         quiet_mode = self._quiet_mode_for(sender)
-        tier = self._tier_for(sender)
-        if tier == Tier.PRO:
-            tier_block = "\n\n【当前用户资格】Pro（邀请制）。使用 Pro 能力与额度；具体限制由对应功能执行。"
-        elif tier == Tier.X:
-            tier_block = "\n\n【当前用户资格】X（QQ 好友）。可使用个人长期记忆和 X 能力；具体额度由对应功能执行。"
-        else:
-            tier_block = "\n\n【当前用户资格】普通。可使用基础聊天、群上下文和标准语音；不得假装拥有 X/Pro 专属能力或个人长期记忆。"
+        # All users share the same persona — no tier blocks
 
         voice_block = ""
         if event.get_extra("voice_reply_requested", False):
             voice_block = (
                 "\n\n【本轮语音回复】直接回答当前消息，写成自然口语，不念菜单、路径或内部状态。"
             )
-            if tier >= Tier.X:
+            if self._tier_for(sender) >= Tier.X:
                 voice_block += "只可使用系统已注入且与当前话题相关的本人记忆来个性化，群聊中不得带出私密信息。"
             else:
                 voice_block += "普通用户只使用当前会话和本群公开上下文，不声称记得跨会话个人信息。"
+            if event.get_extra("voice_text_fallback", False):
+                voice_block += "当前是个人微信私聊，只能用文字作答；不得声称已经发送语音。"
 
         # Group follow-up: if this sender just @mentioned us, hint the bot to continue
         followup_block = ""
@@ -237,10 +237,11 @@ class FriendCore(Star):
                 pass
 
         warmth = 0.0 if quiet_mode else float(event.get_extra("_friend_warmth", 0) or 0)
-        persona_block = build_persona_prompt(warmth)
+        persona_block = build_persona_prompt(warmth, group_chat=not event.is_private_chat())
+        if challenger_triggered(event.get_message_str()):
+            persona_block += "\n\n" + CHALLENGER_BLOCK
         req.system_prompt = (
             sp
-            + tier_block
             + voice_block
             + followup_block
             + f"\n\n{PERSONA_MARKER}\n{persona_block}"
@@ -262,7 +263,10 @@ class FriendCore(Star):
         )
         if cleaned != original:
             resp.completion_text = cleaned
-            logger.warning("[FriendCore] blocked unverified local artifact reply")
+            logger.warning(
+                "[FriendCore] blocked artifact reply | req=%.80s | orig=%.80s",
+                request_text, original,
+            )
 
     # ── V3: Commitment tracking ────────────────────────────────────
 
@@ -288,7 +292,9 @@ class FriendCore(Star):
         )
         if not is_direct:
             return
-        sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+        sender = private_user_key(event) or str(
+            getattr(event, "get_sender_id", lambda: "")() or ""
+        )
         if not sender or len(sender) < 5:
             return
 
@@ -341,7 +347,7 @@ class FriendCore(Star):
             },
             merge=True,
         )
-        logger.info("[FriendCore] birthday saved for QQ %s", sender)
+        logger.info("[FriendCore] birthday saved")
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=991)
     async def birthday_gift_commands(self, event: AstrMessageEvent):
@@ -486,9 +492,6 @@ class FriendCore(Star):
         sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
         if self._quiet_mode_for(sender):
             return
-        if self._tier_for(sender).value not in decision.capability.tiers:
-            return
-
         # Per-group/per-user tuning: lower barrier for engaged groups and frequent chatters
         engaged = self._ENGAGED_GROUP_HELP.get(group_id, {})
         min_conf = engaged.get("min_confidence", 0.92)
@@ -533,7 +536,7 @@ class FriendCore(Star):
                 requests.post,
                 "http://127.0.0.1:3000/v1/chat/completions",
                 json={
-                    "model": "gemini-3.5-flash",
+                    "model": "gemini-3.6-flash",
                     "messages": [{"role": "user", "content": prompt}],
                     "response_json_schema": schema,
                     "temperature": 0,
@@ -726,25 +729,35 @@ class FriendCore(Star):
     async def _send_reminder_message(
         self, qq_id: str, message: str, *, sensitive: bool = False
     ) -> bool:
-        """Send a scheduled reminder to a user via private message."""
+        """Send a scheduled reminder through the private channel that owns it."""
         try:
+            user_key = str(qq_id or "").strip()
+            is_weixin = user_key.startswith("weixin_oc:")
+            target_id = user_key.removeprefix("weixin_oc:") if is_weixin else user_key
+            if not target_id:
+                return False
             origin = ""
             for inst in self.context.platform_manager.platform_insts:
                 meta = getattr(inst, "metadata", None)
-                if meta and hasattr(meta, "id"):
-                    origin = str(meta.id)
-                    break
+                name = str(getattr(meta, "name", "") or "").lower()
+                if not meta or not hasattr(meta, "id"):
+                    continue
+                if is_weixin and name != "weixin_oc":
+                    continue
+                if not is_weixin and name == "weixin_oc":
+                    continue
+                origin = str(meta.id)
+                break
             if not origin:
                 return False
             from astrbot.api.message_components import Plain
             from astrbot.core.message.message_event_result import MessageChain
-            session = f"{origin}:FriendMessage:{qq_id}"
+            session = f"{origin}:FriendMessage:{target_id}"
             await self.context.send_message(session, MessageChain([Plain(message)]))
-            preview = "[sensitive message omitted]" if sensitive else message[:60]
-            logger.info("[FriendCore] 消息已发送 %s: %s", qq_id, preview)
+            logger.info("[FriendCore] 消息已发送")
             return True
         except Exception as e:
-            logger.debug("[FriendCore] 消息发送失败 %s: %s", qq_id, e)
+            logger.debug("[FriendCore] 消息发送失败: %s", type(e).__name__)
             return False
 
     async def _napcat_deliver_file(self, *, local_path: str, file_name: str, kind: str,
@@ -779,7 +792,7 @@ class FriendCore(Star):
                         name=file_name,
                     )
                     if accepted(result):
-                        logger.info("[DeliveryQueue] upload_private_file OK: %s", file_name)
+                        logger.info("[DeliveryQueue] upload_private_file OK")
                         return True
                 except Exception:
                     pass
@@ -797,7 +810,7 @@ class FriendCore(Star):
                         name=file_name,
                     )
                     if accepted(result):
-                        logger.info("[DeliveryQueue] upload_group_file OK: %s", file_name)
+                        logger.info("[DeliveryQueue] upload_group_file OK")
                         return True
                 except Exception:
                     pass
@@ -852,4 +865,4 @@ class FriendCore(Star):
                 merge=True,
             )
         except Exception as e:
-            logger.debug(f"[FriendCore] 温度持久化失败 {qq_id}: {e}")
+            logger.debug("[FriendCore] 温度持久化失败: %s", type(e).__name__)

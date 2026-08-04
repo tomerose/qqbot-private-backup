@@ -49,7 +49,7 @@ def load_router():
 
 
 class ChatRouterTests(unittest.TestCase):
-    def test_every_group_and_private_chat_use_gemini_flash(self):
+    def test_group_and_private_chat_use_gemini(self):
         module = load_router()
         calls = []
         async def set_provider(provider, *_):
@@ -181,6 +181,33 @@ class ChatRouterTests(unittest.TestCase):
                 return False
 
         self.assertEqual(router._reply_coalesce_text(Event()), "")
+
+    def test_private_problem_solving_uses_the_single_chat_model(self):
+        module = load_router()
+        calls = []
+
+        async def set_provider(provider, *_args):
+            calls.append(provider)
+
+        router = module.ChatRouter(
+            types.SimpleNamespace(
+                provider_manager=types.SimpleNamespace(set_provider=set_provider)
+            )
+        )
+
+        class Event:
+            unified_msg_origin = "private-session"
+
+            @staticmethod
+            def get_group_id():
+                return ""
+
+            @staticmethod
+            def get_message_str():
+                return "帮我解这道数学题"
+
+        asyncio.run(router.route_provider(Event()))
+        self.assertEqual(calls, ["gemini-2.5-flash"])
 
 
 if __name__ == "__main__":

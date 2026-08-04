@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -35,6 +36,19 @@ class _Event:
         return {"retcode": 0}
 
 
+class _WeixinFailedEvent(_Event):
+    platform_meta = SimpleNamespace(name="weixin_oc")
+
+    def get_sender_id(self):
+        return "wxid_alice_123"
+
+    def is_private_chat(self):
+        return True
+
+    async def send(self, _chain):
+        raise RuntimeError("native WeChat delivery rejected")
+
+
 class RuntimeDeliveryFallbackTests(unittest.TestCase):
     def test_task_mirror_timeout_does_not_block_plugin_reply(self):
         async def slow_to_thread(*_args, **_kwargs):
@@ -62,6 +76,22 @@ class RuntimeDeliveryFallbackTests(unittest.TestCase):
             self.assertTrue(result.delivered)
             self.assertEqual(result.channel, "private_component")
             self.assertEqual(event.sent[0].chain[0].name, "result.txt")
+
+    def test_weixin_delivery_failure_is_retained_not_sent_to_qq_retry_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "result.txt"
+            artifact.write_text("ok", encoding="utf-8")
+
+            result = asyncio.run(
+                deliver_local_artifact(
+                    _WeixinFailedEvent(), artifact, allowed_roots=[root]
+                )
+            )
+
+            self.assertFalse(result.delivered)
+            self.assertEqual(result.channel, "retained")
+            self.assertEqual(result.error, "WeixinDeliveryUnavailable")
 
 
 if __name__ == "__main__":
