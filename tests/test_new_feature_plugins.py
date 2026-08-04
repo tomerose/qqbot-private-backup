@@ -119,14 +119,10 @@ class NewFeaturePluginTests(unittest.TestCase):
 
             pdf = pdf_module.PdfAnalysis.__new__(pdf_module.PdfAnalysis)
             pdf._pro_db = Path("unused.db")
-            pdf._daily_usage = {}
-            pdf._cooldowns = {}
             group_event = FakeEvent("/analysis summarize", origin="test:GroupMessage:12345678")
-            with patch.object(pdf_module, "get_tier", return_value=pdf_module.Tier.ORDINARY), patch.object(
-                pdf_module, "is_active_pro_group", return_value=False
-            ):
-                replies = await collect(pdf.on_message(group_event))
-            self.assertEqual(replies, [pdf_module.REQUIRED_MSG])
+            # 开放契约：无文件+群聊非 @ 直接 return，不再有 tier 拒绝
+            replies = await collect(pdf.on_message(group_event))
+            self.assertEqual(replies, [])
 
         asyncio.run(scenario())
 

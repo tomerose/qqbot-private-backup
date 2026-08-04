@@ -17,7 +17,6 @@ import json
 import os
 import re
 import subprocess
-import traceback
 import tempfile
 import time
 import uuid
@@ -49,8 +48,8 @@ except ImportError:
 PROXY_CHAT = "http://127.0.0.1:3000/v1/chat/completions"
 IMAGE_PROXY = "http://127.0.0.1:3000/v1/images/generations"
 PEXELS_BASE = "https://api.pexels.com/videos"
-DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+GEMINI_RETRY_URL = PROXY_CHAT
+GEMINI_RETRY_KEY = "sk-gemini-vertex"
 
 # TTS multi-voice mapping — edge-tts built-in voices, zero cost
 TTS_VOICES = {
@@ -205,7 +204,7 @@ def _generate_script(topic: str, max_duration: int, max_scenes: int) -> dict | N
             resp = requests.post(
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-2.5-flash",
+                "model": "gemini-3.6-flash",
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": f"主题：{topic}"},
@@ -226,7 +225,7 @@ def _generate_script(topic: str, max_duration: int, max_scenes: int) -> dict | N
                 raw = re.sub(r"\s*```\s*$", "", raw)
             raw = raw.strip()
             if not raw.startswith("{"):
-                logger.warning("[VideoAgent] unexpected script response: %s", raw[:200])
+                logger.warning("[VideoAgent] unexpected script response omitted")
                 continue
             parsed = json.loads(raw)
             if isinstance(parsed, dict) and parsed.get("scenes"):
@@ -586,17 +585,17 @@ def _simplify_query(query: str) -> str:
     return " ".join(words) if words else query
 
 
-def _generate_script_deepseek(topic: str, max_duration: int, max_scenes: int) -> dict | None:
-    """DeepSeek script generation — used as fallback when Gemini fails."""
-    if not DEEPSEEK_KEY:
+def _generate_script_retry(topic: str, max_duration: int, max_scenes: int) -> dict | None:
+    """Retry Gemini script generation once after an invalid response."""
+    if not GEMINI_RETRY_KEY:
         return None
     system = AGENT_SYSTEM.format(max_duration=max_duration, max_scenes=max_scenes)
     try:
         resp = requests.post(
-            DEEPSEEK_URL,
-            headers={"Authorization": f"Bearer {DEEPSEEK_KEY}"},
+            GEMINI_RETRY_URL,
+            headers={"Authorization": f"Bearer {GEMINI_RETRY_KEY}"},
             json={
-                "model": "deepseek-v4-flash",
+                "model": "gemini-3.6-flash",
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": f"主题：{topic}"},
@@ -623,16 +622,16 @@ def _generate_script_deepseek(topic: str, max_duration: int, max_scenes: int) ->
         return None
 
 
-def _review_script_deepseek(script: dict) -> dict | None:
-    """DeepSeek reviews script quality, returns {score:1-10, suggestions:[...]}."""
-    if not DEEPSEEK_KEY:
+def _review_script(script: dict) -> dict | None:
+    """Gemini reviews script quality, returning score and suggestions."""
+    if not GEMINI_RETRY_KEY:
         return None
     try:
         resp = requests.post(
-            DEEPSEEK_URL,
-            headers={"Authorization": f"Bearer {DEEPSEEK_KEY}"},
+            GEMINI_RETRY_URL,
+            headers={"Authorization": f"Bearer {GEMINI_RETRY_KEY}"},
             json={
-                "model": "deepseek-v4-flash",
+                "model": "gemini-3.6-flash",
                 "messages": [
                     {"role": "system", "content": (
                         "你是视频脚本审核专家。从吸引力、节奏、画面多样性、叙事连贯性四个维度"
@@ -658,15 +657,15 @@ def _review_script_deepseek(script: dict) -> dict | None:
 
 
 def _generate_script_v2(topic: str, max_duration: int, max_scenes: int) -> dict | None:
-    """Multi-model script: Gemini primary → DeepSeek review → fallback to DeepSeek."""
+    """Generate, review, and retry a script with Gemini."""
     draft = _generate_script(topic, max_duration, max_scenes)
     if not draft:
-        logger.info("[VideoAgent] Gemini script failed, fallback to DeepSeek")
-        return _generate_script_deepseek(topic, max_duration, max_scenes)
-    review = _review_script_deepseek(draft)
+        logger.info("[VideoAgent] Gemini script failed, retrying once")
+        return _generate_script_retry(topic, max_duration, max_scenes)
+    review = _review_script(draft)
     if review and review.get("score", 10) < 6:
-        logger.info("[VideoAgent] script score=%d < 6, retry with DeepSeek", review.get("score", 0))
-        retry = _generate_script_deepseek(topic, max_duration, max_scenes)
+        logger.info("[VideoAgent] script score=%d < 6, retrying", review.get("score", 0))
+        retry = _generate_script_retry(topic, max_duration, max_scenes)
         return retry if retry else draft
     return draft
 
@@ -705,13 +704,13 @@ def _search_multi_source(query: str, per_page: int = 3) -> list[str]:
         return urls
     cache_urls = _search_douyin_cache(query, per_page)
     if cache_urls:
-        logger.info("[VideoAgent] using douyin_cache for query=%r", query[:60])
+        logger.info("[VideoAgent] using douyin_cache: query_chars=%d", len(query))
         return cache_urls
     simplified = _simplify_query(query)
     if simplified != query:
         urls = _search_pexels(simplified, per_page)
         if urls:
-            logger.info("[VideoAgent] Pexels retry with simplified query=%r", simplified[:60])
+            logger.info("[VideoAgent] Pexels retry: query_chars=%d", len(simplified))
             return urls
     return []
 
@@ -967,7 +966,7 @@ class VideoAgent(Star):
         tier = get_tier(sender_id, self._pro_db_path())
         cfg = TIER_CONFIG.get(tier)
         if cfg is None:
-            logger.warning("[VideoAgent] unknown tier %s for sender %s", tier, sender_id)
+            logger.warning("[VideoAgent] unknown tier %s", tier)
             yield event.plain_result("权限查询异常，请稍后再试或发送 /pro status 确认。")
             event.stop_event()
             return
@@ -1019,7 +1018,7 @@ class VideoAgent(Star):
 
         try:
             async with self._lock:
-                # Step 1: Generate script (multi-model: Gemini → DeepSeek review → fallback)
+                # Step 1: Generate and review the script with Gemini.
                 script = await asyncio.to_thread(
                     _generate_script_v2, topic, max_dur, max_scenes
                 )
@@ -1130,7 +1129,7 @@ class VideoAgent(Star):
                 )
 
         except Exception as exc:
-            logger.warning("[VideoAgent] unexpected error: %s: %s\n%s", type(exc).__name__, exc, traceback.format_exc())
+            logger.warning("[VideoAgent] unexpected error: %s", type(exc).__name__)
             await mirror_runtime_task_status(
                 sender_id, task_id, task_desc, "failed", type(exc).__name__, owner="video_agent"
             )

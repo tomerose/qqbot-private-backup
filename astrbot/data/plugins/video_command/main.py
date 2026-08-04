@@ -38,21 +38,15 @@ except ImportError:
     )
 
 VIDEO_PROXY_URL = "http://127.0.0.1:3000/v1/videos/generations"
-VIDEO_DOWNLOAD_URL = "http://127.0.0.1:3000/v1/videos/download"
 SEARCH_PROXY_URL = "http://127.0.0.1:3000/v1/chat/completions"
 MAX_VIDEO_BYTES = 50 * 1024 * 1024
-VIDEO_X_DAILY = 1
-VIDEO_PRO_DAILY = 5
+VIDEO_DAILY = 2
 VIDEO_COOLDOWN = 180
-VIDEO_MAX_GEN_SECS = 4  # Veo Lite max
-VIDEO_MODEL_STANDARD = "veo-3.1-generate-001"
-VIDEO_MODEL_PRO_AUDIO = "veo-3.1-generate-001"  # PRO: Veo 3.1 full, audio, 8s
+VIDEO_MAX_GEN_SECS = 4
+VIDEO_MODEL = "veo-3.1-generate-001"
 VIDEO_LIMIT_MSG = "视频生成次数已用完（今日 {used}/{limit}）。明天自动重置。"
-VIDEO_PRO_LIMIT_MSG = "Pro视频生成次数已用完（今日 {used}/{limit}）。明天自动重置。"
-X_VIDEO_MESSAGE = "视频生成需要 X 或 Pro 资格。添加小柠为QQ好友即可获得X资格。"
 COOLDOWN_MSG = "视频生成冷却中，{retry} 秒后再试。"
-GENERATING_MSG_X = "视频生成中… Veo Lite 预计 3–8 分钟；QQ 视频文件成功交付后才会标记完成。"
-GENERATING_MSG_PRO = "视频生成中… Veo 3.1（含对话+音效+配乐）预计 3–8 分钟；QQ 视频文件成功交付后才会标记完成。"
+GENERATING_MSG = "视频生成中… Veo 预计 3–8 分钟；QQ 视频文件成功交付后才会标记完成。"
 SEARCHING_MSG = "正在搜索 B 站和抖音公开视频，预计 5–15 秒…"
 
 # Duration: "5s", "10秒", "1分钟", "30 sec", "2min"
@@ -236,7 +230,7 @@ def _classify_video_intent(text: str, prompt: str) -> str:
         resp = requests.post(
             SEARCH_PROXY_URL,
             json={
-                "model": "gemini-2.5-flash",
+                "model": "gemini-3.6-flash",
                 "messages": [{"role": "user", "content": classifier_prompt}],
                 "max_tokens": 10,
             },
@@ -274,7 +268,6 @@ def _parse_video_command(text: str) -> str | None:
     if lowered.startswith(("/做视频", "/制作视频", "/视频制作")):
         return None
 
-    # /command style
     for prefix in ("/video", "/生成视频", "/vid", "/生成sp", "/视频",
                    "/findvideo", "/findvid", "/搜视频", "/找视频"):
         if lowered.startswith(prefix):
@@ -285,8 +278,6 @@ def _parse_video_command(text: str) -> str | None:
                 return None
             return parts[1].strip()
 
-    # "用 AI 做……视频" is still a concrete Veo request.  Strip only the
-    # explicit AI prefix, then reuse the established natural-language parser.
     ai_prefix = re.match(
         r"^(?:小柠[，,\s]*)?(?:请|帮我|给我)?用\s*(?:ai|人工智能)\s*",
         raw,
@@ -296,79 +287,33 @@ def _parse_video_command(text: str) -> str | None:
         return None
     natural_raw = raw[ai_prefix.end():].strip() if ai_prefix else raw
 
-    # split pattern: verb ... content ... noun
-    m = _SPLIT_VIDEO.match(natural_raw)
-    if m:
-        prompt = m.group(1).strip()
-        _qonly = {"一个", "一段", "个", "段", "一块", "一部", "一支"}
-        if prompt in _qonly:
+    match = _SPLIT_VIDEO.match(natural_raw)
+    if match:
+        prompt = match.group(1).strip()
+        if prompt in {"一个", "一段", "个", "段", "一块", "一部", "一支"}:
             prompt = ""
-        if prompt and len(prompt) <= 800:
-            return prompt
-        if not prompt:
-            return ""
+        return prompt if len(prompt) <= 800 else None
 
-    # natural language: verb + noun together (original pattern)
-    m = _NATURAL_VIDEO.match(natural_raw)
-    if m:
-        prompt = (m.group(1) or "").strip()
+    match = _NATURAL_VIDEO.match(natural_raw)
+    if match:
+        prompt = (match.group(1) or "").strip()
         if _VIDEO_STATEMENT_TAIL.match(prompt):
             return None
-        if not prompt:
-            return ""
-        if len(prompt) > 800:
-            return None
-        return prompt
+        return prompt if len(prompt) <= 800 else None
 
-    # desire patterns: "我想要一个猫视频", "给我来段搞笑的视频", "看看搞笑视频 猫咪"
-    m = _DESIRE_VIDEO.match(raw)
-    if m:
-        before = (m.group(1) or "").strip()
-        after = (m.group(2) or "").strip()
-        prompt = _clean_desire_topic(f"{before} {after}".strip())
-        if not prompt:
-            return ""  # "我想要个视频" → show help
-        if len(prompt) > 800:
-            return None
-        return prompt
+    match = _DESIRE_VIDEO.match(raw)
+    if match:
+        prompt = _clean_desire_topic(f"{match.group(1) or ''} {match.group(2) or ''}".strip())
+        return prompt if len(prompt) <= 800 else None
 
-    # mid-topic: "我要看视频 海边", "来一段视频 猫咪"
-    m = _DESIRE_VIDEO_MID.match(raw)
-    if m:
-        prompt = _clean_desire_topic((m.group(1) or "").strip())
-        if prompt and len(prompt) <= 800:
-            return prompt
-        if not prompt:
-            return ""
+    match = _DESIRE_VIDEO_MID.match(raw) or _BARE_VIDEO.match(raw)
+    if match:
+        prompt = _clean_desire_topic((match.group(1) or "").strip())
+        return prompt if len(prompt) <= 800 else None
 
-    # capability questions: "你能做视频吗", "可以做视频吗 猫在跑"
-    m = _CAN_VIDEO.match(raw)
-    if m:
-        prompt = _clean_desire_topic((m.group(1) or "").strip())
-        if _VIDEO_STATEMENT_TAIL.match(prompt):
-            return None  # "做视频很难" → not a request
-        if not prompt:
-            return ""  # "你能做视频吗" → show help
-        if len(prompt) > 800:
-            return None
-        return prompt
-
-    # bare video patterns: "来个视频 猫", "整一个视频xxx"
-    m = _BARE_VIDEO.match(raw)
-    if m:
-        prompt = _clean_desire_topic(m.group(1).strip())
-        if prompt and len(prompt) <= 800:
-            return prompt
-        if not prompt:
-            return ""
-
-    # search-only: user said "找视频 xxx" without a generate verb
     if _has_search_intent(raw):
-        rest = _SEARCH_INTENT_RE.sub("", raw, count=1).strip()
-        rest = _clean_natural_search_query(rest)
-        if rest and len(rest) <= 800:
-            return rest
-        return ""  # show help
+        prompt = _clean_natural_search_query(_SEARCH_INTENT_RE.sub("", raw, count=1).strip())
+        return prompt if len(prompt) <= 800 else None
 
     return None
 
@@ -456,7 +401,7 @@ class VideoCommand(Star):
             response = requests.post(
                 SEARCH_PROXY_URL,
                 json={
-                    "model": "gemini-2.5-flash-search",
+                    "model": "gemini-3.6-flash-search",
                     "google_search": True,
                     "max_tokens": 400,
                     "messages": [{
@@ -557,27 +502,6 @@ class VideoCommand(Star):
             pass
         return f"没有找到与「{query}」相关的视频，换个关键词试试。", []
 
-    def _try_download_video(self, url: str) -> tuple[bytes, str] | None:
-        """Try to download a video URL via proxy. Returns (bytes, mime) or None."""
-        try:
-            resp = requests.post(
-                VIDEO_DOWNLOAD_URL,
-                json={"url": url},
-                timeout=(15, 120),
-            )
-            resp.raise_for_status()
-            body = resp.json()
-            b64 = body.get("b64_json")
-            mime = str(body.get("mime_type", "")).lower()
-            if not b64 or not mime.startswith("video/"):
-                return None
-            data = base64.b64decode(b64, validate=True)
-            if not data or len(data) > MAX_VIDEO_BYTES:
-                return None
-            return data, mime
-        except (requests.RequestException, ValueError, TypeError, json.JSONDecodeError):
-            return None
-
     def _save_video(self, payload: bytes, ext: str) -> Path:
         self._output_root.mkdir(parents=True, exist_ok=True)
         target = self._output_root / f"video-{uuid.uuid4().hex}{ext}"
@@ -608,9 +532,6 @@ class VideoCommand(Star):
         text = str(getattr(event, "get_message_str", lambda: "")() or "")
         prompt = _parse_video_command(text)
         if prompt is None or not (event.is_private_chat() or event.is_at_or_wake_command):
-            lowered = text.lower()
-            if prompt is None and any(kw in lowered for kw in ("视频", "video", "生成", "制作", "短片", "动画")):
-                logger.info("[VideoCmd] SKIP text=%r", text[:120])
             return
         sender_id = self._sender(event)
         if not sender_id.isdigit():
@@ -664,24 +585,24 @@ class VideoCommand(Star):
                     from data.plugins.video_agent.main import _parse_agent_command
                 agent_topic = _parse_agent_command(text)
                 if agent_topic is not None:
-                    logger.info("[VideoCmd] ROUTE to agent: dur=%s ai=%s text=%r",
-                                 dur_val, is_ai_intent, text[:120])
+                    logger.info("[VideoCmd] ROUTE to agent: dur=%s ai=%s chars=%d",
+                                 dur_val, is_ai_intent, len(text))
                     return
                 # Agent can't handle → use LLM to decide: generate or search?
                 llm_intent = await asyncio.to_thread(_classify_video_intent, text, prompt)
                 if llm_intent == "generate":
                     use_ai_video = True
-                    logger.info("[VideoCmd] LLM classified as generate: text=%r", text[:120])
+                    logger.info("[VideoCmd] LLM classified as generate: chars=%d", len(text))
                 elif llm_intent == "search":
                     search_mode = True
-                    logger.info("[VideoCmd] LLM classified as search: text=%r", text[:120])
+                    logger.info("[VideoCmd] LLM classified as search: chars=%d", len(text))
                 elif llm_intent == "chat":
-                    logger.info("[VideoCmd] LLM classified as chat, passing: text=%r", text[:120])
+                    logger.info("[VideoCmd] LLM classified as chat, passing: chars=%d", len(text))
                     return  # let normal chat handle it
                 else:
                     # LLM uncertain → default to search
                     search_mode = True
-                    logger.info("[VideoCmd] LLM uncertain, fallback search: text=%r", text[:120])
+                    logger.info("[VideoCmd] LLM uncertain, fallback search: chars=%d", len(text))
             else:
                 # Desire/capability/bare patterns → use LLM to decide
                 llm_intent = await asyncio.to_thread(_classify_video_intent, text, prompt)
@@ -695,7 +616,13 @@ class VideoCommand(Star):
         if search_mode:
             aspect = "16:9"
             yield event.plain_result(SEARCHING_MSG)
-            text, _ = await asyncio.to_thread(self._search_videos, clean_prompt)
+            try:
+                text, _ = await asyncio.to_thread(self._search_videos, clean_prompt)
+            except Exception as exc:
+                logger.warning("[VideoCmd] search failed: %s", type(exc).__name__)
+                yield event.plain_result("视频搜索暂时失败，请稍后再试或换个关键词。")
+                event.stop_event()
+                return
             # Search pages are links, not reliable media files. Downloading them
             # here caused long Bilibili 412 retries and prevented a QQ reply.
             yield event.plain_result(
@@ -705,34 +632,14 @@ class VideoCommand(Star):
             event.stop_event()
             return
 
-        if tier < Tier.X:
-            # ── Regular user: no AI video gen, redirect to agent ──
-            yield event.plain_result(
-                "🎬 AI 视频生成需要 X 或 Pro 资格。\n"
-                "添加小柠为 QQ 好友即可自动获得 X资格。\n"
-                f"也可以免费使用 /做视频 <主题> — 自动脚本+素材+配音+字幕合成完整短片。"
-            )
+        # ── Unified video gen for all users ──────────────────────
+        today = time.strftime("%Y%m%d")
+        dk = f"{sender_id}:{today}"
+        used = self._daily_usage.get(dk, 0)
+        if used >= VIDEO_DAILY:
+            yield event.plain_result(VIDEO_LIMIT_MSG.format(used=used, limit=VIDEO_DAILY))
             event.stop_event()
             return
-
-        # ── X/Pro: Veo via proxy ──────────────────────────────────
-        if tier >= Tier.PRO:
-            # PRO: 5/day
-            dk = f"{sender_id}:{time.strftime('%Y%m%d')}"
-            used = self._daily_usage.get(dk, 0)
-            if used >= VIDEO_PRO_DAILY:
-                yield event.plain_result(VIDEO_PRO_LIMIT_MSG.format(used=used, limit=VIDEO_PRO_DAILY))
-                event.stop_event()
-                return
-        else:
-            # X: 3/day
-            today = time.strftime("%Y%m%d")
-            dk = f"{sender_id}:{today}"
-            used = self._daily_usage.get(dk, 0)
-            if used >= VIDEO_X_DAILY:
-                yield event.plain_result(VIDEO_LIMIT_MSG.format(used=used, limit=VIDEO_X_DAILY))
-                event.stop_event()
-                return
 
         now = time.monotonic()
         cooldown_until = self._cooldowns.get(sender_id, 0)
@@ -752,13 +659,12 @@ class VideoCommand(Star):
         await mirror_runtime_task_status(
             sender_id, task_id, task_desc, "in_progress", "veo_started", owner="video"
         )
-        yield event.plain_result(GENERATING_MSG_PRO if tier >= Tier.PRO else GENERATING_MSG_X)
+        yield event.plain_result(GENERATING_MSG)
 
         try:
             async with self._generation_lock:
-                # PRO: Veo 3 audio 8s; non-PRO: Veo 3.1 Lite 4s
-                model = VIDEO_MODEL_PRO_AUDIO if tier >= Tier.PRO else ""
-                duration = 8 if tier >= Tier.PRO else 4
+                model = VIDEO_MODEL
+                duration = 4
                 payload, mime, ext = await asyncio.to_thread(
                     self._request_video, clean_prompt, model, duration, aspect
                 )
@@ -801,8 +707,7 @@ class VideoCommand(Star):
                 "private": "已发送到当前私聊",
                 "private_component": "已发送到当前私聊",
             }.get(delivery.channel, "已发送")
-            audio_note = "（含音频）" if tier >= Tier.PRO else ""
-            yield event.plain_result(f"视频{audio_note}已生成，{suffix}：{output_path.name}")
+            yield event.plain_result(f"视频已生成，{suffix}：{output_path.name}")
         else:
             await mirror_runtime_task_status(
                 sender_id, task_id, task_desc, "delivery_pending", delivery.channel, owner="video"

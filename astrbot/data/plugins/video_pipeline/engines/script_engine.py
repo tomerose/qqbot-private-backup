@@ -1,4 +1,4 @@
-"""Multi-model script generation with peer review."""
+"""Gemini script generation with peer review."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from dataclasses import dataclass, field
 import requests
 
 PROXY_CHAT = "http://127.0.0.1:3000/v1/chat/completions"
-DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+GEMINI_RETRY_URL = PROXY_CHAT
 import os
-DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+GEMINI_RETRY_KEY = "sk-gemini-vertex"
 
 
 @dataclass
@@ -74,7 +74,7 @@ passed 为 true 当 score >= 6。只返回 JSON。"""
 
 
 class ScriptEngine:
-    """Multi-model script generation: Gemini → DeepSeek review → retry if needed."""
+    """Gemini script generation with one review and retry."""
 
     def generate(self, topic: str, max_duration: int = 60,
                  max_scenes: int = 6, template_hint: str = "") -> Script | None:
@@ -85,17 +85,15 @@ class ScriptEngine:
         # Step 1: Gemini generates draft
         draft = self._call_gemini(system, topic)
         if not draft:
-            # Fallback to DeepSeek
-            draft = self._call_deepseek(system, topic)
+            draft = self._call_gemini_retry(system, topic)
             if not draft:
                 return None
             return self._parse_script(draft)
 
-        # Step 2: DeepSeek review
+        # Step 2: Gemini review
         review = self._review(draft)
         if review and review.score < 6:
-            # Retry with DeepSeek
-            retry = self._call_deepseek(system, topic)
+            retry = self._call_gemini_retry(system, topic)
             if retry:
                 retry_script = self._parse_script(retry)
                 if retry_script:
@@ -108,7 +106,7 @@ class ScriptEngine:
             resp = requests.post(
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-2.5-flash",
+                    "model": "gemini-3.6-flash",
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": f"主题：{topic}"},
@@ -124,15 +122,15 @@ class ScriptEngine:
         except Exception:
             return None
 
-    def _call_deepseek(self, system: str, topic: str) -> dict | None:
-        if not DEEPSEEK_KEY:
+    def _call_gemini_retry(self, system: str, topic: str) -> dict | None:
+        if not GEMINI_RETRY_KEY:
             return None
         try:
             resp = requests.post(
-                DEEPSEEK_URL,
-                headers={"Authorization": f"Bearer {DEEPSEEK_KEY}"},
+                GEMINI_RETRY_URL,
+                headers={"Authorization": f"Bearer {GEMINI_RETRY_KEY}"},
                 json={
-                    "model": "deepseek-v4-flash",
+                    "model": "gemini-3.6-flash",
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": f"主题：{topic}"},
@@ -150,14 +148,14 @@ class ScriptEngine:
             return None
 
     def _review(self, raw_script: dict) -> ScriptReview | None:
-        if not DEEPSEEK_KEY:
+        if not GEMINI_RETRY_KEY:
             return None
         try:
             resp = requests.post(
-                DEEPSEEK_URL,
-                headers={"Authorization": f"Bearer {DEEPSEEK_KEY}"},
+                GEMINI_RETRY_URL,
+                headers={"Authorization": f"Bearer {GEMINI_RETRY_KEY}"},
                 json={
-                    "model": "deepseek-v4-flash",
+                    "model": "gemini-3.6-flash",
                     "messages": [
                         {"role": "system", "content": REVIEW_PROMPT},
                         {"role": "user", "content": json.dumps(raw_script, ensure_ascii=False)},

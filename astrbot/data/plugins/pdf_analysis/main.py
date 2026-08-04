@@ -1,4 +1,4 @@
-"""Document analysis — pypdf for text PDFs, Gemini vision fallback for scanned. Pro-gated."""
+"""Document analysis — pypdf for text PDFs, Gemini vision fallback for scanned. Open access."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import asyncio
 import base64
 import io
 import re
-import time
 from pathlib import Path
 
 import requests
@@ -18,28 +17,11 @@ try:
 except ImportError:
     from data.plugins.xiaoning_runtime import chat_response_content, defer_stop_event
 
-try:
-    from draw_command.pro_access import get_tier, is_active_pro_group, Tier
-except ImportError:
-    from data.plugins.draw_command.pro_access import get_tier, is_active_pro_group, Tier
-
-PROXY = "http://127.0.0.1:3000/v1/chat/completions"
+PROXY ="http://127.0.0.1:3000/v1/chat/completions"
 MAX_CHARS = 40_000
 MAX_PDF_PAGES = 50
 MIN_TEXT_LENGTH = 50  # below this, treat PDF as scanned
 SCANNED_RENDER_PAGES = 3
-COOLDOWN_SECONDS = 60
-PRO_DAILY_LIMIT = 10
-REQUIRED_MSG = "文件分析需要 X 或 Pro 资格。添加小柠为 QQ 好友即可获得 X 资格。"
-PRO_MSG = "PDF 分析次数已用完（今日 {used}/{limit}）。请联系管理员获取更多次数。"
-
-_NATURAL_ANALYSIS = re.compile(
-    r"(?:小柠[，,：:\s]*)?(?:帮我|请|给我|来|麻烦)?\s*"
-    r"(?:分析|看看|读读|读一下|看一下|解释|解读|总结|概括|整理)"
-    r"(?:一下|这个|那个|这篇|这份)?"
-    r"(?:文档|文件|PDF|文章|报告|论文|合同|协议|材料|内容|文本)",
-    re.I,
-)
 
 SYSTEM_PROMPT = "你是一个专业的文档分析助手。用中文直接输出分析结果，不要尝试执行代码或调用工具。"
 
@@ -53,9 +35,6 @@ class PdfAnalysis(Star):
             project_root / "astrbot" / "data" / "plugin_data"
             / "xiaoning_pro" / "pro_members.db"
         )
-        self._cooldowns: dict[str, float] = {}
-        self._daily_usage: dict[str, int] = {}
-
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=960)
     @defer_stop_event
     async def on_message(self, event: AstrMessageEvent):
@@ -76,42 +55,14 @@ class PdfAnalysis(Star):
             prompt_override = ""
         has_prompt = bool(prompt_override)
 
-        natural_intent = bool(_NATURAL_ANALYSIS.search(text)) if not files and not has_prompt else False
-
-        if not files and not has_prompt and not natural_intent:
+        if not files and not has_prompt:
             return
         if not (event.is_private_chat() or event.is_at_or_wake_command):
             return
         event.stop_event()
 
-        if natural_intent and not files:
-            yield event.plain_result(
-                "📄 把文件发给我就行——支持 PDF、DOCX、图片、TXT、MD、代码文件。"
-                "\n也可以直接发 /analysis + 你的分析要求。"
-            )
+        if not files:
             return
-
-        tier = get_tier(sender_id, self._pro_db)
-        today = time.strftime("%Y%m%d")
-        dk = f"{sender_id}:{today}"
-        used = self._daily_usage.get(dk, 0)
-        group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
-        in_pro_group = bool(group_id) and is_active_pro_group(group_id, self._pro_db)
-        if tier < Tier.X and not in_pro_group:
-            yield event.plain_result(REQUIRED_MSG)
-            return
-        limit = PRO_DAILY_LIMIT
-        if used >= limit:
-            yield event.plain_result(PRO_MSG.format(used=used, limit=limit))
-            return
-
-        now = time.time()
-        last = self._cooldowns.get(sender_id, 0)
-        if now - last < COOLDOWN_SECONDS:
-            remain = int(COOLDOWN_SECONDS - (now - last))
-            yield event.plain_result(f"请 {remain} 秒后再试。")
-            return
-        self._cooldowns[sender_id] = now
 
         content = ""
         source_name = ""
@@ -280,7 +231,7 @@ class PdfAnalysis(Star):
                 requests.post,
                 PROXY,
                 json={
-                    "model": "gemini-2.5-flash",
+                    "model": "gemini-3.6-flash",
                     "messages": [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_message},
@@ -294,7 +245,6 @@ class PdfAnalysis(Star):
             yield event.plain_result(f"分析服务暂时不可用：{str(exc) or type(exc).__name__}")
             return
 
-        self._daily_usage[dk] = used + 1
         yield event.plain_result(result)
 
     @staticmethod

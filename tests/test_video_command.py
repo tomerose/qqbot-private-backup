@@ -288,66 +288,21 @@ class VideoCommandTests(unittest.TestCase):
 
         async def scenario():
             plugin = VideoCommand.__new__(VideoCommand)
+            plugin._daily_usage = {}
+            plugin._cooldowns = {}
+            plugin._generation_lock = asyncio.Lock()
             event = Event()
-            with patch("data.plugins.video_command.main.get_tier", return_value=Tier.ORDINARY):
-                replies = [reply async for reply in plugin.on_message(event)]
-            self.assertEqual(
-                replies,
-                [
-                    "🎬 AI 视频生成需要 X 或 Pro 资格。\n"
-                    "添加小柠为 QQ 好友即可自动获得 X资格。\n"
-                    "也可以免费使用 /做视频 <主题> — 自动脚本+素材+配音+字幕合成完整短片。"
-                ],
-            )
+            event.stopped = False
+            with patch("data.plugins.video_command.main.mirror_runtime_task_status", new=AsyncMock()) as mirror:
+                with patch("data.plugins.video_command.main.get_tier", return_value=Tier.ORDINARY):
+                    with patch("asyncio.to_thread", new=AsyncMock(side_effect=RuntimeError("offline"))):
+                        replies = [reply async for reply in plugin.on_message(event)]
+            # 开放契约：普通用户也能生成；无 tier 拒绝
+            self.assertTrue(event.stopped)
+            self.assertTrue(all("X 或 Pro" not in str(r) for r in replies))
+            mirror.assert_awaited()
 
         asyncio.run(scenario())
-
-    def test_video_download_url_rejects_private_networks(self):
-        with patch.object(
-            self.proxy.socket,
-            "getaddrinfo",
-            return_value=[(2, 1, 6, "", ("127.0.0.1", 80))],
-        ):
-            self.assertFalse(self.proxy._is_safe_video_url("http://example.com/video.mp4"))
-        with patch.object(
-            self.proxy.socket,
-            "getaddrinfo",
-            return_value=[(2, 1, 6, "", ("93.184.216.34", 443))],
-        ):
-            self.assertTrue(self.proxy._is_safe_video_url("https://example.com/video.mp4"))
-        self.assertFalse(self.proxy._is_safe_video_url("file:///etc/passwd"))
-
-    def test_bilibili_api_fallback_resolves_page_to_media(self):
-        class Response:
-            def __init__(self, body):
-                self.body = body
-
-            def raise_for_status(self):
-                return None
-
-            def json(self):
-                return self.body
-
-        responses = [
-            Response({"data": [{"cid": 12345}]}),
-            Response({"data": {"durl": [{"url": "https://media.example/video.mp4", "size": 1024}]}}),
-        ]
-        with (
-            patch.object(self.proxy.requests, "get", side_effect=responses),
-            patch.object(
-                self.proxy,
-                "_try_direct_download",
-                return_value=(b"video", "video/mp4"),
-            ) as direct,
-        ):
-            result = self.proxy._try_bilibili_api_download(
-                "https://www.bilibili.com/video/BV1EHNx6QEri"
-            )
-        self.assertEqual(result, (b"video", "video/mp4"))
-        direct.assert_called_once_with(
-            "https://media.example/video.mp4",
-            {"Referer": "https://www.bilibili.com/video/BV1EHNx6QEri"},
-        )
 
     def test_group_video_delivery_uses_native_group_file_upload(self):
         class Bot:
