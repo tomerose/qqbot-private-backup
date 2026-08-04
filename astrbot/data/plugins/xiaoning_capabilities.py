@@ -25,7 +25,7 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability("research", "search_command", ("x", "pro"), ("深度研究", "比较", "对比", "旅行规划", "行动包"), "帮我比较 A 和 B 并给出决策报告", "/research", "这个我能做成有来源的研究报告并作为 QQ 文件发回来。", (".md",), True),
     Capability("document", "claude_code_agent", ("x", "pro"), ("Word", "PDF", "PPT", "表格", "报告", "文档", "文件"), "帮我做一份暑假计划 Word", "/agent run", "这个我能直接做成目标文件；说清用途和内容，QQ 收到文件才算完成。", (".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".md"), True),
     Capability("draw", "draw_command", ("ordinary", "x", "pro"), ("画图", "作图", "绘图", "海报", "头像", "图片"), "帮我画一只雨夜霓虹下的黑猫", "/draw", "这个我能直接画；把主体、风格和画幅说清楚就行。", (".png", ".jpg", ".webp"), True),
-    Capability("image_edit", "draw_command", ("ordinary", "x", "pro"), ("去水印", "改图", "编辑图片", "重画", "去字幕", "抹掉水印"), "回复图片说：去水印，抹掉右下角的字", "/edit", "这个我能直接处理；原图和要求可分两条相邻消息发送，QQ 收到新图片才算完成。", (".png",), True),
+    Capability("image_edit", "draw_command", ("ordinary", "x", "pro"), ("改图", "编辑图片", "重画", "去字幕", "换背景", "调整图片"), "回复图片说：把这张图改成暖色背景", "/edit", "这个我能直接处理；原图和要求可分两条相邻消息发送，QQ 收到新图片才算完成。", (".png",), True),
     Capability("custom_draw", "custom_draw", ("pro",), ("定制图", "人工画", "人工绘制"), "帮我定制一张穿西装的猫油画", "/定制图", "这个会建立可跨对话恢复的人工待办，管理员回图且 QQ 真实转发后才算完成。", (".png", ".jpg", ".webp"), True),
     Capability("video_generate", "video_command", ("x", "pro"), ("生成视频", "AI视频", "Veo", "生成短片", "生成动画"), "帮我生成一段海边日落短片", "/video", "这个我能生成原创 AI 视频文件；说清画面、比例和节奏就行。", (".mp4", ".gif"), True),
     Capability("video_production", "video_agent", ("x", "pro"), ("做视频", "制作视频", "视频Agent", "完整短片"), "帮我做一段如何在家做拿铁的视频", "/做视频", "这个会走脚本、素材、配音和字幕的完整制作链路，QQ 收到视频才算完成。", (".mp4",), True),
@@ -66,11 +66,11 @@ def match_capability(text: object, *, proactive_only: bool = False) -> Capabilit
     )
 
 
-def capability_prompt_block() -> str:
+def capability_prompt_block(*, delivery_channel: str = "QQ") -> str:
     lines = ["【可执行能力目录】需求明确时直接交给所有者功能，不要只口头承诺："]
     for item in CAPABILITIES:
         suffix = (
-            f"；成品={','.join(item.artifacts)}，必须QQ交付"
+            f"；成品={','.join(item.artifacts)}，必须{delivery_channel}交付"
             if item.artifacts
             else ""
         )

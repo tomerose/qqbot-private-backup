@@ -15,7 +15,7 @@ PLUGINS_DIR = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "plugin
 sys.path.insert(0, str(PLUGINS_DIR))
 
 from draw_command.draw_core import DrawRateLimiter, parse_draw_command  # noqa: E402
-from draw_command.main import DRAW_MEMORY, DrawCommand  # noqa: E402
+from draw_command.main import DrawCommand  # noqa: E402
 from draw_command.edit_sessions import ImageEditSessionStore  # noqa: E402
 from draw_command.pro_client import ProClient  # noqa: E402
 from draw_command import main as draw_main  # noqa: E402
@@ -92,7 +92,7 @@ class DrawPluginTests(unittest.TestCase):
         with patch.object(draw_main.requests, "post", return_value=Response()) as post:
             self.assertEqual(plugin._request_image("draw a cat"), b"png")
 
-        self.assertEqual(post.call_args.kwargs["json"]["model"], "gemini-3.1-flash-image")
+        self.assertEqual(post.call_args.kwargs["json"]["model"], "gemini-3-pro-image")
 
     def test_clear_natural_drawing_request_is_supported(self):
         self.assertEqual(parse_draw_command("帮我画一张雨夜城市海报"), "雨夜城市海报")
@@ -143,7 +143,7 @@ class DrawPluginTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_image_first_short_confirmation_does_not_start_dewatermark(self):
+    def test_removed_watermark_request_never_runs_the_editor(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self.build_plugin(Path(tmp) / "draws")
@@ -151,109 +151,19 @@ class DrawPluginTests(unittest.TestCase):
                 buffer = io.BytesIO()
                 image.save(buffer, format="PNG")
                 encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-                plugin._request_edit = lambda *_args: self.fail("short confirmation must not edit")
+                plugin._request_edit = lambda *_args: self.fail("removed feature must not run")
                 plugin._deliver_image = AsyncMock()
-                image_event = FakeEvent("", "1211000567")
+                event = FakeEvent("去水印", "1211000567")
                 with patch.object(plugin, "_get_referenced_image_base64", return_value=encoded):
-                    self.assertEqual(await collect(plugin.on_message(image_event)), [])
+                    replies = await collect(plugin.on_message(event))
 
-                confirm_event = FakeEvent("需要", "1211000567")
-                with patch.object(plugin, "_get_referenced_image_base64", return_value=None):
-                    replies = await collect(plugin.on_message(confirm_event))
-
-                self.assertFalse(confirm_event.stopped)
+                self.assertFalse(event.stopped)
                 self.assertEqual(replies, [])
                 plugin._deliver_image.assert_not_awaited()
 
         asyncio.run(scenario())
 
-    def test_same_turn_typoed_dewatermark_runs_tool_and_delivers(self):
-        async def scenario():
-            with tempfile.TemporaryDirectory() as tmp:
-                plugin = self.build_plugin(Path(tmp) / "draws")
-                image = PillowImage.new("RGB", (8, 8), "white")
-                buffer = io.BytesIO()
-                image.save(buffer, format="PNG")
-                encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-                plugin._request_edit = lambda image_b64, prompt: buffer.getvalue()
-                plugin._deliver_image = AsyncMock(
-                    return_value=ArtifactDeliveryResult(True, "private_component")
-                )
-                event = FakeEvent("去s水印", "1211000567")
-
-                with patch.object(plugin, "_get_referenced_image_base64", return_value=encoded):
-                    replies = await collect(plugin.on_message(event))
-
-                self.assertTrue(event.stopped)
-                self.assertIn("去水印任务已开始", replies[0][1])
-                self.assertIn("文件已交付", replies[-1][1])
-                plugin._deliver_image.assert_awaited_once()
-
-        asyncio.run(scenario())
-
-    def test_same_turn_dewatermark_reads_image_from_event_messages(self):
-        async def scenario():
-            with tempfile.TemporaryDirectory() as tmp:
-                plugin = self.build_plugin(Path(tmp) / "draws")
-                image = PillowImage.new("RGB", (8, 8), "white")
-                buffer = io.BytesIO()
-                image.save(buffer, format="PNG")
-                encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-                seen = {}
-
-                def edit(image_b64, _prompt):
-                    seen["image_b64"] = image_b64
-                    return buffer.getvalue()
-
-                plugin._request_edit = edit
-                plugin._deliver_image = AsyncMock(
-                    return_value=ArtifactDeliveryResult(True, "private_component")
-                )
-                event = FakeEvent("\u53bb\u6c34\u5370", "1211000567")
-                event.message_chain = [
-                    type(
-                        "ImageSeg",
-                        (),
-                        {"type": "image", "data": {"url": "base64://" + encoded}},
-                    )()
-                ]
-
-                replies = await collect(plugin.on_message(event))
-
-                self.assertTrue(event.stopped)
-                self.assertEqual(seen["image_b64"], encoded)
-                self.assertGreaterEqual(len(replies), 2)
-                plugin._deliver_image.assert_awaited_once()
-
-        asyncio.run(scenario())
-
-    def test_image_first_then_explicit_dewatermark_runs_tool(self):
-        async def scenario():
-            with tempfile.TemporaryDirectory() as tmp:
-                plugin = self.build_plugin(Path(tmp) / "draws")
-                image = PillowImage.new("RGB", (8, 8), "white")
-                buffer = io.BytesIO()
-                image.save(buffer, format="PNG")
-                encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-                plugin._request_edit = lambda image_b64, prompt: buffer.getvalue()
-                plugin._deliver_image = AsyncMock(
-                    return_value=ArtifactDeliveryResult(True, "private_component")
-                )
-                image_event = FakeEvent("", "1211000567")
-                with patch.object(plugin, "_get_referenced_image_base64", return_value=encoded):
-                    self.assertEqual(await collect(plugin.on_message(image_event)), [])
-
-                intent_event = FakeEvent("去水印", "1211000567")
-                with patch.object(plugin, "_get_referenced_image_base64", return_value=None):
-                    replies = await collect(plugin.on_message(intent_event))
-
-                self.assertTrue(intent_event.stopped)
-                self.assertIn("去水印任务已开始", replies[0][1])
-                self.assertIn("文件已交付", replies[-1][1])
-
-        asyncio.run(scenario())
-
-    def test_intent_first_then_image_executes_without_another_confirmation(self):
+    def test_generic_edit_intent_first_then_image_still_executes(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self.build_plugin(Path(tmp) / "draws")
@@ -267,30 +177,16 @@ class DrawPluginTests(unittest.TestCase):
                     return ArtifactDeliveryResult(True, "private_component")
 
                 plugin._deliver_image = delivered
-                intent_event = FakeEvent("去水印", "1211000567")
+                intent_event = FakeEvent("/edit 改成蓝色背景", "1211000567")
                 with patch.object(plugin, "_get_referenced_image_base64", return_value=None):
                     waiting = await collect(plugin.on_message(intent_event))
-                self.assertIn("已记住去水印要求", waiting[0][1])
+                self.assertIn("已记住修改要求", waiting[0][1])
 
                 image_event = FakeEvent("", "1211000567")
                 with patch.object(plugin, "_get_referenced_image_base64", return_value=encoded):
                     replies = await collect(plugin.on_message(image_event))
-                self.assertIn("去水印任务已开始", replies[0][1])
+                self.assertIn("正在编辑图片", replies[0][1])
                 self.assertIn("文件已交付", replies[-1][1])
-
-        asyncio.run(scenario())
-
-    def test_draw_memory_exposes_the_same_limit_to_ordinary_and_go(self):
-        class Request:
-            system_prompt = "原始人设"
-
-        async def scenario():
-            plugin = DrawCommand.__new__(DrawCommand)
-            request = Request()
-            await plugin.inject_draw_memory(object(), request)
-            await plugin.inject_draw_memory(object(), request)
-            self.assertIn(DRAW_MEMORY, request.system_prompt)
-            self.assertEqual(request.system_prompt.count("【作图能力】"), 1)
 
         asyncio.run(scenario())
 
@@ -362,7 +258,7 @@ class DrawPluginTests(unittest.TestCase):
 
                 replies = await collect(plugin.on_message(FakeEvent("/draw a cat", "2000000000")))
 
-                self.assertEqual(replies[0], ("plain", "我开始画了，预计 30–120 秒。"))
+                self.assertEqual(replies[0], ("plain", "我开始画了（Imagen 3），预计 30–120 秒。"))
                 self.assertEqual(replies[-1][0], "plain")
                 self.assertIn("图片已生成", replies[-1][1])
 
@@ -381,7 +277,7 @@ class DrawPluginTests(unittest.TestCase):
                 replies = await collect(plugin.on_message(event))
 
                 self.assertTrue(event.stopped)
-                self.assertEqual(replies[0], ("plain", "我开始画了，预计 30–120 秒。"))
+                self.assertEqual(replies[0], ("plain", "我开始画了（Imagen 3），预计 30–120 秒。"))
                 self.assertEqual(replies[-1][0], "plain")
                 self.assertIn("图片已生成", replies[-1][1])
 
@@ -393,12 +289,12 @@ class DrawPluginTests(unittest.TestCase):
                 plugin = self.build_plugin(Path(tmp))
                 sender = "2000000000"
                 day = time.strftime("%Y%m%d")
-                plugin._daily_usage[f"{sender}:{day}"] = 1
+                plugin._daily_usage[f"{sender}:{day}"] = 3
                 plugin._request_image = lambda *_args: self.fail("quota should stop before proxy")
 
                 replies = await collect(plugin.on_message(FakeEvent("/draw a cat", sender)))
 
-                self.assertEqual(replies, [("plain", "作图次数已用完（今日 1/1）。添加小柠为QQ好友获得X资格可享每天1次。")])
+                self.assertEqual(replies, [("plain", "作图次数已用完（今日 3/3）。明天自动重置。")])
 
         asyncio.run(scenario())
 

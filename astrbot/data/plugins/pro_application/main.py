@@ -201,7 +201,7 @@ class ProApplication(Star):
                     await self.context.send_message(session, MessageChain([Plain(full_msg)]))
                     sent_count += 1
                 except Exception:
-                    logger.debug(f"[Pro] 发送总结给 {qq_id} 失败")
+                    logger.debug("[Pro] 发送总结失败")
 
             logger.info(f"[Pro] 每日总结已发送给 {sent_count}/{len(pro_qqs)} 位 Pro 用户")
             return f"总结已发送给 {sent_count} 位 Pro 用户"
@@ -318,7 +318,7 @@ class ProApplication(Star):
         try:
             state, _ = self.store.claim_friend_x(sender_id, now=self._clock())
             if state == "granted":
-                logger.info("[Pro] 即时X授予: %s", sender_id)
+                logger.info("[Pro] 即时X授予")
                 asyncio.create_task(self._notify_x_granted(sender_id))
         except Exception:
             pass
@@ -349,7 +349,7 @@ class ProApplication(Star):
                 "就像跟朋友聊天一样，有什么需要直接说就行～"
             )
             await self.context.send_message(session, MessageChain([Plain(msg)]))
-            logger.info("[Pro] X资格通知已发送: %s", qq_id)
+            logger.info("[Pro] X资格通知已发送")
         except Exception:
             pass
 
@@ -669,7 +669,7 @@ class ProApplication(Star):
                     entry["days"], entry["expires_at"], False,
                 )
                 self._save_invites(store)
-                logger.warning("[Pro] Invite grant rejected: %s", str(error))
+                logger.warning("[Pro] Invite grant rejected")
                 return False, "开通失败，请稍后重试。"
         label = "X" if entry["tier"] == "x" else "Pro"
         return True, (
@@ -933,6 +933,8 @@ class ProApplication(Star):
             if action == "grant" and len(tokens) in {2, 3}:
                 self._check_auth(sender_id, now)
                 days = int(tokens[2]) if len(tokens) == 3 and tokens[2].isdigit() else 30
+                max_days = 90 if raw_text.lower().startswith("/x") else 365
+                days = max(1, min(days, max_days))
                 tier = "x" if raw_text.lower().startswith("/x") else "pro"
                 self.store.grant(tokens[1], sender_id, days, now=now, tier=tier)
                 label = "X" if tier == "x" else "Pro"

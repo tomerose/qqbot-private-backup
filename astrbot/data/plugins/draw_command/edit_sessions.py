@@ -90,7 +90,7 @@ class ImageEditSessionStore:
         self._write_meta(scope, data)
 
     def remember_intent(self, scope: str, kind: str, prompt: str) -> None:
-        if kind not in {"edit", "dewatermark"}:
+        if kind != "edit":
             raise ValueError("unsupported edit intent")
         data = self._read_meta(scope)
         data.update({"intent_kind": kind, "intent_prompt": str(prompt or "")[:500]})

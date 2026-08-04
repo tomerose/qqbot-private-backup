@@ -23,8 +23,6 @@ from .draw_core import (
     parse_draw_command,
     parse_edit_command,
     parse_draw_options,
-    is_dewatermark_request,
-    _DEWATERMARK_PROMPT,
 )
 from .pro_access import get_tier, is_active_pro_group, Tier
 from .pro_client import ProClient
@@ -73,41 +71,20 @@ QQ_IMAGE_HOSTS = frozenset(
         "c2cpicdw.qpic.cn",
     }
 )
-DRAW_PRO_DAILY = 10
-DRAW_X_DAILY = 1
-DRAW_ORDINARY_DAILY = 1
+DRAW_DAILY = 3
 DRAW_LIMIT_MSG = "作图次数已用完（今日 {used}/{limit}）。明天自动重置。"
-DRAW_ORDINARY_LIMIT_MSG = "作图次数已用完（今日 {used}/{limit}）。添加小柠为QQ好友获得X资格可享每天1次。"
-# XY/PRO → Gemini 3 Pro Image (Nano Banana Pro); ordinary → Gemini Flash Image (Nano Banana 2)
-PRO_IMAGE_MODEL = "gemini-3-pro-image"       # X/Pro — best quality, 4K capable
-X_IMAGE_MODEL  = "gemini-3.1-flash-image"    # ordinary — fast, 14 reference images
-DRAW_MEMORY = (
-    "【作图能力】所有用户都可使用 /draw 或自然语言作图。普通用户每天 1 次；X资格每天 1 次；Pro 每天 10 次+定制图 1次/天。"
-    "画幅控制：--9:16 --16:9 --1:1 --2:3 --3:2。多图：--2 到 --4 并行出图。"
-    "风格预设：--style photo/anime/product/illustration/cinematic/watercolor/oil。"
-    "Pro专属4K：描述后加 --4k 出 4096x4096 超高清（消耗3次普通用量）。"
-    "参考图模式：回复一张图片加描述，保持画风/角色一致继续出图。"
-    "图片编辑：回复图片说「把这张图改成xxx」或使用 /edit 命令。"
-    "去水印：回复图片说「去水印」或「把右下角的@画师小尾巴抹掉」。"
-    "只在用户明确要求画图或编辑图片时触发，不承诺生成失败的结果。"
-)
-
+# All users get the same best-quality model
+DRAW_MODEL = "gemini-3-pro-image"
 _EDIT_CONFIRM_RE = re.compile(
     r"^(?:需要|要|是|是的|对|对的|好|好的|可以|确认|确定|开始吧|处理吧|这张|就这张|"
     r"(?:现在)?(?:修|弄|处理|去|抹)好了?(?:吗|没|没有)?|"
     r"还没(?:修|弄|处理|去)好(?:吗|嘛)?|怎么还没好|"
     r"(?:你)?(?:还)?没(?:发|传)(?:出来|给我|成功)?(?:吗|呀|啊)?|"
     r"(?:重新|再)(?:发|传|处理|弄)(?:一下|一次|出来)?|"
-    r"继续(?:处理|去水印|弄)?)[。！!？?呀啊嘛呢\s]*$",
+    r"继续(?:处理|弄)?)[。！!？?呀啊嘛呢\s]*$",
     re.I,
 )
 _EDIT_CANCEL_RE = re.compile(r"^(?:取消|算了|不用了|别弄了|停止)[。！!\s]*$", re.I)
-# Short removal request + image present → default to dewatermark
-_SHORT_REMOVE = re.compile(
-    r".*(?:去掉|弄掉|删掉|抹掉|擦掉|p掉|搞掉|去了|去除|移除|消除|清除|不要|不想看到|"
-    r"帮我弄|帮我去|帮我删|帮我抹|帮我擦|帮我p|帮忙去|帮忙弄|把.{0,4}(?:去掉|弄掉|删掉|抹掉|擦掉|p掉)).*",
-    re.I,
-)
 
 
 class DrawCommand(Star):
@@ -170,14 +147,10 @@ class DrawCommand(Star):
         return f"group:{group}:{sender}" if group else f"private:{sender}"
 
     def _draw_rate_limit(self, tier: Tier, sender_id: str, in_pro_group: bool) -> tuple[int, str, int]:
-        """Return (limit, cache_key, current_usage) for the given tier."""
+        """Return (limit, cache_key, current_usage). Unified for all users."""
         today = time.strftime("%Y%m%d")
         dk = f"{sender_id}:{today}"
-        if tier >= Tier.PRO or in_pro_group:
-            return DRAW_PRO_DAILY, dk, self._daily_usage.get(dk, 0)
-        if tier >= Tier.X:
-            return DRAW_X_DAILY, dk, self._daily_usage.get(dk, 0)
-        return DRAW_ORDINARY_DAILY, dk, self._daily_usage.get(dk, 0)
+        return DRAW_DAILY, dk, self._daily_usage.get(dk, 0)
 
     def _load_usage(self) -> dict[str, int]:
         import json
@@ -219,7 +192,7 @@ class DrawCommand(Star):
                        image_size: str = "2K") -> bytes:
         size_map = {"1:1": "1024x1024", "16:9": "1024x576", "9:16": "576x1024", "2:3": "1024x1536", "3:2": "1536x1024"}
         size = size_map.get(aspect, "1024x1024")
-        chosen_model = model or X_IMAGE_MODEL
+        chosen_model = model or DRAW_MODEL
         prompt = f"{prompt}, masterpiece, highly detailed, professional quality, sharp focus"
         response = requests.post(
             DRAW_PROXY_URL,
@@ -425,12 +398,6 @@ class DrawCommand(Star):
             return None
         return _extract_from_message(reply)
 
-    @filter.on_llm_request(priority=-19)
-    async def inject_draw_memory(self, event: AstrMessageEvent, req) -> None:
-        system_prompt = str(getattr(req, "system_prompt", "") or "")
-        if "【作图能力】" not in system_prompt:
-            req.system_prompt = f"{system_prompt}\n\n{DRAW_MEMORY}".strip()
-
     # Image edits own their explicit intent before generic vision/search plugins.
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=986)
     async def on_message(self, event: AstrMessageEvent):
@@ -458,24 +425,18 @@ class DrawCommand(Star):
             session = self._edit_sessions.get(scope)
             edit_prompt = parse_edit_command(text)
             edit_kind = None
-            if is_dewatermark_request(text):
-                edit_kind, edit_prompt = "dewatermark", _DEWATERMARK_PROMPT
-            elif edit_prompt is not None:
+            if edit_prompt is not None:
                 edit_kind = "edit"
             elif session.intent_kind and _EDIT_CONFIRM_RE.fullmatch(text.strip()):
                 edit_kind = session.intent_kind
-                edit_prompt = session.intent_prompt or _DEWATERMARK_PROMPT
+                edit_prompt = session.intent_prompt
             elif (
                 ref_img
                 and session.intent_kind
                 and text.strip() in {"", "[图片]", "图片", "这张"}
             ):
                 edit_kind = session.intent_kind
-                edit_prompt = session.intent_prompt or _DEWATERMARK_PROMPT
-            elif ref_img and not edit_prompt and _SHORT_REMOVE.match(text.strip()):
-                # Image sent + short removal request ("帮我把这个弄掉") →
-                # default to dewatermark even if explicit keyword didn't match
-                edit_kind, edit_prompt = "dewatermark", _DEWATERMARK_PROMPT
+                edit_prompt = session.intent_prompt
 
             if edit_kind:
                 self._edit_sessions.remember_intent(scope, edit_kind, edit_prompt or "")
@@ -499,12 +460,9 @@ class DrawCommand(Star):
             today = time.strftime("%Y%m%d")
             dk = f"{sender_id}:{today}"
             limit, key, used = self._draw_rate_limit(tier, sender_id, in_pro_group)
-            is_weekly = tier >= Tier.X and tier < Tier.PRO and not in_pro_group
+            is_weekly = False
             if used >= limit:
-                msg = DRAW_WEEKLY_LIMIT_MSG if is_weekly else (
-                    DRAW_ORDINARY_LIMIT_MSG if tier < Tier.X else DRAW_LIMIT_MSG
-                )
-                yield event.plain_result(msg.format(used=used, limit=limit))
+                yield event.plain_result(DRAW_LIMIT_MSG.format(used=used, limit=limit))
                 event.stop_event()
                 return
             if self._generation_lock.locked():
@@ -543,6 +501,8 @@ class DrawCommand(Star):
                         sender_id, task_id, task_desc, "done", f"qq:{delivery.channel}", owner="draw"
                     )
                     self._edit_sessions.clear(scope)
+                    self._daily_usage[key] = used + 1
+                    self._save_usage()
                     event.set_extra("_pro_draw_output_paths", [str(output_path)])
                     yield event.plain_result(f"图片编辑任务已完成，文件已交付：{output_path.name}")
                 else:
@@ -563,62 +523,6 @@ class DrawCommand(Star):
             event.stop_event()
             return
 
-        # ── Watermark Removal ──────────────────────────────────────
-        if edit_kind == "dewatermark":
-            if not ref_img:
-                yield event.plain_result("已记住去水印要求。请把原图发来，或回复那张图；收到图片后才会开始处理。")
-                event.stop_event()
-                return
-            if self._generation_lock.locked():
-                yield event.plain_result("我正在处理一张图，等这张发出后再试。")
-                event.stop_event()
-                return
-            retry_after = self._rate_limiter.try_acquire(sender_id)
-            if retry_after:
-                yield event.plain_result(f"冷却中，{retry_after} 秒后再试。")
-                event.stop_event()
-                return
-            task_id = uuid.uuid4().hex[:12]
-            task_desc = "去除图片水印并交付新图片"
-            await mirror_runtime_task_status(
-                sender_id, task_id, task_desc, "in_progress", "dewatermark_started", owner="draw"
-            )
-            yield event.plain_result("去水印任务已开始，预计 30–90 秒；QQ 文件成功交付后才会标记完成。")
-            try:
-                async with self._generation_lock:
-                    payload = await asyncio.to_thread(self._request_edit, ref_img, _DEWATERMARK_PROMPT)
-                    output_path = self._save_sanitized_image(payload)
-            except Exception as exc:
-                logger.warning("[Draw] dewatermark failed")
-                await mirror_runtime_task_status(
-                    sender_id, task_id, task_desc, "failed", type(exc).__name__, owner="draw"
-                )
-                yield event.plain_result("去水印没成功，换个方式帮你。")
-                # fall through to Agent
-            delivery = await self._deliver_image(
-                event, output_path, task_id=task_id, task_desc=task_desc
-            )
-            if delivery.delivered:
-                await mirror_runtime_task_status(
-                    sender_id, task_id, task_desc, "done", f"qq:{delivery.channel}", owner="draw"
-                )
-                self._edit_sessions.clear(scope)
-                event.set_extra("_pro_draw_output_paths", [str(output_path)])
-                yield event.plain_result(f"去水印任务已完成，文件已交付：{output_path.name}")
-            else:
-                await mirror_runtime_task_status(
-                    sender_id, task_id, task_desc, "delivery_pending", delivery.channel, owner="draw"
-                )
-                self._edit_sessions.clear(scope)
-                retry_note = (
-                    "已加入后台重试队列，稍后自动送达。"
-                    if delivery.channel == "queued"
-                    else "文件已安全保留，请稍后重试。"
-                )
-                yield event.plain_result(f"图片已处理，但 QQ 文件尚未交付，任务未完成；{retry_note}")
-            event.stop_event()
-            return
-
         # ── Image Generation ───────────────────────────────────────
         try:
             prompt = parse_draw_command(text)
@@ -633,14 +537,10 @@ class DrawCommand(Star):
         group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
         in_pro_group = bool(group_id) and is_active_pro_group(group_id, self._pro_db_path)
         tier = get_tier(sender_id, self._pro_db_path)
-        # Tiered drawing limits: ORDINARY=1/day, X=6/week, PRO=10/day
+        # Unified drawing limits for all users
         limit, key, used = self._draw_rate_limit(tier, sender_id, in_pro_group)
-        is_weekly = tier >= Tier.X and tier < Tier.PRO and not in_pro_group
         if used >= limit:
-            msg = DRAW_WEEKLY_LIMIT_MSG if is_weekly else (
-                DRAW_ORDINARY_LIMIT_MSG if tier < Tier.X else DRAW_LIMIT_MSG
-            )
-            yield event.plain_result(msg.format(used=used, limit=limit))
+            yield event.plain_result(DRAW_LIMIT_MSG.format(used=used, limit=limit))
             event.stop_event()
             return
         retry_after = self._rate_limiter.try_acquire(sender_id)
@@ -649,21 +549,16 @@ class DrawCommand(Star):
             event.stop_event()
             return
 
-        # X/PRO→Gemini 3 Pro Image (high-quality); ordinary→Gemini Flash
-        is_pro_quality = tier >= Tier.X
-        draw_model = PRO_IMAGE_MODEL if is_pro_quality else X_IMAGE_MODEL
+        # All users get best quality model
+        draw_model = DRAW_MODEL
 
         prompt, aspect, n_images, is_4k, style_prefix = parse_draw_options(prompt)
 
-        # P1: 4K — PRO exclusive, costs 3× quota
+        # 4K available to all users, costs 2× quota
         image_size = "2K"
-        if is_4k and (is_pro_quality or in_pro_group):
+        if is_4k:
             image_size = "4K"
             n_images = 1  # 4K only single image
-        elif is_4k:
-            yield event.plain_result("4K 画质仅限 PRO 用户。已按 2K 生成。")
-            event.stop_event()
-            return
 
         # P2: style preset
         if style_prefix:
@@ -692,7 +587,7 @@ class DrawCommand(Star):
         k4_label = " 4K" if is_4k else ""
         ref_label = " (参考图)" if has_ref else ""
         style_label = f" ({style_prefix.split('—')[0].strip()})" if style_prefix else ""
-        quality_tag = "（Imagen 3）" if is_pro_quality else ""
+        quality_tag = "（Imagen 3）"
         yield event.plain_result(f"我开始画了{n_label}{k4_label}{ref_label}{style_label}{quality_tag}，预计 30–120 秒。")
 
         try:
@@ -729,8 +624,8 @@ class DrawCommand(Star):
             # ponytail: don't stop the event — let Agent pick it up as fallback
             return
 
-        # 4K costs 3× normal quota
-        draw_cost = 3 if is_4k else 1
+        # 4K costs 2× normal quota
+        draw_cost = 2 if is_4k else 1
         self._daily_usage[key] = used + draw_cost
         self._save_usage()
         # Deliver all images

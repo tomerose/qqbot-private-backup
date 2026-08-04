@@ -7,6 +7,7 @@ from functools import wraps
 import hashlib
 import json
 from pathlib import Path
+import re
 import time
 from typing import Any
 import uuid
@@ -15,6 +16,69 @@ import zipfile
 from astrbot.api import logger
 from astrbot.api.message_components import File, Image, Plain
 from astrbot.core.message.message_event_result import MessageChain
+
+
+# Private data must never be keyed by a bare identifier from two transports.
+# Keep existing QQ document ids untouched, and namespace only the native
+# personal-WeChat adapter.  Unknown platforms deliberately get no durable
+# identity until they receive an explicit compatibility review.
+_QQ_PRIVATE_ID_RE = re.compile(r"^[1-9]\d{4,11}$")
+_WEIXIN_PRIVATE_ID_RE = re.compile(r"^[^/\x00-\x1f]{1,128}$")
+_WEIXIN_PRIVATE_PREFIX = "weixin_oc:"
+
+
+def event_platform_name(event: Any) -> str:
+    """Return the normalized AstrBot platform name without trusting a raw ID."""
+    meta = getattr(event, "platform_meta", None)
+    name = getattr(meta, "name", "")
+    if not name and isinstance(meta, dict):
+        name = meta.get("name", "")
+    if not name:
+        platform = getattr(event, "platform", None)
+        getter = getattr(platform, "meta", None)
+        if callable(getter):
+            try:
+                name = getattr(getter(), "name", "")
+            except Exception:
+                name = ""
+    return str(name or "").strip().lower()
+
+
+def is_weixin_private(event: Any) -> bool:
+    """True only for the native personal-WeChat private-chat adapter."""
+    if event_platform_name(event) != "weixin_oc":
+        return False
+    private_getter = getattr(event, "is_private_chat", None)
+    try:
+        return bool(private_getter()) if callable(private_getter) else False
+    except Exception:
+        return False
+
+
+def private_user_key(event: Any) -> str:
+    """Build the durable private-user key for QQ or native personal WeChat.
+
+    The raw WeChat sender id remains available on the event for replying.  This
+    key is only for memory, task, commitment and relationship storage.
+    """
+    sender_getter = getattr(event, "get_sender_id", None)
+    try:
+        sender = str(sender_getter() if callable(sender_getter) else "").strip()
+    except Exception:
+        return ""
+    if is_weixin_private(event):
+        return _WEIXIN_PRIVATE_PREFIX + sender if _WEIXIN_PRIVATE_ID_RE.fullmatch(sender) else ""
+    return sender if _QQ_PRIVATE_ID_RE.fullmatch(sender) else ""
+
+
+def is_private_user_key(value: object) -> bool:
+    """Validate a storage key created by :func:`private_user_key`."""
+    key = str(value or "").strip()
+    if _QQ_PRIVATE_ID_RE.fullmatch(key):
+        return True
+    if not key.startswith(_WEIXIN_PRIVATE_PREFIX):
+        return False
+    return bool(_WEIXIN_PRIVATE_ID_RE.fullmatch(key[len(_WEIXIN_PRIVATE_PREFIX):]))
 
 
 async def mirror_runtime_task_status(
@@ -44,7 +108,7 @@ async def mirror_runtime_task_status(
     try:
         await asyncio.wait_for(asyncio.to_thread(sync_track), timeout=1.0)
     except Exception:
-        logger.debug("[TaskMirror] status update unavailable: %s/%s", owner, task_id)
+        logger.debug("[TaskMirror] status update unavailable")
 
 
 @dataclass(frozen=True)
@@ -248,13 +312,13 @@ async def deliver_local_artifact(
     task_desc: str = "",
     task_owner: str = "",
 ) -> ArtifactDeliveryResult:
-    """Deliver a verified file to QQ using NapCat native APIs with retries.
+    """Deliver a verified artifact through the event's active transport.
 
-    KEY DESIGN: this account is under QQ media risk-control (风控) — sending
-    media *inline* via send_group_msg / send_private_msg fails with
-    "EventChecker Failed / retcode 1200". The file-transfer actions
-    (upload_group_file / upload_private_file) use a DIFFERENT protocol that
-    bypasses the message risk-control, so they are always tried FIRST.
+    QQ first uses its native file-transfer actions because its inline media is
+    subject to risk control.  Personal WeChat has no compatible retry queue:
+    it sends the AstrBot File/Image component in the current private session,
+    and a failure stays visibly retained rather than being misreported as a
+    QQ retry.
 
     Strategy (group chat):
       1. upload_group_file (retry 3x, file-transfer protocol)
@@ -271,18 +335,18 @@ async def deliver_local_artifact(
     try:
         resolved = _validated_artifact(path, allowed_roots)
     except (OSError, TypeError, ValueError) as exc:
-        logger.warning("[Delivery] validation failed path=%r: %s", str(path), type(exc).__name__)
+        logger.warning("[Delivery] validation failed: %s", type(exc).__name__)
         return ArtifactDeliveryResult(False, "retained", error=type(exc).__name__)
 
     group_id = str(getattr(event, "get_group_id", lambda: "")() or "").strip()
     sender_id = str(getattr(event, "get_sender_id", lambda: "")() or "").strip()
     target_scope = "group" if group_id.isdigit() else "private"
+    weixin_private = is_weixin_private(event)
     try:
-        normalized = _normalize_qq_text_artifact(resolved)
+        normalized = False if weixin_private else _normalize_qq_text_artifact(resolved)
     except (OSError, UnicodeError) as exc:
         logger.warning(
-            "[ArtifactDelivery] text normalization failed for %s: %s",
-            resolved.name,
+            "[ArtifactDelivery] text normalization failed: %s",
             type(exc).__name__,
         )
         quality = ArtifactQualityResult(
@@ -291,10 +355,7 @@ async def deliver_local_artifact(
     else:
         quality = inspect_local_artifact(resolved)
         if normalized:
-            logger.info(
-                "[ArtifactDelivery] normalized %s to UTF-8 BOM for QQ",
-                resolved.name,
-            )
+            logger.info("[ArtifactDelivery] normalized text to UTF-8 BOM for QQ")
 
     def finish(
         delivered: bool, channel: str, error: str = ""
@@ -308,14 +369,31 @@ async def deliver_local_artifact(
             target_scope=target_scope,
             error=error,
         )
+        # Individual WeChat jobs cannot use the QQ-only completion mirror in
+        # their owning plugins (those plugins receive a raw non-numeric id).
+        # Mirror the observable delivery result here, where the platform is
+        # still known, so /任务 stays truthful for the same private user.
+        if weixin_private and task_id:
+            owner = str(task_owner or "runtime")[:24]
+            user_key = private_user_key(event)
+            if user_key:
+                asyncio.create_task(
+                    mirror_runtime_task_status(
+                        user_key,
+                        str(task_id),
+                        str(task_desc),
+                        "done" if delivered else "delivery_pending",
+                        f"weixin:{channel}" if delivered else "",
+                        owner=owner,
+                    )
+                )
         return ArtifactDeliveryResult(
             delivered, channel, resolved, error, quality.code, manifest
         )
 
     if not quality.allowed:
         logger.warning(
-            "[ArtifactDelivery] quality gate rejected %s: %s",
-            resolved.name,
+            "[ArtifactDelivery] quality gate rejected artifact: %s",
             quality.code,
         )
         return finish(False, "rejected", quality.code)
@@ -330,8 +408,8 @@ async def deliver_local_artifact(
     in_group = bool(group_id and group_id.isdigit())
 
     logger.info(
-        "[Delivery] START fname=%r group=%s sender=%s bot_ok=%s has_call=%s kind=%s",
-        fname, group_id, sender_id, bot is not None, callable(call_action), kind
+        "[Delivery] START scope=%s bot_ok=%s has_call=%s kind=%s",
+        target_scope, bot is not None, callable(call_action), kind,
     )
 
     # ── Channel 1: Group file upload (group chats) ──────────────────
@@ -346,12 +424,12 @@ async def deliver_local_artifact(
                     name=fname,
                 )
                 _check_action_result(result, "upload_group_file")
-                logger.info(f"[ArtifactDelivery] group_upload OK: {fname}")
+                logger.info("[ArtifactDelivery] group_upload OK")
                 return finish(True, "group_upload")
             except Exception as exc:
                 logger.warning(
-                    "[ArtifactDelivery] group_upload attempt %d/3 failed: %s: %s",
-                    attempt + 1, type(exc).__name__, str(exc)[:160],
+                    "[ArtifactDelivery] group_upload attempt %d/3 failed: %s",
+                    attempt + 1, type(exc).__name__,
                 )
                 if attempt < 2:
                     await asyncio.sleep(1 * (2 ** attempt))
@@ -370,12 +448,12 @@ async def deliver_local_artifact(
                 )
                 _check_action_result(result, "upload_private_file")
                 channel = "private_fallback" if in_group else "private"
-                logger.info(f"[ArtifactDelivery] {channel} (upload_private_file) OK: {fname}")
+                logger.info("[ArtifactDelivery] %s (upload_private_file) OK", channel)
                 return finish(True, channel)
             except Exception as exc:
                 logger.warning(
-                    "[ArtifactDelivery] upload_private_file attempt %d/3 failed: %s: %s",
-                    attempt + 1, type(exc).__name__, str(exc)[:160],
+                    "[ArtifactDelivery] upload_private_file attempt %d/3 failed: %s",
+                    attempt + 1, type(exc).__name__,
                 )
                 if attempt < 2:
                     await asyncio.sleep(1 * (2 ** attempt))
@@ -387,7 +465,7 @@ async def deliver_local_artifact(
             img = Image.fromFileSystem(fpath)
             result = await send(MessageChain([img]))
             _check_action_result(result, "send(group_image)")
-            logger.info(f"[ArtifactDelivery] group_image OK: {fname}")
+            logger.info("[ArtifactDelivery] group_image OK")
             return finish(True, "group_image")
         except Exception as exc:
             logger.warning(
@@ -404,15 +482,19 @@ async def deliver_local_artifact(
             result = await send(MessageChain([File(name=fname, file=fpath)]))
             _check_action_result(result, "send(file_component)")
             channel = "group_component" if in_group else "private_component"
-            logger.info("[ArtifactDelivery] %s OK: %s", channel, fname)
+            logger.info("[ArtifactDelivery] %s OK", channel)
             return finish(True, channel)
         except Exception as exc:
             logger.warning(
-                "[ArtifactDelivery] file_component failed: %s: %s",
-                type(exc).__name__, str(exc)[:160],
+                "[ArtifactDelivery] file_component failed: %s",
+                type(exc).__name__,
             )
 
-    logger.warning("[ArtifactDelivery] native and component delivery failed for %s; enqueuing", fname)
+    if weixin_private:
+        logger.warning("[ArtifactDelivery] personal-WeChat delivery failed; not queued for QQ retry")
+        return finish(False, "retained", "WeixinDeliveryUnavailable")
+
+    logger.warning("[ArtifactDelivery] native and component delivery failed; enqueuing")
     try:
         try:
             from data.plugins.friend_core.delivery_queue import get_queue
@@ -436,7 +518,7 @@ async def deliver_local_artifact(
         )
         done, _pending = await asyncio.wait({enqueue_task}, timeout=3)
         if enqueue_task in done and enqueue_task.result():
-            logger.info("[ArtifactDelivery] ENQUEUED for retry: %s", fname)
+            logger.info("[ArtifactDelivery] ENQUEUED for retry")
             return finish(False, "queued", "QueuedForRetry")
         if enqueue_task not in done:
             # Do not hold the QQ response hostage to Firestore/ADC latency.
@@ -445,22 +527,22 @@ async def deliver_local_artifact(
             # that the artifact was retained.
             def _log_delayed_queue_result(task: asyncio.Task) -> None:
                 if task.cancelled():
-                    logger.info("[ArtifactDelivery] delayed queue cancelled: %s", fname)
+                    logger.info("[ArtifactDelivery] delayed queue cancelled")
                     return
                 try:
                     queued = bool(task.result())
                 except Exception as exc:
                     logger.warning(
-                        "[ArtifactDelivery] delayed queue failed for %s: %s",
-                        fname, type(exc).__name__,
+                        "[ArtifactDelivery] delayed queue failed: %s",
+                        type(exc).__name__,
                     )
                     return
-                logger.info("[ArtifactDelivery] delayed queue result for %s: %s", fname, queued)
+                logger.info("[ArtifactDelivery] delayed queue result: %s", queued)
 
             enqueue_task.add_done_callback(_log_delayed_queue_result)
             return finish(False, "retained", "QueuePending")
     except Exception as exc:
-        logger.warning("[ArtifactDelivery] enqueue failed: %s", exc)
+        logger.warning("[ArtifactDelivery] enqueue failed: %s", type(exc).__name__)
     return finish(False, "retained", "AllChannelsExhausted")
 
 

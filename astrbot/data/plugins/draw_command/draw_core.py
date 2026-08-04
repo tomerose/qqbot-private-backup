@@ -164,34 +164,8 @@ def parse_draw_command(text: object) -> str | None:
 
 # ── Image editing natural language detection ──────────────────────
 
-_DEWATERMARK_KEYWORDS = (
-    "去水印", "去掉水印", "消除水印", "去除水印", "移除水印", "删水印",
-    "去字幕", "消除字幕", "去logo", "去掉logo",
-    # natural phrasing variants — "帮我把字弄掉" etc.
-    "水印去掉", "水印弄掉", "水印p掉", "水印抹掉", "水印消除",
-    "把字去掉", "把字弄掉", "把字抹掉", "把文字去掉", "把文字弄掉",
-    "把水印去了", "把水印弄掉", "去掉字", "去掉文字", "去掉右下角",
-    "抹掉水印", "抹掉字", "抹掉文字", "擦掉水印", "擦掉字",
-    "p掉水印", "p掉字", "p掉文字",
-)
-_DEWATERMARK_PROMPT = (
-    "Remove all non-scene overlays by filling only their small regions with the natural "
-    "surrounding background. Remove every overlay character, @ handle, caption, logo, "
-    "timestamp, and every isolated bright decorative dot near them, especially all marks "
-    "in the bottom-right. No overlay text or isolated white dot may remain. Preserve the "
-    "original scene, subject, colors, crop, composition, and all unrelated details. Add nothing."
-)
-_NATURAL_DEWATERMARK = re.compile(
-    r"(?:去|去掉|消除|清除|移除|删(?:掉)?|抹掉|擦掉|p掉|弄掉|搞掉|去了).{0,24}"
-    r"(?:水印|logo|标志|署名|签名|字样|文字|字迹|字体|字幕|小尾巴|右下角|左下角|角落)"
-    r"|(?:右下角|左下角|角落|图上|图片上|照片上|画面).{0,24}"
-    r"(?:@|画师|署名|水印|logo|字|文字|字样|东西|标记|标识|签名|小尾巴)"
-    r"|(?:去除|移除|消除|清理|清除|擦除|抹除|删掉|去掉).{0,30}"
-    r"(?:水印|logo|字|文字|字样|字幕|标记|标识|签名|署名)",
-    re.I,
-)
-
-_EDIT_PREFIXES = ("/edit", "/编辑图片", "/改图", "/去水印", "/dewatermark")
+_EDIT_PREFIXES = ("/edit", "/编辑图片", "/改图")
+_REMOVED_EDIT_TERMS = re.compile(r"(?:水印|watermark|dewatermark)", re.I)
 _NATURAL_EDIT = re.compile(
     r"^(?:小柠[，,\s]*)?(?:帮我|请|给我|帮忙|来)?"
     r"(?:把|将|给)"
@@ -211,8 +185,10 @@ _DEFAULT_REDRAW_PROMPT = "忠实重绘参考图，保留主体和构图，线条
 
 
 def parse_edit_command(text: object) -> str | None:
-    """Detect image editing intent from natural language or /edit command."""
+    """Detect image editing intent from /edit command only."""
     raw = str(text or "").strip()
+    if _REMOVED_EDIT_TERMS.search(raw):
+        return None
     lowered = raw.lower()
     for prefix in _EDIT_PREFIXES:
         if lowered.startswith(prefix):
@@ -231,30 +207,6 @@ def parse_edit_command(text: object) -> str | None:
         if len(prompt) <= MAX_PROMPT_CHARS:
             return f"以参考图为基础重新绘制：{prompt}"
     return None
-
-
-# Broad catch-all: "remove/delete/wipe" any overlay/content from an image
-_BROAD_REMOVE = re.compile(
-    r"(?:去掉|弄掉|删掉|移除|消除|清除|抹掉|擦掉|p掉|搞掉|去了|"
-    r"不要|不想看到|不需要|讨厌|帮忙去掉|帮我去掉|帮我弄掉|帮我删掉|"
-    r"帮我把.{0,6}(?:去掉|弄掉|删掉|抹掉|擦掉|p掉))"
-    r".{0,30}(?:图|照片|画面|右下角|左下角|角落|水印|字|logo|标记|名字|名称|东西|内容)",
-    re.I,
-)
-
-
-def is_dewatermark_request(text: object) -> bool:
-    """Recognize direct and natural-language requests to remove an image overlay."""
-    normalized = " ".join(str(text or "").lower().split())
-    if not normalized:
-        return False
-    if any(keyword in normalized for keyword in _DEWATERMARK_KEYWORDS):
-        return True
-    if _NATURAL_DEWATERMARK.search(normalized):
-        return True
-    if _BROAD_REMOVE.search(normalized):
-        return True
-    return False
 
 
 class DrawRateLimiter:
