@@ -16,7 +16,7 @@ try:
 except ImportError:
     from data.plugins.xiaoning_runtime import chat_response_content, defer_stop_event
 
-PROXY ="http://127.0.0.1:3000/v1/chat/completions"
+PROXY = "http://127.0.0.1:3000/v1/chat/completions"
 MAX_CHARS = 40_000
 MAX_PDF_PAGES = 50
 MIN_TEXT_LENGTH = 50  # below this, treat PDF as scanned

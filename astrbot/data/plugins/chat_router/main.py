@@ -160,7 +160,7 @@ class ChatRouter(Star):
         if not umo:
             return
 
-        target = "gemini-2.5-flash"
+        target = "gemini-3.6-flash"
         if self._routes.get(umo) == target:
             return
 

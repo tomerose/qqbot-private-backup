@@ -1,6 +1,10 @@
 # 谷歌生态深化清单（2026-08-04 审查）
 
-审查范围：gemini-proxy.py、chat_router、draw_command、Firestore 记忆。本轮只出清单，点单后实施。
+审查范围：gemini-proxy.py、chat_router、draw_command、Firestore 记忆。
+
+**实施记录（2026-08-04 晚）：** #1 ✅ 实测双模型均有效（pro 40s / flash 24s HTTP 200），编辑路径硬编码改为 `EDIT_MODEL` 常量；#2 ✅ 陈旧命名已更新（chat_router/emotional_chat/qqadmin → gemini-3.6-flash，voice 的 `gemini-2.5-flash-direct` 是 AstrBot provider 配置键，不动）；#4 ✅ search_command 已完整消费 grounding（去重+缓存+格式化来源），群关怀 grounding 特性随 07-19 迁移至上游 proactive_chat 插件时退役；#5 ✅ 节流已在位（EXTRACT_COOLDOWN 60s + TASK_COOLDOWN 300s + 场景感知门 + LRU 淘汰）；#7 未实施（见下）。
+
+# 剩余项：
 
 ## 1. 图像模型名不一致 + 未验证有效性
 - **现状**：`draw_command/main.py:77` 定义 `DRAW_MODEL = "gemini-3-pro-image"`（生成路径），但 `:217` 编辑路径硬编码 `"gemini-3.1-flash-image"`；代理端 `IMAGE_MODEL_PRIMARY` 另有来源。三处模型名互不一致。

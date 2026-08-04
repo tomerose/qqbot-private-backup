@@ -281,7 +281,7 @@ class EmotionalChat(Star):
             return
 
         if is_crisis_language(message):
-            event.set_extra("selected_provider", "gemini-2.5-flash")
+            event.set_extra("selected_provider", "gemini-3.6-flash")
 
     # ── 周深/邓紫棋 照片/表情包自动发送 ──────────────────────────
     _SHEN_PHOTO_RE = re.compile(

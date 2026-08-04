@@ -65,7 +65,7 @@ class QQAdminPlugin(Star):
             self.ai_moderation = AIModerationHandler(
                 context=self.context,
                 store=self.ai_moderation_store,
-                provider_id=str(ai_cfg.get("provider_id", "gemini-2.5-flash")),
+                provider_id=str(ai_cfg.get("provider_id", "gemini-3.6-flash")),
                 timeout_seconds=float(ai_cfg.get("timeout_seconds", 8)),
                 context_messages=int(ai_cfg.get("context_messages", 8)),
                 owner_id=OWNER_ID,
