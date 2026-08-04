@@ -42,7 +42,7 @@ class WebStudioGeneratorTests(unittest.TestCase):
         )
         self.assertEqual(generate_draft("制作一个可以增删的旅行清单"), HTML)
         payload = post.call_args.kwargs["json"]
-        self.assertEqual(payload["model"], "gemini-2.5-pro")
+        self.assertEqual(payload["model"], "gemini-3.6-flash")
         self.assertIn("禁止任何联网行为", payload["messages"][0]["content"])
         self.assertNotIn("thinking", payload)
 
@@ -74,17 +74,12 @@ class WebStudioGeneratorTests(unittest.TestCase):
         self.assertNotIn("secret", str(caught.exception))
 
     @patch("data.plugins.web_studio.generator.requests.post")
-    def test_pro_model_falls_back_to_current_flash(self, post):
-        post.side_effect = [
-            Mock(status_code=502, json=Mock(return_value={"error": "empty"})),
-            Mock(
-                status_code=200,
-                json=Mock(return_value={"choices": [{"message": {"content": HTML}}]}),
-            ),
-        ]
-        self.assertEqual(generate_draft("制作一个可以增删的旅行清单"), HTML)
+    def test_does_not_fall_back_to_an_outdated_chat_model(self, post):
+        post.return_value = Mock(status_code=502, json=Mock(return_value={"error": "empty"}))
+        with self.assertRaises(GenerationError):
+            generate_draft("制作一个可以增删的旅行清单")
         models = [call.kwargs["json"]["model"] for call in post.call_args_list]
-        self.assertEqual(models, ["gemini-2.5-pro", "gemini-3.5-flash"])
+        self.assertEqual(models, ["gemini-3.6-flash"])
 
 
 if __name__ == "__main__":

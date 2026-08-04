@@ -8,7 +8,7 @@ import requests
 
 
 PROXY_URL = "http://127.0.0.1:3000/v1/chat/completions"
-MODELS = ("gemini-2.5-pro", "gemini-3.5-flash")
+MODELS = ("gemini-3.6-flash",)
 REQUEST_TIMEOUT = (15, 180)
 MAX_REQUEST_CHARS = 1200
 MAX_EXISTING_CHARS = 700_000

@@ -85,7 +85,7 @@ def parse_debate_topic(text: str) -> str | None:
 def _call_gemini(messages: list[dict], max_tokens: int = 800) -> str:
     resp = requests.post(
         PROXY,
-        json={"model": "gemini-2.5-flash", "messages": messages, "max_tokens": max_tokens},
+        json={"model": "gemini-3.6-flash", "messages": messages, "max_tokens": max_tokens},
         timeout=60,
     )
     resp.raise_for_status()

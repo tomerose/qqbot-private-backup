@@ -37,12 +37,6 @@ X_DAILY = 1
 PRO_DAILY = 5
 X_ACTIVE = 3
 PRO_ACTIVE = 20
-WEB_MEMORY = (
-    "【网页工坊】X/Pro 可私聊发送 /web <需求> 制作真实可操作的单文件网页，"
-    "小柠会返回预览图、HTML 文件和可分享的 HTTPS 链接。X 每日1次、最多3个在用页面；"
-    "Pro 每日5次、最多20个，并增加独立质量复核。创建和修改会占用当日次数。"
-    "页面公开但默认不能联网、登录、支付或收集隐私。"
-)
 WEB_HELP = (
     "【小柠网页工坊】\n"
     "/web <需求> — 制作并发布网页工具\n"
@@ -491,12 +485,6 @@ class WebStudio(Star):
                 yield event.plain_result("删除状态暂时无法确认，记录已保留；请稍后用 /web show 检查。")
             else:
                 yield event.plain_result("删除发布失败，原页面已保留，请稍后重试。")
-
-    @filter.on_llm_request(priority=-18)
-    async def inject_web_memory(self, event: AstrMessageEvent, req) -> None:
-        system_prompt = str(getattr(req, "system_prompt", "") or "")
-        if "【网页工坊】" not in system_prompt:
-            req.system_prompt = f"{system_prompt}\n\n{WEB_MEMORY}".strip()
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=985)
     async def on_message(self, event: AstrMessageEvent):

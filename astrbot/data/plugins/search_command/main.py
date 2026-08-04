@@ -28,9 +28,9 @@ except ImportError:
     from data.plugins.draw_command.pro_access import get_tier, Tier
 
 try:
-    from draw_command.draw_core import is_dewatermark_request, parse_edit_command
+    from draw_command.draw_core import parse_edit_command
 except ImportError:
-    from data.plugins.draw_command.draw_core import is_dewatermark_request, parse_edit_command
+    from data.plugins.draw_command.draw_core import parse_edit_command
 
 try:
     from xiaoning_runtime import (
@@ -46,11 +46,11 @@ except ImportError:
     )
 
 SEARCH_PROXY_URL = "http://127.0.0.1:3000/v1/chat/completions"
-SEARCH_MODEL = "gemini-3.5-flash-search"
-PLAIN_MODEL = "gemini-3.5-flash"
+SEARCH_MODEL = "gemini-3.6-flash-search"
+PLAIN_MODEL = "gemini-3.6-flash"
 # PRO action reports (research/decision/trip) use the strongest model
-ACTION_MODEL_PRO = "gemini-2.5-pro"
-ACTION_MODEL_GO  = "gemini-2.5-flash"
+ACTION_MODEL_PRO = "gemini-3.6-flash"
+ACTION_MODEL_GO  = "gemini-3.6-flash"
 SEARCH_TIMEOUT = (15, 90)
 GO_ACTION_DAILY = 3
 PRO_ACTION_DAILY = 10
@@ -222,15 +222,6 @@ ACTION_PROMPTS = {
     ),
 }
 
-SEARCH_MEMORY = (
-    "【实时搜索与行动包】所有用户可用 /search、自然语言搜索、图片搜索、地点查询和 /calc。"
-    "找图片/壁纸/头像/表情包直接说「帮我找xxx图片」即可。"
-    "X/Pro 还可用 /research、/compare、/trip，也可直接说深度研究、比较选择或规划行程；"
-    "结果会生成 Markdown 成品并返回 QQ。X 每日3次快速行动包；Pro 每日10次并进行更深的独立复核。"
-    "视频搜索和生成仍由独立视频功能处理。图片生成用 /draw。"
-)
-
-
 def is_video_search_intent(text: str) -> bool:
     """Keep video requests on the media-delivery path."""
     value = str(text or "").strip()
@@ -247,7 +238,7 @@ def is_image_search_intent(text: str) -> bool:
 def is_image_edit_intent(text: str) -> bool:
     """Reserve explicit modification requests for draw_command, never vision QA."""
     value = str(text or "").strip()
-    return is_dewatermark_request(value) or parse_edit_command(value) is not None
+    return parse_edit_command(value) is not None
 
 
 def is_search_followup(text: str) -> bool:
@@ -380,7 +371,7 @@ async def _news_rss_fallback(query: str) -> str:
         for k in stale:
             _news_rss_cache.pop(k, None)
         return result
-    except (requests.RequestException, ET.ParseError, TypeError, ValueError) as exc:
+    except Exception as exc:
         logger.warning("[SearchCmd] news RSS fallback failed: %s", type(exc).__name__)
         # Serve stale cache as last resort (up to 10 min)
         if cache_key in _news_rss_cache:
@@ -511,7 +502,7 @@ async def _call_action_proxy(
             if content.strip():
                 return content, sources
             last_error = ValueError("empty action response")
-        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+        except Exception as exc:
             last_error = exc
             logger.warning(
                 "[SearchCmd] tool set failed search=%s maps=%s code=%s url=%s: %s",
@@ -724,7 +715,7 @@ class SearchCommand(Star):
         event.stop_event()
         yield event.plain_result("正在看图分析…")
         payload = {
-            "model": "gemini-3.5-flash",  # cheapest vision model, always available
+            "model": "gemini-3.6-flash",
             "max_tokens": 2048,
             "messages": [{
                 "role": "user",
@@ -752,7 +743,7 @@ class SearchCommand(Star):
         self, mode: str, query: str, tier: Tier
     ) -> tuple[str, list[dict]]:
         prompt = ACTION_PROMPTS[mode].format(query=query)
-        # PRO: Gemini 2.5 Pro (best reasoning); X: Gemini 2.5 Flash
+        # Both tiers use the current stable Gemini chat model.
         action_model = ACTION_MODEL_PRO if tier == Tier.PRO else ACTION_MODEL_GO
         search_full = {
             "google_search": True, "google_maps": False,
@@ -1062,24 +1053,15 @@ class SearchCommand(Star):
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=978)
     async def on_message(self, event: AstrMessageEvent):
         text = str(getattr(event, "get_message_str", lambda: "")() or "").strip()
-        # ── Detect search intent BEFORE the @ gate — explicit commands and NL
-        # patterns are low-false-positive, so they activate even without @mention.
-        # Only vague patterns (_REALTIME_QUESTION, contextual followup) still
-        # require the gate so group chatter about "今天天气" doesn't trigger search.
         in_private = bool(event.is_private_chat())
         is_at_or_wake = bool(getattr(event, "is_at_or_wake_command", False))
         can_activate = in_private or is_at_or_wake
 
-        if is_image_edit_intent(text):
-            return
-        if is_video_search_intent(text):
-            return
-
-        # ── Image understanding (B) — user sent/replied to an image with a question ──
+        # ── Image understanding — user sent/replied to an image with a question ──
         ref_img_b64 = self._get_referenced_image_base64(event)
-        if ref_img_b64 and text and not is_image_search_intent(text):
+        if ref_img_b64 and text:
             if not can_activate:
-                return  # image QA in group without @ could leak context
+                return
             async for reply in self._handle_image_question(event, ref_img_b64, text):
                 yield reply
             return
@@ -1087,7 +1069,7 @@ class SearchCommand(Star):
         action = parse_action_pack(text)
         if action:
             if not can_activate:
-                return  # action packs are expensive, require @ in groups
+                return
             async for reply in self._handle_action(event, *action):
                 yield reply
             return
@@ -1101,7 +1083,6 @@ class SearchCommand(Star):
         followup_intent = is_search_followup(text)
         contextual_followup = bool(prior_context and followup_intent)
 
-        # ── Explicit commands: always activate (low false positive) ──
         match = _SEARCH_COMMAND.match(text)
         if match:
             query = match.group(1).strip()
@@ -1110,27 +1091,24 @@ class SearchCommand(Star):
             if match:
                 calc_mode = True
                 query = match.group(1).strip()
+            elif contextual_followup:
+                previous_query, previous_mode = prior_context
+                query = f"上一轮搜索主题：{previous_query}\n用户本轮要求：{text}"
+                image_mode = previous_mode == "image"
+            elif followup_intent:
+                return
             else:
-                if contextual_followup:
-                    previous_query, previous_mode = prior_context
-                    query = f"上一轮搜索主题：{previous_query}\n用户本轮要求：{text}"
-                    image_mode = previous_mode == "image"
-                elif followup_intent:
-                    return
-                else:
-                    # _NATURAL_SEARCH now uses search() so "XXX帮我搜一下" works
-                    match = _NATURAL_SEARCH.search(text)
-                    if match:
-                        query = match.group("query").strip()
+                match = _NATURAL_SEARCH.search(text)
+                if match:
+                    query = match.group("query").strip()
 
-        # ── Explicit NL patterns: activate without @ (high precision) ──
         if query is None and image_mode:
             query = re.sub(r"^小柠[，,：:\s]*", "", text).strip()
         if query is None and (_NATURAL_MAPS.search(text) or _NATURAL_CURRENT.match(text)):
             query = re.sub(r"^小柠[，,：:\s]*", "", text).strip()
-        # ── Vague patterns: require @ or private chat ──
         if query is None and can_activate and _REALTIME_QUESTION.search(text):
             query = re.sub(r"^小柠[，,：:\s]*", "", text).strip()
+
         if query is None:
             return
         event.stop_event()
@@ -1159,6 +1137,7 @@ class SearchCommand(Star):
                 if contextual_followup and prior_context else query
             )
             context_store.remember(scope, stored_query, context_mode)
+
         sender_id = str(getattr(event, "get_sender_id", lambda: "")() or "").strip()
         task_id = uuid.uuid4().hex[:12]
         task_desc = f"实时搜索：{text[:140]}"
@@ -1168,8 +1147,6 @@ class SearchCommand(Star):
 
         if calc_mode:
             yield event.plain_result("正在计算…")
-        elif image_mode:
-            yield event.plain_result("正在搜图…")
         elif flags["google_maps"]:
             yield event.plain_result("正在查询地点…")
         else:
@@ -1190,8 +1167,8 @@ class SearchCommand(Star):
             search_error = (f"http_{status}", message)
         except (requests.Timeout, requests.ConnectionError):
             search_error = ("connection_timeout", "搜索连接超时，请稍后再试。")
-        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
-            logger.warning("[SearchCmd] search failed: %s", type(exc).__name__)
+        except Exception as exc:
+            logger.warning("[SearchCmd] search failed unexpectedly: %s", type(exc).__name__)
             search_error = (type(exc).__name__, "搜索暂时不可用，请稍后再试。")
 
         if search_error is not None:
@@ -1221,8 +1198,6 @@ class SearchCommand(Star):
             )
             if flags.get("google_maps"):
                 yield event.plain_result("未查到相关地点信息，试试更具体的地名或地址？")
-            elif image_mode:
-                yield event.plain_result("未搜到相关图片，试试换一个描述词？")
             else:
                 yield event.plain_result("搜索没有返回有效结果，试试换个说法或更具体的关键词？")
             return
@@ -1235,13 +1210,4 @@ class SearchCommand(Star):
             f"grounded_sources:{len(sources)}",
             owner="search",
         )
-        if image_mode:
-            yield event.plain_result(self._format_image_result(result, sources, text))
-            return
         yield event.plain_result(self._format_search_result(result, sources))
-
-    @filter.on_llm_request(priority=-18)
-    async def inject_search_memory(self, event: AstrMessageEvent, req) -> None:
-        system_prompt = str(getattr(req, "system_prompt", "") or "")
-        if "【实时搜索与行动包】" not in system_prompt:
-            req.system_prompt = f"{system_prompt}\n\n{SEARCH_MEMORY}".strip()

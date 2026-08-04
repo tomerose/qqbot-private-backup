@@ -52,13 +52,13 @@ _NATURAL_TARGET_FIRST = re.compile(
 def parse_translate_request(text: str) -> tuple[str, str] | None:
     value = str(text or "").strip()
     match = _COMMAND.match(value)
-    if match:
-        target, content = match.groups()
-    else:
+    if not match:
         match = _NATURAL_TARGET_FIRST.match(value) or _NATURAL_CONTENT_FIRST.match(value)
         if not match:
             return None
         target, content = match.group("target"), match.group("content")
+    else:
+        target, content = match.groups()
     target = LANG_ALIASES.get(target.lower(), target.lower())
     content = content.strip()
     return (target, content) if content else None
@@ -79,10 +79,10 @@ class SmartTranslate(Star):
         try:
             tier = get_tier(sender_id, self._pro_db)
             if tier >= Tier.X:
-                return GEMINI_PROXY, "sk-gemini-vertex", "gemini-2.5-flash"
+                return GEMINI_PROXY, "sk-gemini-vertex", "gemini-3.6-flash"
         except Exception:
             pass
-        return GEMINI_PROXY, "local-proxy", "gemini-2.5-flash-lite"
+        return GEMINI_PROXY, "local-proxy", "gemini-3.6-flash"
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=980)
     @defer_stop_event

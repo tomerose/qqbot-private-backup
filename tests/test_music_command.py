@@ -14,7 +14,6 @@ sys.path.insert(0, str(PLUGINS_DIR))
 sys.path.insert(0, str(ROOT / "astrbot"))
 
 from data.plugins.music_command.main import (  # noqa: E402
-    MUSIC_MEMORY,
     MusicCommand,
     _song_delivery_text,
     _search_netease_song,
@@ -85,21 +84,6 @@ class MusicCommandTests(unittest.TestCase):
             result = _search_netease_song("稻香 周杰伦")
         self.assertEqual(result["song_id"], "123456")
         self.assertEqual(result["artist"], "周杰伦")
-
-    def test_music_memory_is_added_once_to_llm_requests(self):
-        class Request:
-            system_prompt = "\u539f\u59cb\u4eba\u8bbe"
-
-        async def scenario():
-            request = Request()
-            plugin = MusicCommand.__new__(MusicCommand)
-            await plugin.inject_music_memory(object(), request)
-            await plugin.inject_music_memory(object(), request)
-            self.assertEqual(request.system_prompt.count("\u3010\u97f3\u4e50\u3011"), 1)
-            self.assertIn(MUSIC_MEMORY, request.system_prompt)
-
-        import asyncio
-        asyncio.run(scenario())
 
     def test_netease_command_returns_a_native_music_card(self):
         class Event:

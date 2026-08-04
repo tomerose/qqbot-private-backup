@@ -47,7 +47,7 @@ def parse_interview_start(text: str) -> str | None:
 def _call(messages: list[dict], max_tokens: int = 600) -> str:
     resp = requests.post(
         PROXY,
-        json={"model": "gemini-2.5-flash", "messages": messages, "max_tokens": max_tokens},
+        json={"model": "gemini-3.6-flash", "messages": messages, "max_tokens": max_tokens},
         timeout=45,
     )
     resp.raise_for_status()

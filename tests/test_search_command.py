@@ -115,8 +115,8 @@ class SearchCommandTests(unittest.TestCase):
                 self.assertTrue(is_video_search_intent(text))
         self.assertFalse(is_video_search_intent("搜索姆巴佩最近的比赛结果"))
 
-    def test_image_edit_is_reserved_for_draw_delivery(self):
-        self.assertTrue(is_image_edit_intent("去s水印"))
+    def test_removed_watermark_intent_is_not_reserved_for_draw_delivery(self):
+        self.assertFalse(is_image_edit_intent("去s水印"))
 
         async def scenario():
             event = FakeEvent("去s水印")
@@ -235,6 +235,37 @@ class SearchCommandTests(unittest.TestCase):
             self.assertEqual(replies[0], "正在搜索…")
             self.assertIn("https://example.com", replies[1])
             self.assertTrue(event.stopped)
+
+        asyncio.run(scenario())
+
+    def test_search_always_follows_progress_when_proxy_raises_unexpected_error(self):
+        async def scenario():
+            event = FakeEvent("搜索 Gemini 最新版本")
+            plugin = SearchCommand.__new__(SearchCommand)
+            with patch(
+                "data.plugins.search_command.main._call_proxy",
+                new=AsyncMock(side_effect=RuntimeError("boom")),
+            ):
+                replies = [reply async for reply in plugin.on_message(event)]
+            self.assertEqual(replies[0], "正在搜索…")
+            self.assertIn("请稍后再试", replies[-1])
+
+        asyncio.run(scenario())
+
+    def test_search_always_follows_progress_when_rss_fallback_raises(self):
+        async def scenario():
+            event = FakeEvent("搜索国际新闻")
+            plugin = SearchCommand.__new__(SearchCommand)
+            with patch(
+                "data.plugins.search_command.main._call_proxy",
+                new=AsyncMock(return_value=("", [])),
+            ), patch(
+                "data.plugins.search_command.main._fetch_news_rss",
+                side_effect=RuntimeError("rss boom"),
+            ):
+                replies = [reply async for reply in plugin.on_message(event)]
+            self.assertEqual(replies[0], "正在搜索…")
+            self.assertGreaterEqual(len(replies), 2)
 
         asyncio.run(scenario())
 

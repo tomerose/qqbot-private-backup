@@ -30,11 +30,6 @@ SONG_DAILY_LIMIT = 1
 PRO_SONG_MESSAGE = "原创歌曲生成是 Pro 专属功能。发送 /pro status 查看资格。"
 _MUSIC_COMMAND = re.compile(r"^\s*(?:/music|/网易云|网易云音乐)\s+(.+?)\s*$", re.I)
 _SING_COMMAND = re.compile(r"^\s*/sing\s+(.+?)\s*$", re.I)
-MUSIC_MEMORY = (
-    "\u3010\u97f3\u4e50\u3011\u7528\u6237\u8bf4\u300c\u70b9\u6b4c/\u641c\u6b4c/\u653e\u6b4c/\u6765\u4e00\u9996/\u542c\u6b4c/\u6362\u6b4c + \u6b4c\u540d/\u6b4c\u624b\u300d\u2192\u81ea\u52a8\u641c\u7f51\u6613\u4e91\u97f3\u4e50\u5361\u3002"
-    "\u7528\u6237\u8bf4\u300c\u5531/\u5199/\u521b\u4f5c/\u751f\u6210/\u505a\u4e00\u9996\u6b4c\u300d\u2192Pro\u539f\u521b\u6b4c\u66f2(/sing)\u3002"
-    "\u300c\u627e\u6b4c/\u63a8\u8350/\u64ad\u653e\u5df2\u6709\u6b4c\u66f2/\u6b4c\u540d\u6216\u6b4c\u624b\u641c\u7d22\u300d\u2192\u4e0d\u89e6\u53d1\u539f\u521b\u751f\u6210\uff0c\u4ec5\u641c\u7d22\u3002\u4ec5\u652f\u6301\u7f51\u6613\u4e91\u97f3\u4e50\u5361\u3002"
-)
 _NATURAL_NETEASE_COMMAND = re.compile(
     r"^\s*(?:\u5c0f\u67e0[\uff0c,\uff1a:\s]*)?(?:(?:\u5e2e\u6211|\u7ed9\u6211|\u8bf7)[\uff0c,\uff1a:\s]*)?"
     r"(?:\u53d1\u9001|\u53d1|\u5206\u4eab)(?:\u4e00\u9996)?\u7f51\u6613\u4e91(?:\u97f3\u4e50|\u6b4c\u66f2)?\s+(.+?)\s*$",
@@ -47,16 +42,13 @@ _NATURAL_ORIGINAL_SONG = re.compile(
     re.I,
 )
 _SONG_SEARCH_COMMAND = re.compile(
-    r"^\s*(?:\u5c0f\u67e0[\uff0c,\uff1a:\s]*)?(?:(?:\u5e2e\u6211|\u7ed9\u6211|\u8bf7|\u6211\u60f3|\u6211\u8981|\u6211\u60f3\u542c|\u6211\u60f3\u70b9)[\uff0c,\uff1a:\s]*)?"
-    r"(?:\u70b9(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)?\u6b4c|"
-    r"\u641c(?:\u9996|\u4e2a|\u4e00)?(?:\u6b4c|\u6b4c\u66f2)|"
-    r"\u653e(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
-    r"\u6765(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
-    r"\u542c(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
-    r"\u64ad(?:\u653e)?(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
-    r"(?:\u7ed9|\u4e3a)(?:\u6211|\u5927\u5bb6)(?:\u653e|\u70b9|\u64ad|\u6765)(?:\u9996|\u4e2a|\u4e00\u9996|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?|"
-    r"\u6362(?:\u9996|\u4e2a|\u4e00)?(?:\u6b4c|\u6b4c\u66f2|\u97f3\u4e50)?)"
-    r"(?:\u6b4c\u66f2|\u97f3\u4e50|\u6b4c)?\s*(?P<query>.+?)\s*$",
+    r"^\s*(?:小柠[，,：:\s]*)?(?:(?:帮我|给我|请|我想|我要|我想听|我想点)[，,：:\s]*)?"
+    r"(?:点(?:首|个|一首|一)?歌|搜(?:首|个|一)?(?:歌|歌曲)|"
+    r"放(?:首|个|一首|一)?(?:歌|歌曲|音乐)?|来(?:首|个|一首|一)(?:歌|歌曲|音乐)?|"
+    r"听(?:首|个|一首|一)?(?:歌|歌曲|音乐)?|播(?:放)?(?:首|个|一首|一)?(?:歌|歌曲|音乐)?|"
+    r"(?:给|为)(?:我|大家)(?:放|点|播|来)(?:首|个|一首|一)?(?:歌|歌曲|音乐)?|"
+    r"换(?:首|个|一)?(?:歌|歌曲|音乐)?)"
+    r"(?:歌曲|音乐|歌)?\s*(?P<query>.+?)\s*$",
     re.I,
 )
 _NETEASE_SEARCH_URL = "https://music.163.com/api/search/get"
@@ -82,7 +74,7 @@ def parse_netease_song_id(text: str) -> str | None:
 
 
 def parse_original_song_prompt(text: str) -> str | None:
-    """Accept the explicit command or a narrowly-scoped natural-language request."""
+    """Accept the explicit command or a narrowly-scoped natural request."""
     value_text = str(text or "")
     command_match = _SING_COMMAND.match(value_text)
     if command_match:
@@ -250,13 +242,6 @@ class MusicCommand(Star):
             task_desc=task_desc,
             task_owner="music" if task_id else "",
         )
-
-    @filter.on_llm_request(priority=-20)
-    async def inject_music_memory(self, event: AstrMessageEvent, req) -> None:
-        """Keep the persona's music guidance aligned with the explicit command router."""
-        system_prompt = str(getattr(req, "system_prompt", "") or "")
-        if "\u3010\u97f3\u4e50\u3011" not in system_prompt:
-            req.system_prompt = f"{system_prompt}\n\n{MUSIC_MEMORY}".strip()
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=936)
     async def on_message(self, event: AstrMessageEvent):

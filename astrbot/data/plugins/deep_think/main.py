@@ -1,5 +1,5 @@
 """
-/think — Tier-aware thinking: DeepSeek Reasoner for ordinary, Gemini Pro for X/Pro.
+/think — Gemini thinking for X/Pro users.
 
 Triggers: /think, /推理, or natural "深度思考/仔细分析/好好想想 + question"
 """
@@ -34,7 +34,6 @@ _NATURAL_TRIGGERS = re.compile(
     re.I,
 )
 
-
 def extract_question(message: str) -> str | None:
     text = str(message or "").strip()
     command = re.match(r"^/(?:think|推理)(?:\s+(.+))?$", text, re.I)
@@ -54,21 +53,13 @@ class DeepThink(Star):
         )
 
     def _think_config(self, sender_id: str) -> tuple[str, str, str, str]:
-        """Return (api_base, api_key, model, label) based on tier.
-        X/Pro → Gemini Pro; ordinary → DeepSeek Reasoner."""
-        try:
-            tier = get_tier(sender_id, self._pro_db)
-            if tier >= Tier.X:
-                return GEMINI_PROXY, "sk-gemini-vertex", "gemini-2.5-pro", "Gemini"
-        except Exception:
-            pass
-        return "https://api.deepseek.com/v1", "sk-991ee2d8b710420abe434f541a26164b", "deepseek-reasoner", "DeepSeek"
+        """Return the single supported chat backend."""
+        return GEMINI_PROXY, "sk-gemini-vertex", "gemini-3.6-flash", "Gemini 3.6 Flash"
 
     @staticmethod
     def _call_think(question: str, *, api_base: str, api_key: str,
                     model: str) -> str:
-        """Call the LLM for deep thinking. Gemini uses thinking mode; DeepSeek
-        reasoner handles CoT natively."""
+        """Call Gemini with explicit thinking enabled."""
         payload = {
             "model": model,
             "messages": [
@@ -78,7 +69,7 @@ class DeepThink(Star):
             "max_tokens": 4096,
         }
         # Gemini thinking mode via proxy
-        if "gemini" in model.lower() and "pro" in model.lower():
+        if "gemini" in model.lower():
             payload["thinking"] = True
         response = requests.post(
             api_base,

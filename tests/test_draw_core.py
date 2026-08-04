@@ -12,7 +12,6 @@ from draw_command.draw_core import (  # noqa: E402
     parse_draw_command,
     parse_edit_command,
     parse_pro_user_ids,
-    is_dewatermark_request,
 )
 
 
@@ -40,12 +39,10 @@ class DrawCoreTests(unittest.TestCase):
         now[0] = 160.1
         self.assertEqual(limiter.try_acquire("1211000567"), 0)
 
-    def test_recognizes_natural_dewatermark_request(self):
-        self.assertTrue(is_dewatermark_request("帮我把右下角那个浅灰色的“@画师”小尾巴彻底抹掉"))
-        self.assertTrue(is_dewatermark_request("消除这张图的 Logo"))
-        self.assertTrue(is_dewatermark_request("去水印"))
-        self.assertTrue(is_dewatermark_request("帮我去s水印"))
-        self.assertFalse(is_dewatermark_request("把右下角的人物抹掉"))
+    def test_removed_watermark_feature_never_becomes_an_edit(self):
+        self.assertIsNone(parse_edit_command("去水印"))
+        self.assertIsNone(parse_edit_command("帮我去s水印"))
+        self.assertIsNone(parse_edit_command("/edit 去掉watermark"))
 
     def test_recognizes_redraw_followups(self):
         self.assertIn("忠实重绘", parse_edit_command("重画"))
