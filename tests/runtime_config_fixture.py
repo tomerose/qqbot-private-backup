@@ -20,6 +20,23 @@ XIAONING_PROMPT = (
     "不编造用户说过的话，不泄露 QQ 号、路径、密钥、令牌和内部信息。"
 )
 
+_REQUIRED_PHRASES = (
+    "没有实际需求时不介绍功能",
+    "主动给一个具体判断或行动建议",
+    "有自己立场",
+    "QQ 实际收到文件才算完成",
+    "不公开管理入口",
+    "连续短句合并理解",
+    "前后说法冲突时纠正具体错误",
+)
+_FORBIDDEN_PHRASES = ("22岁", "学金融")
+
+
+def _persona_ok(prompt: str) -> bool:
+    return all(p in prompt for p in _REQUIRED_PHRASES) and not any(
+        p in prompt for p in _FORBIDDEN_PHRASES
+    )
+
 PROACTIVE_CONFIG = {
     "friend_settings": {
         "enable": True,
@@ -78,7 +95,9 @@ def ensure_runtime_configs(root: Path) -> None:
         changed = True
 
     personas = data.setdefault("persona", [])
-    if not personas or personas[0].get("name") != "xiaoning" or XIAONING_PROMPT not in personas[0].get("prompt", ""):
+    if not personas or personas[0].get("name") != "xiaoning" or not _persona_ok(
+        personas[0].get("prompt", "")
+    ):
         personas[:] = [{"name": "xiaoning", "prompt": XIAONING_PROMPT}]
         changed = True
 
