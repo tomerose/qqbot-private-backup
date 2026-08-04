@@ -431,7 +431,7 @@ class AgentIntegrationTests(unittest.TestCase):
                 plugin = self._plugin(Path(tmp))
                 plugin._backend_health = FakeBackendHealth(("codex",))
 
-                await _collect(plugin.on_message(FakeEvent("帮我分析这份报告")))
+                await _collect(plugin.on_message(FakeEvent("帮我生成 backend-report.txt")))
 
                 self.assertEqual(len(plugin.executed), 1)
                 self.assertEqual(plugin.executed[0][2], "codex")
@@ -513,7 +513,7 @@ class AgentIntegrationTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_pro_membership_alone_does_not_grant_trusted_host_execution(self):
+    def test_x_member_can_execute_natural_task(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self._plugin(Path(tmp))
@@ -525,8 +525,8 @@ class AgentIntegrationTests(unittest.TestCase):
                     )
                 )
 
-                self.assertEqual(plugin.executed, [])
-                self.assertTrue(any("X 或 PRO" in text for text in _plain_texts(replies)))
+                # 开放契约：allowlist 成员（非 owner）可执行自然语言任务
+                self.assertEqual(len(plugin.executed), 1)
 
         asyncio.run(scenario())
 
@@ -697,7 +697,10 @@ class AgentIntegrationTests(unittest.TestCase):
                 ordinary = await _collect(
                     plugin.on_message(FakeEvent("帮我生成报告", sender="999"))
                 )
-                self.assertTrue(any("X 或 PRO" in text for text in _plain_texts(ordinary)))
+                self.assertFalse(any("X 或 PRO" in text for text in _plain_texts(ordinary)))
+                # 开放契约：普通用户得到澄清追问而非 tier 拒绝，但仍不直接执行
+                self.assertEqual(plugin.executed, [])
+                self.assertTrue(any("还是做成" in text for text in _plain_texts(ordinary)))
                 self.assertEqual(
                     await _collect(
                         plugin.on_message(FakeEvent("帮我生成报告", group_id="123", at_self=False))
@@ -708,7 +711,7 @@ class AgentIntegrationTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_ordinary_natural_agent_request_gets_pro_boundary_without_execution(self):
+    def test_ordinary_natural_agent_request_gets_clarification_without_execution(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:
                 plugin = self._plugin(Path(tmp))
@@ -721,7 +724,7 @@ class AgentIntegrationTests(unittest.TestCase):
 
                 self.assertEqual(plugin.executed, [])
                 self.assertTrue(
-                    any("X 或 PRO" in text for text in _plain_texts(replies)),
+                    any("还是做成" in text for text in _plain_texts(replies)),
                     _plain_texts(replies),
                 )
 
@@ -780,7 +783,7 @@ class AgentIntegrationTests(unittest.TestCase):
 
                 async def controlled_execute(this, job_id, job_dir, task, backend, high_risk_approved):
                     this.executed.append((job_id, task, backend, high_risk_approved, this.work_dir))
-                    if task == "生成第一个报告":
+                    if task == "生成第一个 report.docx":
                         first_started.set()
                         await release_first.wait()
                     artifact = job_dir / "outputs" / "report.docx"
@@ -792,11 +795,11 @@ class AgentIntegrationTests(unittest.TestCase):
 
                 plugin._execute = types.MethodType(controlled_execute, plugin)
                 first = asyncio.create_task(
-                    _collect(plugin.on_message(FakeEvent("帮我生成第一个报告")))
+                    _collect(plugin.on_message(FakeEvent("帮我生成第一个 report.docx")))
                 )
                 await asyncio.wait_for(first_started.wait(), timeout=2)
                 second = asyncio.create_task(
-                    _collect(plugin.on_message(FakeEvent("帮我生成第二个报告")))
+                    _collect(plugin.on_message(FakeEvent("帮我生成第二个 report.docx")))
                 )
                 await asyncio.sleep(0.05)
                 self.assertFalse(second.done())
@@ -805,7 +808,7 @@ class AgentIntegrationTests(unittest.TestCase):
 
                 self.assertEqual(
                     [item[1] for item in plugin.executed],
-                    ["生成第一个报告", "生成第二个报告"],
+                    ["生成第一个 report.docx", "生成第二个 report.docx"],
                 )
                 self.assertTrue(
                     any("已排队" in text for text in _plain_texts(second_replies)),

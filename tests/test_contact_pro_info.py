@@ -3,6 +3,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -22,13 +23,17 @@ from contact_pro_info.main import (  # noqa: E402
     VERSION_REPLY,
     PRO_APPLICATION_GUIDE,
     USER_GUIDE,
+    WEIXIN_PRIVATE_HELP_REPLY,
+    WEIXIN_PRIVATE_CAPABILITY_MEMORY,
 )
 
 
 class FakeEvent:
-    def __init__(self, text: str):
+    def __init__(self, text: str, *, platform_name: str = ""):
         self.text = text
         self.stopped = False
+        if platform_name:
+            self.platform_meta = SimpleNamespace(name=platform_name)
 
     def get_message_str(self):
         return self.text
@@ -48,6 +53,19 @@ async def collect(generator):
 
 
 class ContactProInfoTests(unittest.TestCase):
+    def test_weixin_private_help_never_claims_qq_membership_or_voice_delivery(self):
+        async def scenario():
+            plugin = ContactProInfo.__new__(ContactProInfo)
+            event = FakeEvent("小柠能做什么", platform_name="weixin_oc")
+
+            replies = await collect(plugin.on_message(event))
+
+            self.assertEqual(replies, [WEIXIN_PRIVATE_HELP_REPLY])
+            self.assertNotIn("自动获得 X", replies[0])
+            self.assertIn("文字回复", replies[0])
+
+        asyncio.run(scenario())
+
     def test_public_help_describes_the_explicit_music_paths(self):
         self.assertIn("\u7f51\u6613\u4e91\u6b4c\u66f2 ID", USER_GUIDE)
         self.assertIn("/sing <\u539f\u521b\u6b4c\u66f2\u63cf\u8ff0>", USER_GUIDE)
@@ -65,6 +83,37 @@ class ContactProInfoTests(unittest.TestCase):
         self.assertEqual(version_reply_for("小柠能做什么"), CONVERSATIONAL_HELP_REPLY)
         self.assertIn("直接说", CONVERSATIONAL_HELP_REPLY)
         self.assertNotIn("【小柠使用指南】", CONVERSATIONAL_HELP_REPLY)
+
+    def test_capability_memory_injected_into_llm_requests_per_channel(self):
+        async def scenario():
+            plugin = ContactProInfo.__new__(ContactProInfo)
+            for platform_name, expected in (
+                ("", [CAPABILITY_MEMORY, CAPABILITY_CATALOG_MEMORY]),
+                ("weixin_oc", [WEIXIN_PRIVATE_CAPABILITY_MEMORY]),
+            ):
+                with self.subTest(platform=platform_name or "qq"):
+                    req = SimpleNamespace(system_prompt="base prompt")
+                    await plugin.inject_capability_memory(
+                        FakeEvent("hi", platform_name=platform_name), req
+                    )
+                    for block in expected:
+                        self.assertIn(block, req.system_prompt)
+                    if not platform_name:
+                        self.assertNotIn("【个人微信私聊通道事实】", req.system_prompt)
+                        self.assertNotIn("【公开能力事实】", WEIXIN_PRIVATE_CAPABILITY_MEMORY)
+                    # idempotent: re-injection does not duplicate
+                    await plugin.inject_capability_memory(
+                        FakeEvent("hi", platform_name=platform_name), req
+                    )
+                    self.assertEqual(req.system_prompt.count(block), 1)
+            # QQ and WeChat blocks never cross channels
+            self.assertNotIn("必须QQ交付", WEIXIN_PRIVATE_CAPABILITY_MEMORY)
+
+        asyncio.run(scenario())
+
+    def test_capability_prompt_does_not_expand_one_missed_route_into_a_blanket_refusal(self):
+        self.assertIn("只说明当前这一步没有执行", CAPABILITY_MEMORY)
+        self.assertIn("不要笼统声称小柠不能操作电脑", CAPABILITY_MEMORY)
 
     def test_feature_questions_are_explained_without_claiming_real_tasks(self):
         for text in (
@@ -142,10 +191,10 @@ class ContactProInfoTests(unittest.TestCase):
             for persona in config["persona"]
             if persona.get("name") == "xiaoning"
         )
-        self.assertIn("询问联系作者", persona_prompt)
-        self.assertIn("公开邮箱", persona_prompt)
-        self.assertIn("GitHub 查询", persona_prompt)
-        self.assertIn("文件任务的成功标准是 QQ 已实际收到文件", persona_prompt)
+        self.assertIn("没有实际需求时不介绍功能", persona_prompt)
+        self.assertIn("主动给一个具体判断或行动建议", persona_prompt)
+        self.assertIn("有自己立场", persona_prompt)
+        self.assertIn("QQ 实际收到文件才算完成", persona_prompt)
         self.assertIn("不公开管理入口", persona_prompt)
         self.assertNotRegex(persona_prompt, r"QQ\s*\d{5,}")
         self.assertIn("普通版含", CAPABILITY_MEMORY)
@@ -172,16 +221,6 @@ class ContactProInfoTests(unittest.TestCase):
         self.assertNotIn("白名单 QQ", USER_GUIDE)
         self.assertNotIn("/添加提醒", USER_GUIDE)
         self.assertNotIn("/remind ", USER_GUIDE)
-
-        async def scenario():
-            plugin = ContactProInfo.__new__(ContactProInfo)
-            req = type("Req", (), {"system_prompt": "persona"})()
-            await plugin.inject_capability_memory(FakeEvent(""), req)
-            self.assertIn(CAPABILITY_MEMORY, req.system_prompt)
-            self.assertIn(CAPABILITY_CATALOG_MEMORY, req.system_prompt)
-
-        asyncio.run(scenario())
-
 
 if __name__ == "__main__":
     unittest.main()

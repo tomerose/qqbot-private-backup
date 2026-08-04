@@ -18,6 +18,10 @@ try:
     from xiaoning_capabilities import capability_prompt_block
 except ImportError:
     from data.plugins.xiaoning_capabilities import capability_prompt_block
+try:
+    from xiaoning_runtime import is_weixin_private
+except ImportError:
+    from data.plugins.xiaoning_runtime import is_weixin_private
 
 
 # ---- Load long Chinese text from external UTF-8 files ----
@@ -48,6 +52,28 @@ PRO_APPLICATION_GUIDE = (
 CONVERSATIONAL_HELP_REPLY = (
     "能陪你聊，也能真动手：查资料、读文件、画图、做网页、报告和视频都行。"
     "别研究命令，直接说眼下想搞定什么；比如“帮我比较 A 和 B”，我会自己接到合适的功能。"
+)
+
+WEIXIN_PRIVATE_HELP_REPLY = (
+    "这里是小柠的个人微信私聊。可以连续聊天、整理你发来的文字/链接/文件、"
+    "记录和查询只属于你的记忆与任务。图片和文件只在当前聊天实际送达后才算完成。\n"
+    "你发来的语音可以理解；目前我会用文字回复。群聊还没有开启。"
+)
+
+WEIXIN_PRIVATE_ACCESS_REPLY = (
+    "个人微信私聊不会因为加好友自动改变 X/Pro 资格；原有授权和安全边界仍然有效。"
+    "聊天、私有记忆和任务整理已经按微信身份单独隔离。"
+)
+
+WEIXIN_PRIVATE_CAPABILITY_MEMORY = (
+    "【个人微信私聊通道事实】\n"
+    "- 本段优先于其他通用提示中出现的 QQ 文案；对当前用户不得提 QQ。\n"
+    "- 当前是个人微信私聊，不处理微信群消息。\n"
+    "- 可以做连续对话、文字/链接/文件整理、私有记忆与任务跟踪；数据只按当前微信身份使用。\n"
+    "- 可以理解用户发来的语音，但暂时只能文字回复；禁止说已经发送语音。\n"
+    "- 图片或文件必须在当前微信聊天实际送达后才可说完成；失败时只说明保留或未送达，不能承诺 QQ 重试。\n"
+    "- 微信端的定时提醒和后台主动消息要等首个真实送达验证后再启用；当前不得先承诺。\n"
+    "- 不得说添加微信即可获得 X/Pro，也不得把 QQ 专属资格、群聊或交付方式套到微信用户。"
 )
 
 VERSION_REPLY = (
@@ -82,7 +108,7 @@ _FEATURE_HELP = (
     (("深度研究",), "深度研究适合需要多轮检索、交叉核验再出完整报告的题，Pro 可用。直接说“帮我深度研究大学生就业趋势”，做好后报告会发回 QQ。"),
     (("行动包", "比较决策", "旅行规划"), "行动包会把研究、比较或行程做成可执行报告。直接说“帮我比较 A 和 B”或“帮我规划杭州三天行程”就行。"),
     (("网页工坊", "做网页", "制作网页"), "网页工坊会直接做出能操作的网页，并返回预览、HTML 和公开链接。你可以说“帮我做一个记账网页”。"),
-    (("去水印", "改图", "编辑图片", "重画"), "会。原图和要求可以一起发，也可以相邻两条发；例如回复图片说“去水印，抹掉右下角的字”。只有出现任务已开始才代表真正处理，QQ 收到新图片才算完成。"),
+    (("改图", "编辑图片", "重画", "换背景"), "会。原图和要求可以一起发，也可以相邻两条发；例如回复图片说“把这张图改成暖色背景”。只有出现任务已开始才代表真正处理，QQ 收到新图片才算完成。"),
     (("画图", "作图", "绘图", "图片生成"), "会，直接把画面说清楚就行，比如“帮我画一只雨夜霓虹下的黑猫”。需要改图就回复原图说要改哪里。"),
     (("视频", "短片", "动画"), "原创 AI 片段说“帮我生成一段海边日落视频”；完整脚本、素材、配音短片说“帮我做一段如何在家做拿铁的视频”；高质量模板评分版说“帮我做一个高质量的拿铁科普视频”；找现成视频说“帮我找周杰伦现场视频”。四条链路互不抢任务。"),
     (("圆桌辩论", "圆桌讨论", "ai辩论", "辩论"), "圆桌适合把一个问题拆成多种立场。直接说“圆桌讨论 AI 会不会降低人的能力”就会开始。"),
@@ -92,7 +118,7 @@ _FEATURE_HELP = (
     (("翻译",), "把原文和目标语言一起发来就行，比如“把这段话翻译成英文”，不用背命令。"),
     (("原创歌曲", "写歌", "唱歌", "音乐生成"), "想点现成歌曲就说歌名和歌手；想生成原创歌就描述主题、风格和情绪，我会自动分开处理。"),
     (("长期记忆", "记忆功能"), "你明确说出的长期偏好、计划和稳定事实可以被记住；一次性命令和文件任务不会当成长期记忆。"),
-    (("任务追踪", "跨对话任务", "任务进度"), "X/PRO 的 Agent、改图/去水印、网页、研究报告、音乐和视频任务都会按真实状态跨对话追踪。说“任务进度怎么样”可查询；只有真实输出并成功交付后才会标记完成，催促或口头承诺不会改状态。"),
+    (("任务追踪", "跨对话任务", "任务进度"), "X/PRO 的 Agent、改图、网页、研究报告、音乐和视频任务都会按真实状态跨对话追踪。说“任务进度怎么样”可查询；只有真实输出并成功交付后才会标记完成，催促或口头承诺不会改状态。"),
 )
 _META_QUESTION_WORDS = (
     "怎么用", "如何用", "如何使用", "用法", "有什么用", "能做什么", "能干什么",
@@ -103,7 +129,7 @@ _TASK_REQUEST_PREFIXES = (
     "帮我", "给我", "替我", "帮忙", "我要", "我想", "麻烦", "能帮我", "可以帮我", "可不可以帮我",
     "请帮", "请给", "请做", "请生成", "请制作",
 )
-_SHEN_GROUP_ID = "1058848055"  # 周深粉丝群：不透露小柠会员体系
+_SHEN_GROUP_IDS = frozenset({"1058848055", "500009290"})  # 周深粉丝群：不透露小柠会员体系
 
 _TIER_SUBJECTS = {"pro", "普通版", "会员", "版本", "资格", "x资格", "go", "go资格", "x", "pro资格"}
 _TIER_INTENTS = {"是什么", "区别", "功能", "权限",
@@ -164,6 +190,17 @@ def feature_help_for(text: str) -> str | None:
     return None
 
 
+def _weixinize_delivery_text(text: str) -> str:
+    """Only adapt the channel noun in short, already-vetted feature replies."""
+    return (
+        str(text or "")
+        .replace("QQ 收到", "微信收到")
+        .replace("返回 QQ", "通过微信发回")
+        .replace("发回 QQ", "通过微信发回")
+        .replace("QQ 文件", "微信文件")
+    )
+
+
 def _match_tier(text: str) -> bool:
     value = _normalized(text)
     return any(item in value for item in _TIER_SUBJECTS) and any(
@@ -214,11 +251,22 @@ class ContactProInfo(Star):
 
         # 周深粉丝群：不透露小柠会员体系（版本区别/资格/开通方式）
         group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
-        if group_id == _SHEN_GROUP_ID and (_match_tier(text) or _match_acquisition(text)):
+        if group_id in _SHEN_GROUP_IDS and (_match_tier(text) or _match_acquisition(text)):
             return
 
         feature_reply = feature_help_for(text)
-        if feature_reply:
+        if is_weixin_private(event):
+            if feature_reply:
+                reply = _weixinize_delivery_text(feature_reply)
+            elif _match_help(text) or _match_conversational_help(text):
+                reply = WEIXIN_PRIVATE_HELP_REPLY
+            elif _match_acquisition(text) or _match_tier(text):
+                reply = WEIXIN_PRIVATE_ACCESS_REPLY
+            elif _match_contact(text):
+                reply = CONTACT_REPLY
+            else:
+                return
+        elif feature_reply:
             reply = feature_reply
         elif _match_help(text):
             reply = USER_GUIDE
@@ -238,6 +286,12 @@ class ContactProInfo(Star):
     @filter.on_llm_request(priority=-17)
     async def inject_capability_memory(self, event: AstrMessageEvent, req) -> None:
         system_prompt = str(getattr(req, "system_prompt", "") or "")
+        if is_weixin_private(event):
+            if "【个人微信私聊通道事实】" not in system_prompt:
+                req.system_prompt = (
+                    f"{system_prompt}\n\n{WEIXIN_PRIVATE_CAPABILITY_MEMORY}"
+                ).strip()
+            return
         if "【公开能力事实】" not in system_prompt:
             req.system_prompt = (
                 f"{system_prompt}\n\n{CAPABILITY_MEMORY}\n\n{CAPABILITY_CATALOG_MEMORY}"

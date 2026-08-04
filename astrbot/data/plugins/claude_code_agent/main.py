@@ -1485,22 +1485,22 @@ class ClaudeCodeAgent(Star):
             all_delivered = True
             queued_for_retry = False
             for item in deliverables:
-                outcome = await self._deliver_artifact(
+                delivery = await self._deliver_artifact(
                     ctx,
                     item.path,
                     kind="image" if item.kind == "image" else "file",
                     task_id=job_id,
                     task_desc=payload.task,
                 )
-                delivered = outcome.delivered
+                delivered = delivery.delivered
                 if delivered:
-                    if outcome.channel == "group_upload":
+                    if delivery.channel == "group_upload":
                         detail = f"已上传群文件：{item.path.name}"
-                    elif outcome.channel == "private_fallback":
+                    elif delivery.channel == "private_fallback":
                         detail = f"已私聊发送：{item.path.name}（群上传失败，改发私聊）"
-                    elif outcome.channel == "group_image":
+                    elif delivery.channel == "group_image":
                         detail = f"已发送图片：{item.path.name}"
-                    elif outcome.channel == "private_component":
+                    elif delivery.channel == "private_component":
                         detail = f"已发送：{item.path.name}"
                     else:
                         detail = f"已发送：{item.path.name}"
@@ -1510,10 +1510,10 @@ class ClaudeCodeAgent(Star):
                     payload = self._payload_with_cursor(payload, delivered_digests)
                     self._payload_store.write(job_id, payload)
                 else:
-                    queued_for_retry = queued_for_retry or outcome.channel == "queued"
+                    queued_for_retry = queued_for_retry or delivery.channel == "queued"
                     retry_note = (
                         "已加入后台重试队列，稍后自动送达。"
-                        if outcome.channel == "queued"
+                        if delivery.channel == "queued"
                         else "文件已安全保留；QQ 恢复后可用 /agent recover 重试交付。"
                     )
                     yield self._reply(
@@ -1673,7 +1673,7 @@ class ClaudeCodeAgent(Star):
             )
             return
         if action in {"use", "cwd"} and not self._can_manage_runtime(ctx):
-            yield self._reply(ctx, Plain("该管理指令仅限小姚使用。"))
+            yield self._reply(ctx, Plain("该管理指令不可用。"))
             return
         if action in {"status", "cancel"} and not self._is_owner(ctx):
             yield self._reply(ctx, Plain("该操作需要 X 或 PRO 资格。"))
