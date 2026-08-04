@@ -18,6 +18,18 @@ from pathlib import Path
 from PIL import Image as PillowImage
 
 
+def _replace_atomic(source: Path, target: Path) -> None:
+    """os.replace with retries: Windows AV scans can briefly hold the target."""
+    for attempt in range(5):
+        try:
+            source.replace(target)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.1 * (attempt + 1))
+
+
 @dataclass(frozen=True)
 class EditSession:
     image_b64: str | None = None
@@ -67,7 +79,7 @@ class ImageEditSessionStore:
         data = {**data, "updated_at": time.time()}
         tmp = meta_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(meta_path)
+        _replace_atomic(tmp, meta_path)
 
     def remember_image(self, scope: str, image_b64: str) -> None:
         data = self._read_meta(scope)
@@ -86,7 +98,7 @@ class ImageEditSessionStore:
             tmp = image_path.with_suffix(".png.tmp")
             with tmp.open("wb") as handle:
                 normalized.save(handle, format="PNG", optimize=True)
-            tmp.replace(image_path)
+            _replace_atomic(tmp, image_path)
         self._write_meta(scope, data)
 
     def remember_intent(self, scope: str, kind: str, prompt: str) -> None:
