@@ -117,6 +117,13 @@ class LlmMixin:
         if parsed and ("Group" in parsed[1] or "Guild" in parsed[1]):
             if "@" in cleaned or _GROUP_PRIVATE_RE.search(cleaned):
                 return None
+            sentences = [
+                part.strip()
+                for part in re.split(r"(?<=[。！？!?])\s*|\n+", cleaned)
+                if part.strip()
+            ]
+            if len(sentences) > 2:
+                return None
         return cleaned
 
     @staticmethod
@@ -233,6 +240,16 @@ class LlmMixin:
             count = 20
         count = max(0, min(count, 200))
 
+        # 主动消息只需要抓住最近的语境；把整段长期会话再次塞进模型会
+        # 稀释最近话题，也会把不必要的隐私内容带入一次新的主动触达。
+        try:
+            conversation_history_limit = int(
+                settings.get("conversation_history_limit", 40)
+            )
+        except Exception:
+            conversation_history_limit = 40
+        conversation_history_limit = max(1, min(conversation_history_limit, 100))
+
         try:
             max_chars = int(
                 settings.get(
@@ -256,6 +273,7 @@ class LlmMixin:
         return {
             "source_mode": source_mode,
             "platform_history_count": count,
+            "conversation_history_limit": conversation_history_limit,
             "platform_history_prompt": platform_history_prompt,
             "include_bot_messages": include_bot_messages,
             "bot_identifiers": bot_identifiers,
@@ -529,7 +547,7 @@ class LlmMixin:
                     "{{platform_history_lines}}\n"
                     "[真实平台聊天流水结束]\n\n"
                     "[最终指令]\n"
-                    "请结合以上聊天流水、当前时间、未回复次数与当前人格设定，用最像你自己的、最自然的方式，生成一句适合此刻发出的主动消息。"
+                    "请结合以上聊天流水、当前时间、未回复次数与当前人格设定，用最像你自己的、最自然的方式，生成最多两句、适合此刻发出的主动消息。"
                 )
 
             now_str = datetime.now(self.timezone).strftime("%Y年%m月%d日 %H:%M")
@@ -579,6 +597,17 @@ class LlmMixin:
         settings = context_settings or self._get_context_settings(session_id)
         source_mode = settings["source_mode"]
         conversation_count = len(conversation_history)
+        try:
+            conversation_history_limit = int(
+                settings.get("conversation_history_limit", 40)
+            )
+        except Exception:
+            conversation_history_limit = 40
+        conversation_history_limit = max(1, min(conversation_history_limit, 100))
+        conversation_history = conversation_history[
+            -conversation_history_limit:
+        ]
+        retained_conversation_count = len(conversation_history)
 
         platform_records_count = 0
         platform_injected_count = 0
@@ -637,6 +666,7 @@ class LlmMixin:
         source_mode_label = mode_label_map.get(source_mode, source_mode)
         logger.info(
             f"[主动消息] 上下文注入来源：{source_mode_label}，读取到对话历史 {conversation_count} 条，"
+            f"保留最新 {retained_conversation_count} 条，"
             f"平台流水原始记录 {platform_records_count} 条，注入上下文 {platform_injected_count} 条，"
             f"平台流水上下文长度 {platform_chars} 字，最终提供给模型的上下文共 {len(effective_history)} 条喵。"
         )
@@ -860,9 +890,7 @@ class LlmMixin:
                     )
                 )
         except Exception as llm_error:
-            logger.error(f"[主动消息] 使用新 API 调用 LLM 失败喵: {llm_error}")
-            logger.info(f"[主动消息] 错误类型喵: {type(llm_error).__name__}")
-            logger.info(f"[主动消息] 错误详情喵: {str(llm_error)}")
+            logger.error("[主动消息] 使用新 API 调用 LLM 失败: %s", type(llm_error).__name__)
             if self.telemetry and self.telemetry.enabled:
                 # 新接口失败时单独记录，便于与 fallback_api 的失败率拆分分析。
                 self._track_task(
@@ -902,7 +930,7 @@ class LlmMixin:
                     logger.warning("[主动消息] 未找到 LLM Provider，放弃并重新调度喵。")
                     return None, final_user_simulation_prompt
             except Exception as fallback_error:
-                logger.error(f"[主动消息] 传统 API 回退也失败喵: {fallback_error}")
+                logger.error("[主动消息] 传统 API 回退失败: %s", type(fallback_error).__name__)
                 logger.info(
                     f"[主动消息] 回退错误类型喵: {type(fallback_error).__name__}"
                 )

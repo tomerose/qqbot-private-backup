@@ -21,8 +21,8 @@ class LocalTTSClient:
         audio_root: Path,
         *,
         transport: Transport | None = None,
-        primary_timeout: float = 12.0,
-        fallback_timeout: float = 8.0,
+        primary_timeout: float = 45.0,
+        fallback_timeout: float = 15.0,
     ):
         parsed = urlparse(str(endpoint or ""))
         if (

@@ -29,14 +29,14 @@ class AIModerationHandler:
         self,
         context,
         store,
-        provider_id: str = "deepseek-chat",
+        provider_id: str = "gemini-2.5-flash",
         timeout_seconds: float = 8,
         context_messages: int = 8,
         owner_id: str = "1211000567",
     ):
         self.context = context
         self.store = store
-        self.provider_id = str(provider_id or "deepseek-chat")
+        self.provider_id = str(provider_id or "gemini-2.5-flash")
         self.timeout_seconds = max(0.01, min(float(timeout_seconds), 30.0))
         self.context_messages = max(1, min(int(context_messages), 8))
         self.owner_id = str(owner_id)

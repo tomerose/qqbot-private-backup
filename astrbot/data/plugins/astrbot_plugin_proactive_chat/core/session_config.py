@@ -163,13 +163,16 @@ class ConfigMixin:
             return None
 
         # 命中规则：支持完整 UMO、规范化 UMO 或纯 target_id 三种写法。
-        # 私聊可额外配置为所有 X/Pro 用户自动加入，普通用户仍保持完全关闭。
+        # 私聊可额外覆盖所有已建立会话，或只覆盖 X/Pro 用户。
         session_list = settings.get("session_list", [])
         normalized_session_id = self._normalize_session_id(session_id)
         candidates = {session_id, normalized_session_id, target_id}
         from_session_list = any(candidate in session_list for candidate in candidates)
         all_x_pro = session_type == "friend" and bool(
             settings.get("all_x_pro_sessions", False)
+        )
+        all_friend_sessions = session_type == "friend" and bool(
+            settings.get("all_friend_sessions", False)
         )
         eligible_x_pro = False
         if all_x_pro and str(target_id).isdigit():
@@ -178,12 +181,13 @@ class ConfigMixin:
             except Exception:
                 eligible_x_pro = False
 
-        if from_session_list or eligible_x_pro:
+        if from_session_list or eligible_x_pro or all_friend_sessions:
             # 返回深拷贝，避免调用方意外修改全局配置对象
             config_copy = copy.deepcopy(settings)
             config_copy["_session_type"] = session_type
             config_copy["_from_session_list"] = from_session_list
             config_copy["_all_x_pro_session"] = eligible_x_pro
+            config_copy["_all_friend_session"] = all_friend_sessions
             return config_copy
 
         return None

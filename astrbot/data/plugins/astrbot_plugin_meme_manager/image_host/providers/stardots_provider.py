@@ -597,7 +597,7 @@ class StarDotsProvider(ImageHostInterface):
                                     temp_path.unlink()
                         else:
                             logger.error(f"下载失败，状态码: {response.status_code}")
-                            logger.error(f"响应内容: {response.text[:200]}")
+                            logger.error("下载失败，响应正文已省略")
                     else:
                         error_msg = ticket_result.get("message", "未知错误")
                         logger.error(f"获取票据失败: {error_msg}")

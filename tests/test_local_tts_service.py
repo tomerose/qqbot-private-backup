@@ -1,10 +1,12 @@
 import importlib.util
+from array import array
 import os
 import sys
 import tempfile
 import time
 import types
 import unittest
+import wave
 from unittest.mock import patch
 from pathlib import Path
 
@@ -31,6 +33,20 @@ class FailingEngine:
 
 
 class LocalTTSServiceTests(unittest.TestCase):
+    def test_quiet_pcm_output_is_normalized_to_an_audible_peak(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "quiet.wav"
+            with wave.open(str(path), "wb") as output:
+                output.setparams((1, 2, 24000, 4, "NONE", "not compressed"))
+                output.writeframes(array("h", [0, 10, -20, 15]).tobytes())
+
+            self.assertTrue(MODULE.normalize_pcm_wav(path))
+
+            with wave.open(str(path), "rb") as normalized:
+                samples = array("h")
+                samples.frombytes(normalized.readframes(normalized.getnframes()))
+            self.assertEqual(max(abs(sample) for sample in samples), 28000)
+
     def test_start_script_passes_ascii_relative_private_paths(self):
         script = (
             MODULE_PATH.parent / "start_local_tts.ps1"

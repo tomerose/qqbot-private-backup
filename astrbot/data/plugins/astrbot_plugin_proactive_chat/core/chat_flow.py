@@ -316,8 +316,10 @@ class ProactiveCoreMixin:
             is_group_session = parsed and ("Group" in parsed[1] or "Guild" in parsed[1])
             if is_group_session:
                 async with self.data_lock:
-                    if self._clear_session_schedule_state(session_id):
-                        await self._save_data_internal()
+                    state = self.session_data.setdefault(session_id, {})
+                    state["group_user_messages_since_proactive"] = 0
+                    self._clear_session_schedule_state(session_id)
+                    await self._save_data_internal()
 
         except Exception as e:
             error_type = type(e).__name__

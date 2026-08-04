@@ -24,8 +24,8 @@ except ImportError:
 
 PROXY_CHAT = "http://127.0.0.1:3000/v1/chat/completions"
 PROXY_IMAGE = "http://127.0.0.1:3000/v1/images/generations"
-DEEPSEEK_CHAT = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+_NAPCAT_TOKEN = os.environ.get("NAPCAT_HTTP_TOKEN", "").strip()
+_NAPCAT_HEADERS = {"Authorization": f"Bearer {_NAPCAT_TOKEN}"} if _NAPCAT_TOKEN else {}
 PLUGIN_DIR = Path(__file__).resolve().parent
 _NCM_DECODER = Path("D:/Claudecoda学习/DEEP营考核平台/scripts/decode-ncm.mjs")
 
@@ -58,7 +58,7 @@ DEFAULT_CONFIG = {
     "zhoushen_daily_enabled": True,
     "zhoushen_daily_time": "23:00",
     "zhoushen_daily_groups": ["1058848055"],
-    "zhoushen_song_enabled": True,
+    "zhoushen_song_enabled": False,
     "zhoushen_song_time": "23:01",
     "zhoushen_song_groups": ["1058848055"],
     "zhoushen_meme_enabled": True,
@@ -275,7 +275,7 @@ class XiaoningScheduled(Star):
             resp = requests.post(
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-3.5-flash",
+                    "model": "gemini-3.6-flash",
                     "messages": [
                         {
                             "role": "system",
@@ -407,7 +407,7 @@ class XiaoningScheduled(Star):
             sender_data = msg.get("sender", {})
             sender = sender_data.get("nickname", sender_data.get("user_id", "?"))
             text_segments = [
-                seg["data"]["text"]
+                seg.get("data", {}).get("text", "")
                 for seg in msg.get("message", [])
                 if seg.get("type") == "text"
             ]
@@ -422,7 +422,7 @@ class XiaoningScheduled(Star):
                 requests.post,
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-3.5-flash",
+                    "model": "gemini-3.6-flash",
                     "messages": [
                         {
                             "role": "system",
@@ -487,7 +487,7 @@ class XiaoningScheduled(Star):
                 sent += 1
                 await asyncio.sleep(0.8)
             except Exception as e:
-                logger.warning(f"[小柠定时] AI 早报->{qq_id} 失败: {e}")
+                logger.warning("[小柠定时] AI 早报发送失败: %s", type(e).__name__)
         return sent > 0
 
     def _scrape_rss(self) -> list[str]:
@@ -542,7 +542,7 @@ class XiaoningScheduled(Star):
     def _fetch_ai_news(self) -> str:
         """Generate morning briefing with Google Search grounding via Gemini proxy.
 
-        Primary: Gemini 3.5 Flash Search — live web-grounded briefing with curated
+        Primary: Gemini 3.6 Flash Search — live web-grounded briefing with curated
         analysis. Falls back to RSS scraping when the proxy is unavailable.
         """
         today = datetime.now().strftime("%Y年%m月%d日 周%u").replace(
@@ -550,7 +550,7 @@ class XiaoningScheduled(Star):
             "周4", "周四").replace("周5", "周五").replace("周6", "周六").replace("周7", "周日")
 
         system_prompt = (
-            "你是小柠，一个靠谱的 AI 助手。用联网搜索获取今天最新新闻，"
+            "你是小柠，一个判断清楚、表达自然的资讯编辑。用联网搜索获取今天最新新闻，"
             "生成一份高质量的早间简报。严格按指定 Markdown 格式输出，"
             "每条新闻必须附真实来源链接。小柠分析部分要有独立思考，"
             "不堆砌事实。禁止用方括号占位符。"
@@ -576,7 +576,7 @@ class XiaoningScheduled(Star):
             resp = requests.post(
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-3.5-flash-search",
+                    "model": "gemini-3.6-flash-search",
                     "google_search": True,
                     "google_maps": False,
                     "code_execution": False,
@@ -603,7 +603,7 @@ class XiaoningScheduled(Star):
                 resp = requests.post(
                     PROXY_CHAT,
                     json={
-                        "model": "gemini-3.5-flash",
+                        "model": "gemini-3.6-flash",
                         "max_tokens": 2000,
                         "messages": [
                             {"role": "system", "content": system_prompt},
@@ -655,7 +655,7 @@ class XiaoningScheduled(Star):
             tmp.replace(path)
             return True
         except Exception as e:
-            logger.error(f"[小柠定时] 写入 {path.name} 失败: {type(e).__name__}: {e}")
+            logger.error("[小柠定时] 写入失败: %s", type(e).__name__)
             try:
                 tmp.unlink(missing_ok=True)
             except Exception:
@@ -817,7 +817,7 @@ class XiaoningScheduled(Star):
             client = WeiboClient()
             results = await asyncio.to_thread(
                 client.download_user_posts_images,
-                uid="1736988591", pages=2,
+                uid="1736988591", pages=5,
                 download_dir=str(photos_dir),
                 expand_long_text=False,
             )
@@ -832,8 +832,8 @@ class XiaoningScheduled(Star):
 
         # 2. Generate Word document
         try:
-            self._build_zhoushen_docx(docx_path, photo_paths, today_str)
-            logger.info(f"[小柠定时] Word 已生成: {docx_path}")
+            await asyncio.to_thread(self._build_zhoushen_docx, docx_path, photo_paths, today_str)
+            logger.info("[小柠定时] Word 已生成")
         except Exception as e:
             logger.error(f"[小柠定时] Word 生成失败: {e}")
             return False
@@ -856,7 +856,7 @@ class XiaoningScheduled(Star):
                         "file": str(docx_path),
                         "name": docx_path.name,
                     },
-                    headers={"Authorization": "Bearer lemon-secret-token"},
+                    headers=_NAPCAT_HEADERS,
                     timeout=30,
                 )
                 await asyncio.sleep(1)
@@ -1127,7 +1127,8 @@ class XiaoningScheduled(Star):
             if song.suffix.lower() == ".ncm":
                 # Decrypt NCM to MP3
                 decoded = Path(tmp) / f"{song.stem}.mp3"
-                result = _sp.run(
+                result = await asyncio.to_thread(
+                    _sp.run,
                     ["node", str(_NCM_DECODER), str(song), str(decoded.with_suffix(""))],
                     capture_output=True, text=True, timeout=30,
                 )
@@ -1140,12 +1141,14 @@ class XiaoningScheduled(Star):
 
             # Trim intro (18s) + convert to AMR voice
             amr_path = Path(tmp) / "song.amr"
-            trim_result = _sp.run([
-                "ffmpeg", "-y", "-ss", "18", "-i", str(audio_path),
-                "-ac", "1", "-ar", "8000", "-b:a", "12.2k",
-                "-acodec", "libopencore_amrnb", "-t", "120",
-                str(amr_path),
-            ], capture_output=True, text=True, timeout=60)
+            trim_result = await asyncio.to_thread(
+                _sp.run,
+                ["ffmpeg", "-y", "-ss", "18", "-i", str(audio_path),
+                 "-ac", "1", "-ar", "8000", "-b:a", "12.2k",
+                 "-acodec", "libopencore_amrnb", "-t", "120",
+                 str(amr_path)],
+                capture_output=True, text=True, timeout=60,
+            )
             if trim_result.returncode != 0 or not amr_path.is_file():
                 logger.warning(f"[小柠定时] ffmpeg 裁剪失败: {song.name}")
                 return False
@@ -1166,7 +1169,7 @@ class XiaoningScheduled(Star):
                         "group_id": int(gid),
                         "message": f"[CQ:record,file=file:///{amr_abs}]",
                     },
-                    headers={"Authorization": "Bearer lemon-secret-token"},
+                    headers=_NAPCAT_HEADERS,
                     timeout=15,
                 )
                 await asyncio.sleep(0.8)
@@ -1194,13 +1197,13 @@ class XiaoningScheduled(Star):
     async def _push_zhoushen_meme(self):
         import random as _random
         logger.info("[小柠定时] 周深表情包")
-        meme_dir = Path(r"D:\Claudecoda学习\qqbot\claude_workspace\zhoushen_memes")
+        meme_dir = Path(__file__).resolve().parents[4] / "claude_workspace" / "zhoushen_memes"
         memes = list(meme_dir.glob("*.jpg")) + list(meme_dir.glob("*.png")) + list(meme_dir.glob("*.gif"))
         if not memes:
             logger.warning("[小柠定时] 表情包目录为空")
             return False
         meme = _random.choice(memes)
-        logger.info(f"[小柠定时] 表情包: {meme.name}")
+        logger.info("[小柠定时] 已选择表情包")
         gids = await self._resolve_groups(self.config["zhoushen_meme_groups"])
         bot = await self._get_bot()
         if not bot or not gids:

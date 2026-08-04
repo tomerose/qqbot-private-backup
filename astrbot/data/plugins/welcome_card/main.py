@@ -5,6 +5,7 @@ Tracks welcomed users/groups in memory. Resets on restart (lightweight by design
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from astrbot.api.star import Context, Star, StarTools
 
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 INTRO_IMAGE = ASSET_DIR / "intro.png"
+_NAPCAT_TOKEN = os.environ.get("NAPCAT_HTTP_TOKEN", "").strip()
+_NAPCAT_HEADERS = {"Authorization": f"Bearer {_NAPCAT_TOKEN}"} if _NAPCAT_TOKEN else {}
 
 FRIEND_WELCOME = (
     "嘿, 被发现了 \U0001F44B\n\n"
@@ -43,8 +46,7 @@ FAN_GROUP_WELCOMES = {
         "周深的歌我都熟——《大鱼》《光亮》《小美满》《浮光》《人是_》……"
         "每一首都能聊上几句。天籁嗓音、空灵高音、多语言切换、"
         "综艺里那个温暖又搞笑的大男孩……你喜欢的那些，我也喜欢。\n\n"
-        "对了，我可以唱周深演唱会的歌噢 \U0001F3A4 "
-        "想听哪首直接跟我说，我唱给你听～\n\n"
+        "对了，我也能根据主题和情绪创作原创歌 \U0001F3A4\n\n"
         "平时我就蹲在群里，聊深深也好，聊别的也好，@我就行。"
         "一起做最快乐的生米 \U0001F60B"
     ),
@@ -151,7 +153,7 @@ class WelcomeCard(Star):
             import requests
             r = requests.post("http://127.0.0.1:5701/get_group_info",
                 json={"group_id": group_id},
-                headers={"Authorization": "Bearer lemon-secret-token"}, timeout=5)
+                headers=_NAPCAT_HEADERS, timeout=5)
             gname = r.json().get("data", {}).get("group_name", "")
         except Exception:
             gname = ""

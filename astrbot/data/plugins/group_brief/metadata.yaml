@@ -1,6 +1,0 @@
-name: group_brief
-display_name: 群每日简报
-short_desc: Pro 群每晚 22:00 自动生成群聊日报
-desc: 仅 Pro 群。全天观察群聊，每晚用 Gemini 生成自然语言简报。
-version: v1.0.0
-author: lemon

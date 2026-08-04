@@ -4,6 +4,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -77,6 +78,19 @@ class _PrivateEvent:
         return "刚才的任务进度怎么样"
 
 
+class _WeixinPrivateEvent:
+    platform_meta = SimpleNamespace(name="weixin_oc")
+
+    def is_private_chat(self):
+        return True
+
+    def get_sender_id(self):
+        return "wxid_alice_123"
+
+    def get_message_str(self):
+        return "上次整理的资料进度怎么样"
+
+
 class _ScopedEvent:
     def __init__(self, text: str, group_id: str = ""):
         self._text = text
@@ -96,6 +110,39 @@ class _ScopedEvent:
 
 
 class XiaoningMemoryScopeTests(unittest.TestCase):
+    def test_weixin_private_identity_is_namespaced(self):
+        event = _WeixinPrivateEvent()
+        key = memory_module.XiaoningMemory._sender_id(event)
+
+        self.assertEqual(key, "weixin_oc:wxid_alice_123")
+        self.assertTrue(memory_module.XiaoningMemory._valid_qq(key))
+        self.assertFalse(memory_module.XiaoningMemory._valid_qq("wxid_alice_123"))
+
+    def test_weixin_task_context_uses_its_own_storage_identity(self):
+        plugin = memory_module.XiaoningMemory.__new__(memory_module.XiaoningMemory)
+        plugin._db = object()
+        plugin._recent_context = {}
+        plugin._recent_context_max = 6
+        plugin._recall_candidates = lambda *_args: []
+        seen = []
+
+        def active_tasks(user_key):
+            seen.append(user_key)
+            return [{
+                "doc_id": "wechat-task",
+                "title": "整理资料",
+                "description": "等待当前微信聊天交付",
+                "status": "delivery_pending",
+            }]
+
+        plugin._get_active_tasks = active_tasks
+        request = _Request()
+        asyncio.run(plugin.inject_memories(_WeixinPrivateEvent(), request))
+
+        self.assertEqual(seen, ["weixin_oc:wxid_alice_123"])
+        self.assertIn("进行中的任务", request.system_prompt)
+        self.assertIn("当前微信聊天交付", request.system_prompt)
+
     def test_group_alias_is_self_declared_and_only_matches_current_message(self):
         self.assertEqual(memory_module._self_declared_alias("小柠，我叫童哥"), "童哥")
         self.assertIsNone(memory_module._self_declared_alias("童哥是负责人"))

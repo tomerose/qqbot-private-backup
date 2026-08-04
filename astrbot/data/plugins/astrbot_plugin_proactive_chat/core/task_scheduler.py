@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from astrbot.api import logger
@@ -240,10 +240,49 @@ class SchedulerMixin:
         skipped_disabled = 0
         skipped_max_unanswered = 0
 
-        # 私聊 session_list 批量注册
+        # 私聊 session_list 批量注册。启用全量私聊时，已有会话直接写入错峰
+        # 调度任务，不依赖启动后易被消息事件取消的临时计时器；未知 QQ 号没有
+        # 会话记录，不能被凭空联系。
         friend_settings = self.config.get("friend_settings", {})
+        restored_private_schedule_count = 0
         if friend_settings.get("enable", False):
-            for session_id in friend_settings.get("session_list", []):
+            friend_session_ids = list(friend_settings.get("session_list", []))
+            known_friend_session_ids: set[str] = set()
+            if friend_settings.get("all_friend_sessions", False):
+                for known_session_id in self.session_data:
+                    parsed = self._parse_session_id(known_session_id)
+                    if parsed and self._is_friend_type(parsed[1]):
+                        friend_session_ids.append(known_session_id)
+                        known_friend_session_ids.add(known_session_id)
+
+            for session_id in dict.fromkeys(friend_session_ids):
+                if session_id in known_friend_session_ids:
+                    session_config = self._get_session_config(session_id)
+                    schedule_conf = (session_config or {}).get(
+                        "schedule_settings", {}
+                    )
+                    try:
+                        max_unanswered = int(
+                            schedule_conf.get("max_unanswered_times", 3)
+                        )
+                        unanswered_count = int(
+                            self.session_data.get(session_id, {}).get(
+                                "unanswered_count", 0
+                            )
+                        )
+                    except Exception:
+                        max_unanswered = 3
+                        unanswered_count = 0
+
+                    if (
+                        session_config
+                        and (max_unanswered <= 0 or unanswered_count < max_unanswered)
+                        and not self._has_related_persisted_task(session_id)
+                    ):
+                        await self._schedule_next_chat_and_save(session_id)
+                        restored_private_schedule_count += 1
+                        continue
+
                 result = await self._setup_auto_trigger_for_session_config(
                     friend_settings, session_id
                 )
@@ -312,6 +351,10 @@ class SchedulerMixin:
                 f"[主动消息] 已为 {auto_trigger_count} 个会话设置自动主动消息触发器喵。"
                 f"（跳过：已有任务 {skipped_existing}，无效 {skipped_invalid}，未启用 {skipped_disabled}，"
                 f"已达未回复上限 {skipped_max_unanswered}）"
+            )
+        if restored_private_schedule_count:
+            logger.info(
+                f"[主动消息] 已为 {restored_private_schedule_count} 个已有私聊会话写入错峰主动计划喵。"
             )
 
     async def _setup_auto_trigger_for_session_config(
@@ -534,6 +577,73 @@ class SchedulerMixin:
 
             await self._save_data_internal()
 
+    def _cancel_group_silence_timer(self, session_id: str) -> bool:
+        """Cancel an outstanding group-idle timer without creating a replacement."""
+        normalized_session_id = self._normalize_session_id(session_id)
+        cancelled = False
+        for timer_key in {session_id, normalized_session_id}:
+            timer = self.group_timers.pop(timer_key, None)
+            if timer is None:
+                continue
+            try:
+                timer.cancel()
+            except Exception as e:
+                logger.warning(
+                    f"[主动消息] 取消 {self._get_session_log_str(timer_key)} 的群计时器时出错喵: {e}"
+                )
+            cancelled = True
+        return cancelled
+
+    async def _schedule_group_reply_after_threshold(self, session_id: str) -> bool:
+        """Queue one debounced group reply once the configured member-message gate is met."""
+        normalized_session_id = self._normalize_session_id(session_id)
+        session_config = self._get_session_config(normalized_session_id)
+        if not session_config or not session_config.get("enable", False):
+            return False
+
+        try:
+            required_messages = max(
+                1,
+                int(session_config.get("group_min_messages_before_proactive", 3)),
+            )
+        except Exception:
+            required_messages = 3
+
+        try:
+            member_message_count = int(
+                self.session_data.get(normalized_session_id, {}).get(
+                    "group_user_messages_since_proactive", 0
+                )
+            )
+        except Exception:
+            member_message_count = 0
+        if member_message_count < required_messages:
+            return False
+
+        # A fresh group message cancels this short debounce job and replaces it
+        # below, so the response always considers the newest three-message turn.
+        self._cancel_group_silence_timer(normalized_session_id)
+        run_date = datetime.now(tz=self.timezone) + timedelta(seconds=1)
+        try:
+            self.scheduler.add_job(
+                self.check_and_chat,
+                "date",
+                run_date=run_date,
+                args=[normalized_session_id],
+                id=normalized_session_id,
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+        except Exception as e:
+            logger.error(f"[主动消息] 创建群聊阈值回复任务失败喵: {e}")
+            return False
+
+        logger.info(
+            f"[主动消息] {self._get_session_log_str(normalized_session_id, session_config)} "
+            f"累计 {member_message_count}/{required_messages} 条群成员消息，已安排即时回复检查喵。"
+        )
+        return True
+
     async def _reset_group_silence_timer(self, session_id: str) -> None:
         """重置指定群聊的沉默倒计时。"""
         normalized_session_id = self._normalize_session_id(session_id)
@@ -671,6 +781,23 @@ class SchedulerMixin:
                 if not current_config or not current_config.get("enable", False):
                     logger.info(
                         f"[主动消息] {self._get_session_log_str(session_id, current_config)} 的配置已禁用或不存在，跳过主动消息创建喵。"
+                    )
+                    return
+
+                try:
+                    user_message_count = int(
+                        self.session_data.get(session_id, {}).get(
+                            "group_user_messages_since_proactive", 0
+                        )
+                    )
+                except Exception:
+                    user_message_count = 0
+                # A quiet group gets one low-pressure chance to continue a real
+                # topic; the LLM still returns NO_SEND when there is no natural hook.
+                if user_message_count <= 0:
+                    logger.info(
+                        f"[主动消息] {self._get_session_log_str(session_id, current_config)} "
+                        "尚未收到群成员消息，保持安静喵。"
                     )
                     return
 

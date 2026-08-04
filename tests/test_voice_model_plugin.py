@@ -30,13 +30,18 @@ class FakeMessageObject:
 
 
 class FakeEvent:
-    def __init__(self, text, *, private=True, wake=True, components=None, result=None):
+    def __init__(
+        self, text, *, private=True, wake=True, components=None, result=None,
+        platform_name="",
+    ):
         self.message_str = text
         self._private = private
         self.is_at_or_wake_command = wake
         self.message_obj = FakeMessageObject(components or [Plain(text)])
         self._extra = {}
         self._result = result
+        if platform_name:
+            self.platform_meta = SimpleNamespace(name=platform_name)
 
     def is_private_chat(self):
         return self._private
@@ -87,6 +92,25 @@ class VoiceModelPluginTests(unittest.TestCase):
             await plugin.route_voice_request(event)
             self.assertIsNone(event.get_extra("voice_reply_requested"))
             self.assertIsNone(event.get_extra("selected_provider"))
+
+        asyncio.run(scenario())
+
+    def test_weixin_voice_request_keeps_a_truthful_text_reply(self):
+        async def scenario():
+            plugin = VoiceModelRouter.__new__(VoiceModelRouter)
+            result = FakeResult([Plain("我已经整理好了重点。")])
+            event = FakeEvent(
+                "请用语音回答我",
+                result=result,
+                platform_name="weixin_oc",
+            )
+
+            await plugin.route_voice_request(event)
+            await plugin.synthesize_voice_reply(event)
+
+            self.assertTrue(event.get_extra("voice_text_fallback"))
+            self.assertFalse(any(isinstance(item, Record) for item in result.chain))
+            self.assertEqual(result.chain[0].text, "微信这边暂时用文字回复：")
 
         asyncio.run(scenario())
 

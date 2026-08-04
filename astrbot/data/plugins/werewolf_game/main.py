@@ -204,7 +204,7 @@ class WerewolfGame(Star):
                     requests.post,
                     PROXY,
                     json={
-                        "model": "gemini-2.5-flash",
+                        "model": "gemini-3.6-flash",
                         "messages": [
                             {"role": "system", "content": "你是狼人杀的旁白主持人。用戏剧化的语言描述夜晚发生的事情，50 字以内。"},
                             {"role": "user", "content": f"昨晚死亡：{last_dead[-4:] if last_dead else '无人'}"},

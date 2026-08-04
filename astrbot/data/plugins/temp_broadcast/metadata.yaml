@@ -1,6 +1,0 @@
-name: temp_broadcast
-display_name: 临时广播(用完即删)
-short_desc: 启动时广播小柠回归消息
-desc: 一次性插件，发完后手动删除
-version: v1.0.0
-author: lemon

@@ -4,7 +4,6 @@ import asyncio
 import base64
 import hashlib
 import hmac
-import ipaddress
 import io
 import json
 import logging
@@ -13,14 +12,13 @@ import os
 import random
 import re
 import secrets
-import socket
 import sys
 import time
 import uuid
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import requests
 import uvicorn
@@ -47,28 +45,31 @@ from image_proxy_core import (
 app = FastAPI()
 PROJECT = os.getenv("VERTEX_PROJECT", "solar-modem-496213-f5")
 LOCATION = os.getenv("VERTEX_LOCATION", "global")
-MODEL_IDS = {
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
-    "gemini-3.1-pro-preview",
-    "gemini-3.5-flash",
+CHAT_MODEL = "gemini-3.6-flash"
+MODEL_IDS = {CHAT_MODEL}
+LEGACY_CHAT_MODEL_ALIASES = {
+    "gemini-2.5-flash": CHAT_MODEL,
+    "gemini-2.5-flash-lite": CHAT_MODEL,
+    "gemini-2.5-pro": CHAT_MODEL,
+    "gemini-3.1-pro-preview": CHAT_MODEL,
+    "gemini-3.5-flash": CHAT_MODEL,
 }
 MODEL_ROLES = {
-    "fast": "gemini-3.5-flash",
-    "quality": "gemini-3.1-pro-preview",
+    "fast": CHAT_MODEL,
+    "quality": CHAT_MODEL,
 }
-MIN_MODEL_OUTPUT_TOKENS = {
-    "gemini-2.5-flash": 256,
-    "gemini-2.5-pro": 512,
-    "gemini-3.1-pro-preview": 512,
-    "gemini-3.5-flash": 1000,
-}
+MIN_MODEL_OUTPUT_TOKENS = {CHAT_MODEL: 1000}
 RESEARCH_AGENT_ROLES = {
     "standard": "deep-research-preview-04-2026",
     "pro": "deep-research-pro-preview-12-2025",
     "max": "deep-research-max-preview-04-2026",
 }
-SEARCH_MODEL_ALIASES = {"gemini-2.5-flash-search", "gemini-3.5-flash-search"}
+SEARCH_MODEL_ALIASES = {
+    "gemini-2.5-flash-search",
+    "gemini-2.5-pro-search",
+    "gemini-3.5-flash-search",
+    "gemini-3.6-flash-search",
+}
 MUSIC_MODEL = "lyria-3-clip-preview"
 MAX_MUSIC_BYTES = 20 * 1024 * 1024
 MAX_CHAT_REQUEST_BYTES = 24 * 1024 * 1024
@@ -92,7 +93,7 @@ async def healthz(deep: bool = False):
     result = {
         "ok": True,
         "service": "vertex-gemini-proxy",
-        "primary_model": "gemini-3.5-flash",
+        "primary_model": CHAT_MODEL,
         "image_model": IMAGE_MODEL_PRIMARY,
     }
     if not deep:
@@ -102,7 +103,7 @@ async def healthz(deep: bool = False):
         await asyncio.wait_for(
             asyncio.to_thread(
                 client.models.generate_content,
-                model="gemini-3.5-flash",
+                model=CHAT_MODEL,
                 contents="Reply OK",
                 config=types.GenerateContentConfig(
                     max_output_tokens=8,
@@ -130,8 +131,7 @@ async def list_models():
             for model_id in sorted(MODEL_IDS)
         ]
         + [
-            {"id": model_id, "object": "model", "capabilities": {"vision": True, "audio": True, "search": True}}
-            for model_id in sorted(SEARCH_MODEL_ALIASES)
+            {"id": "gemini-3.6-flash-search", "object": "model", "capabilities": {"vision": True, "audio": True, "search": True}}
         ],
     }
 
@@ -140,8 +140,48 @@ def _resolve_model(model_id: object, model_role: object = None) -> str:
     """Resolve new semantic roles while preserving every existing model id."""
     if isinstance(model_role, str) and model_role in MODEL_ROLES:
         return MODEL_ROLES[model_role]
-    candidate = str(model_id or "gemini-3.5-flash")
-    return candidate if candidate in MODEL_IDS else "gemini-3.5-flash"
+    candidate = str(model_id or CHAT_MODEL)
+    return LEGACY_CHAT_MODEL_ALIASES.get(
+        candidate, candidate if candidate in MODEL_IDS else CHAT_MODEL
+    )
+
+
+# Deterministic content blocks: retrying the same prompt will not change the
+# outcome, and surfacing a 502 makes AstrBot answer with a raw error string,
+# which breaks 小柠's persona.  Reply 200 with an in-persona dodge instead.
+_BLOCKED_FINISH_REASONS = {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"}
+_BLOCKED_PROMPT_REASONS = {"SAFETY", "OTHER", "BLOCKLIST", "PROHIBITED_CONTENT"}
+_BLOCKED_REPLY = "这个话题我接不住，换个聊法吧。"
+
+
+def _reason_name(value: object) -> str:
+    name = getattr(value, "name", None) or str(value or "").rsplit(".", 1)[-1]
+    return str(name or "").upper()
+
+
+def _is_safety_blocked(response: object) -> bool:
+    try:
+        for cand in getattr(response, "candidates", None) or []:
+            if _reason_name(getattr(cand, "finish_reason", None)) in _BLOCKED_FINISH_REASONS:
+                return True
+        prompt_feedback = getattr(response, "prompt_feedback", None)
+        block_reason = getattr(prompt_feedback, "block_reason", None) if prompt_feedback else None
+        return _reason_name(block_reason) in _BLOCKED_PROMPT_REASONS
+    except Exception:
+        return False
+
+
+def _blocked_result(model_id: str, usage: object) -> dict:
+    return {
+        "id": "gemini-" + uuid.uuid4().hex[:8],
+        "object": "chat.completion",
+        "model": model_id,
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": _BLOCKED_REPLY}, "finish_reason": "content_filter"}],
+        "usage": {
+            "prompt_tokens": getattr(usage, "prompt_token_count", 0) if usage else 0,
+            "completion_tokens": 0,
+        },
+    }
 
 
 def _interaction_json(value: object) -> dict:
@@ -306,10 +346,7 @@ def _omit_inline_media(message: dict) -> int:
 
 
 def _compact_chat_messages(messages: list[dict]) -> list[dict]:
-    """Keep oversized persisted media from turning an ordinary chat into HTTP 413."""
-    if _json_size(messages) <= CHAT_CONTEXT_BUDGET_BYTES:
-        return messages
-
+    """Keep persisted media from bloating later ordinary chat requests."""
     compacted = json.loads(json.dumps(messages, ensure_ascii=False))
     latest_user = next(
         (index for index in range(len(compacted) - 1, -1, -1) if compacted[index].get("role") == "user"),
@@ -320,6 +357,11 @@ def _compact_chat_messages(messages: list[dict]) -> list[dict]:
         for index, message in enumerate(compacted)
         if index != latest_user
     )
+    if _json_size(compacted) <= CHAT_CONTEXT_BUDGET_BYTES:
+        if omitted:
+            logger.info("Compacted chat history: omitted_media=%d", omitted)
+        return compacted
+
     if _json_size(compacted) > CHAT_CONTEXT_BUDGET_BYTES and latest_user >= 0:
         omitted += _omit_inline_media(compacted[latest_user])
 
@@ -400,10 +442,10 @@ async def chat(request: Request):
     extra = body.get("custom_extra_body") or {}
     if not isinstance(extra, dict):
         return JSONResponse(status_code=400, content={"error": {"message": "custom_extra_body must be an object"}})
-    model_id = body.get("model", "gemini-3.5-flash")
+    model_id = body.get("model", CHAT_MODEL)
     use_search = False
     if model_id in SEARCH_MODEL_ALIASES:
-        model_id = "gemini-3.5-flash"
+        model_id = CHAT_MODEL
         use_search = True
     model_id = _resolve_model(model_id, body.get("model_role"))
     # ponytail: google_search flag via custom_extra_body or top-level param
@@ -431,11 +473,6 @@ async def chat(request: Request):
                 content={"error": {"message": "response_json_schema must be a small object"}},
             )
     explicit_thinking = bool(body.get("thinking") or extra.get("thinking"))
-    auto_deep_thinking = (
-        model_id == "gemini-3.5-flash"
-        and not explicit_thinking
-        and _requires_deep_thinking(messages)
-    )
     use_thinking = explicit_thinking  # ponytail: auto deep thinking disabled — Vertex AI 403s on high mode
     try:
         max_output_tokens = min(int(body.get("max_tokens", 4096)), 8192)
@@ -446,8 +483,8 @@ async def chat(request: Request):
             max_output_tokens, MIN_MODEL_OUTPUT_TOKENS.get(model_id, 1)
         )
         thinking_budget = int(extra.get("thinking_budget") or 2048)
-        temperature = float(body.get("temperature", extra.get("temperature", 1.05)))
-        top_p = float(body.get("top_p", extra.get("top_p", 0.98)))
+        temperature = float(body.get("temperature", extra.get("temperature", 1.0)))
+        top_p = float(body.get("top_p", extra.get("top_p", 1.0)))
         if (
             max_output_tokens < 1
             or not math.isfinite(temperature)
@@ -476,14 +513,12 @@ async def chat(request: Request):
         ],
         tools=tools if tools else None,
     )
-    config_options["temperature"] = temperature
-    config_options["top_p"] = top_p
     if response_json_schema is not None:
         config_options["response_mime_type"] = "application/json"
         config_options["response_json_schema"] = response_json_schema
     config = types.GenerateContentConfig(**config_options)
-    if model_id == "gemini-3.5-flash":
-        # Gemini 3.5 has built-in thinking; DON'T set thinking_config by default
+    if model_id == CHAT_MODEL:
+        # Gemini 3.6 has built-in thinking; don't override its default medium
         # (thinking_budget paradoxically makes the model eat ALL tokens for thoughts).
         # Only enable when explicitly requested via thinking:true.
         if use_thinking:
@@ -639,6 +674,9 @@ async def chat(request: Request):
 
             if visible_text.strip():
                 break  # got a real response
+            if _is_safety_blocked(response):
+                logger.info("generation blocked by content filter; in-persona fallback")
+                return _blocked_result(model_id, usage)
             if attempt < UPSTREAM_RETRY_ATTEMPTS - 1:
                 await asyncio.sleep(_upstream_retry_delay(attempt))
         else:
@@ -863,12 +901,11 @@ def _generate_grounded_research(
     )
     config = types.GenerateContentConfig(
         max_output_tokens=8192,
-        temperature=0.3,
         tools=[types.Tool(google_search=types.GoogleSearch())],
         system_instruction=system_instruction or None,
     )
     last_error: Exception | None = None
-    for model_id in (MODEL_ROLES["quality"], MODEL_ROLES["fast"]):
+    for model_id in dict.fromkeys((MODEL_ROLES["quality"], MODEL_ROLES["fast"])):
         try:
             client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
             response = client.models.generate_content(
@@ -1367,267 +1404,6 @@ async def generate_video(request: Request):
         _generate_video_sync, prompt, model, duration, aspect
     )
 
-# ── Video download endpoint ──────────────────────────────────────
-VIDEO_DOWNLOAD_MAX_MB = 48  # QQ file limit ~50MB, leave margin
-VIDEO_DOWNLOAD_TIMEOUT = (15, 90)
-VIDEO_PAGE_HOSTS = {
-    "youtube.com", "youtu.be", "bilibili.com", "b23.tv", "vimeo.com",
-    "douyin.com", "iesdouyin.com", "ixigua.com", "acfun.cn", "kuaishou.com",
-    "x.com", "twitter.com",
-}
-
-
-def _is_safe_video_url(url: str) -> bool:
-    """Reject credentials, non-HTTP schemes, and hosts resolving to local networks."""
-    try:
-        parsed = urlparse(str(url or "").strip())
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            return False
-        if parsed.username or parsed.password:
-            return False
-        if parsed.port not in {None, 80, 443}:
-            return False
-        addresses = {
-            item[4][0]
-            for item in socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
-        }
-        if not addresses:
-            return False
-        for raw in addresses:
-            address = ipaddress.ip_address(raw)
-            if (
-                address.is_private
-                or address.is_loopback
-                or address.is_link_local
-                or address.is_multicast
-                or address.is_reserved
-                or address.is_unspecified
-            ):
-                return False
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
-
-
-def _is_supported_video_page(url: str) -> bool:
-    try:
-        host = (urlparse(url).hostname or "").lower().rstrip(".")
-    except ValueError:
-        return False
-    return any(host == domain or host.endswith("." + domain) for domain in VIDEO_PAGE_HOSTS)
-
-
-def _try_direct_download(
-    url: str,
-    extra_headers: dict[str, str] | None = None,
-) -> tuple[bytes, str] | None:
-    """Try to GET a direct video URL. Returns (bytes, mime_type) or None."""
-    resp = None
-    try:
-        current_url = url
-        headers = {"User-Agent": "Mozilla/5.0"}
-        headers.update(extra_headers or {})
-        for _ in range(4):
-            if not _is_safe_video_url(current_url):
-                return None
-            resp = requests.get(
-                current_url,
-                stream=True,
-                timeout=VIDEO_DOWNLOAD_TIMEOUT,
-                headers=headers,
-                allow_redirects=False,
-            )
-            if resp.is_redirect or resp.is_permanent_redirect:
-                location = resp.headers.get("location", "")
-                resp.close()
-                if not location:
-                    return None
-                current_url = urljoin(current_url, location)
-                continue
-            break
-        if resp is None or resp.is_redirect or resp.is_permanent_redirect:
-            return None
-        resp.raise_for_status()
-        ct = resp.headers.get("content-type", "")
-        if not ct.startswith("video/"):
-            return None
-        size = int(resp.headers.get("content-length", 0))
-        if size > VIDEO_DOWNLOAD_MAX_MB * 1024 * 1024:
-            return None
-        chunks = []
-        total = 0
-        for chunk in resp.iter_content(chunk_size=8192):
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > VIDEO_DOWNLOAD_MAX_MB * 1024 * 1024:
-                return None
-        return b"".join(chunks), ct.split(";", 1)[0].strip().lower()
-    except Exception:
-        return None
-    finally:
-        if resp is not None:
-            resp.close()
-
-
-def _bilibili_bvid(url: str) -> str:
-    try:
-        parsed = urlparse(url)
-        host = (parsed.hostname or "").lower().rstrip(".")
-    except ValueError:
-        return ""
-    if not (host == "bilibili.com" or host.endswith(".bilibili.com")):
-        return ""
-    match = re.search(r"/(BV[0-9A-Za-z]{10})(?:[/?#]|$)", parsed.path + "/")
-    return match.group(1) if match else ""
-
-
-def _try_bilibili_api_download(url: str) -> tuple[bytes, str] | None:
-    """Resolve a public Bilibili page when its anti-bot page blocks yt-dlp."""
-    bvid = _bilibili_bvid(url)
-    if not bvid:
-        return None
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://www.bilibili.com/",
-        "Accept": "application/json, text/plain, */*",
-    }
-    try:
-        page_response = requests.get(
-            "https://api.bilibili.com/x/player/pagelist",
-            params={"bvid": bvid},
-            headers=headers,
-            timeout=(5, 15),
-        )
-        page_response.raise_for_status()
-        pages = page_response.json().get("data", [])
-        cid = pages[0].get("cid") if isinstance(pages, list) and pages else None
-        if not cid:
-            return None
-        play_response = requests.get(
-            "https://api.bilibili.com/x/player/playurl",
-            params={
-                "bvid": bvid,
-                "cid": cid,
-                "qn": 16,
-                "fnval": 0,
-                "fnver": 0,
-                "fourk": 0,
-            },
-            headers=headers,
-            timeout=(5, 15),
-        )
-        play_response.raise_for_status()
-        candidates = play_response.json().get("data", {}).get("durl", [])
-        for candidate in candidates if isinstance(candidates, list) else []:
-            media_url = str(candidate.get("url") or "")
-            declared_size = int(candidate.get("size") or 0)
-            if declared_size > VIDEO_DOWNLOAD_MAX_MB * 1024 * 1024:
-                continue
-            result = _try_direct_download(
-                media_url,
-                {"Referer": f"https://www.bilibili.com/video/{bvid}"},
-            )
-            if result:
-                return result
-    except (requests.RequestException, ValueError, TypeError, IndexError, json.JSONDecodeError):
-        return None
-    return None
-
-
-def _try_ytdlp_download(url: str) -> tuple[bytes, str] | None:
-    """Use yt-dlp to extract and download a video. Returns (bytes, mime_type) or None."""
-    try:
-        if not _is_safe_video_url(url) or not _is_supported_video_page(url):
-            return None
-        import tempfile
-        import yt_dlp
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            outtmpl = str(Path(tmpdir) / "%(id)s.%(ext)s")
-            ydl_opts = {
-                "outtmpl": outtmpl,
-                "format": "worst[ext=mp4][filesize<50M]/worst[filesize<50M]/worst",
-                "max_filesize": VIDEO_DOWNLOAD_MAX_MB * 1024 * 1024,
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "extract_flat": False,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                if info is None:
-                    return None
-                video_path = Path(outtmpl) if Path(outtmpl).exists() else None
-                if video_path is None:
-                    # find downloaded file
-                    for f in Path(tmpdir).glob("*"):
-                        if f.suffix in {".mp4", ".webm", ".mkv", ".mov"}:
-                            video_path = f
-                            break
-                if video_path is None:
-                    return None
-                data = video_path.read_bytes()
-                ext = video_path.suffix.lower()
-                mime_map = {".mp4": "video/mp4", ".webm": "video/webm",
-                            ".mkv": "video/x-matroska", ".mov": "video/quicktime"}
-                mime = mime_map.get(ext, "video/mp4")
-                if len(data) > VIDEO_DOWNLOAD_MAX_MB * 1024 * 1024:
-                    return None
-                return data, mime
-    except Exception:
-        return None
-
-
-@app.post("/v1/videos/download")
-async def download_video(request: Request):
-    try:
-        body = await request.json()
-        url = str(body.get("url", "")).strip()
-        if not _is_safe_video_url(url):
-            return JSONResponse(status_code=400, content={"error": {"message": "无效的URL"}})
-    except (json.JSONDecodeError, ValueError):
-        return JSONResponse(status_code=400, content={"error": {"message": "无效请求"}})
-
-    # 1. Try direct download
-    result = await asyncio.to_thread(_try_direct_download, url)
-    if result:
-        data, mime = result
-        return {
-            "b64_json": base64.b64encode(data).decode("ascii"),
-            "mime_type": mime,
-            "source": "direct",
-            "size": len(data),
-        }
-
-    # 2. Bilibili's public low-resolution play URL bypasses anti-bot page 412s.
-    result = await asyncio.to_thread(_try_bilibili_api_download, url)
-    if result:
-        data, mime = result
-        return {
-            "b64_json": base64.b64encode(data).decode("ascii"),
-            "mime_type": mime,
-            "source": "bilibili",
-            "size": len(data),
-        }
-
-    # 3. Try yt-dlp for other supported platforms
-    result = await asyncio.to_thread(_try_ytdlp_download, url)
-    if result:
-        data, mime = result
-        return {
-            "b64_json": base64.b64encode(data).decode("ascii"),
-            "mime_type": mime,
-            "source": "yt-dlp",
-            "size": len(data),
-        }
-
-    return JSONResponse(
-        status_code=502,
-        content={"error": {"message": "无法下载该视频（可能太大、需要登录、或平台限制）"}},
-    )
-
-
-# ═══════════════════════════════════════════════════════════════
 # Invite Web UI — local website for Pro invite code management
 # ═══════════════════════════════════════════════════════════════
 
@@ -2100,12 +1876,11 @@ async def unified_search(request: Request):
             client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
             search_tool = types.Tool(google_search=types.GoogleSearch())
             response = client.models.generate_content(
-                model="gemini-3.5-flash",
+                model=CHAT_MODEL,
                 contents=f"搜索以下内容并给出简洁中文摘要（≤300字），附带来源链接：{query}",
                 config=types.GenerateContentConfig(
                     tools=[search_tool],
                     max_output_tokens=600,
-                    temperature=0.3,
                 ),
             )
             web_text = str(getattr(response, "text", "") or "").strip()
@@ -2159,7 +1934,7 @@ if __name__ == "__main__":
     _configure_logging()
     logger.info(
         "starting proxy primary=%s image=%s location=%s",
-        "gemini-3.5-flash",
+        CHAT_MODEL,
         IMAGE_MODEL_PRIMARY,
         LOCATION,
     )

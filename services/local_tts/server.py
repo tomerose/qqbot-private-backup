@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from array import array
 import csv
 import hmac
 import logging
 import os
 import subprocess
+import sys
 import time
 import uuid
+import wave
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Protocol
@@ -110,6 +113,38 @@ def cleanup_old_audio(root: Path, max_age_seconds: int = 600, now: float | None 
         except OSError:
             continue
     return removed
+
+
+def normalize_pcm_wav(path: Path, target_peak: int = 28000) -> bool:
+    """Raise abnormally quiet 16-bit PCM output to an audible level."""
+    temporary = path.with_name(f".{path.stem}.normalized.wav")
+    try:
+        with wave.open(str(path), "rb") as source:
+            params = source.getparams()
+            if params.sampwidth != 2 or params.comptype != "NONE":
+                return False
+            frames = source.readframes(params.nframes)
+        samples = array("h")
+        samples.frombytes(frames)
+        if sys.byteorder != "little":
+            samples.byteswap()
+        peak = max((abs(sample) for sample in samples), default=0)
+        if peak <= 0 or peak >= target_peak:
+            return False
+        scale = target_peak / peak
+        for index, sample in enumerate(samples):
+            samples[index] = max(-32768, min(32767, round(sample * scale)))
+        if sys.byteorder != "little":
+            samples.byteswap()
+        with wave.open(str(temporary), "wb") as target:
+            target.setparams(params)
+            target.writeframes(samples.tobytes())
+        os.replace(temporary, path)
+        return True
+    except (OSError, ValueError, wave.Error):
+        return False
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class MeloEngine:
@@ -218,6 +253,7 @@ class TTSService:
             selected.synthesize(value, temporary)
             if not temporary.is_file() or temporary.stat().st_size <= 0:
                 raise RuntimeError("本地语音生成失败")
+            normalize_pcm_wav(temporary)
             os.replace(temporary, final)
             harden_audio_path(self.audio_root, (final,))
             return {"path": str(final), "engine": selected_name}

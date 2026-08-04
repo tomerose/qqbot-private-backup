@@ -29,7 +29,7 @@ class QQAdminAIIntegrationTests(unittest.TestCase):
         schema = json.loads((_PLUGIN_DIR / "_conf_schema.json").read_text(encoding="utf-8"))
         items = schema["ai_moderation"]["items"]
         self.assertFalse(items["enabled"]["default"])
-        self.assertEqual(items["provider_id"]["default"], "deepseek-chat")
+        self.assertEqual(items["provider_id"]["default"], "gemini-2.5-flash")
         self.assertEqual(items["confidence_threshold"]["default"], 0.90)
         self.assertEqual(items["timeout_seconds"]["default"], 8)
         self.assertEqual(items["context_messages"]["default"], 8)

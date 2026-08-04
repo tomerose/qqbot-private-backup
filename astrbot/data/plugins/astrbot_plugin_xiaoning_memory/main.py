@@ -5,7 +5,8 @@
 v2.1: 场景感知提取 — 仅在被明确互动时提取记忆。
 v2.2: 智能召回 — 关键词匹配过滤无关记忆。
 v3.0: Tier门控 — X/PRO 专属。
-v4.0: Gemini 语义相关性排序 + 重要性评分 + 后台合并去重 — Google 生态最强记忆系统。"""
+v4.0: Gemini 语义相关性排序 + 重要性评分 + 后台合并去重 — Google 生态最强记忆系统。
+v5.0: gemini-embedding-001 向量召回（全量记忆 cosine 取候选）+ knowledge 全局知识储备注入。"""
 from __future__ import annotations
 
 import asyncio
@@ -28,18 +29,29 @@ except ImportError:
     FirestoreClient = None
 
 try:
+    from google import genai as _genai
+except ImportError:
+    _genai = None
+
+# Kept as a compatibility export for existing plugin integrations and tests;
+# memory/task access itself is now available to every private user.
+try:
     from draw_command.pro_access import get_tier, Tier
 except ImportError:
     from data.plugins.draw_command.pro_access import get_tier, Tier
+try:
+    from xiaoning_runtime import is_private_user_key, private_user_key
+except ImportError:
+    from data.plugins.xiaoning_runtime import is_private_user_key, private_user_key
 
 PROXY_CHAT = "http://127.0.0.1:3000/v1/chat/completions"
 FIRESTORE_PROJECT = "solar-modem-496213-f5"
 FIRESTORE_DATABASE = "qqbot"
-EXTRACT_COOLDOWN = 120
-MAX_MEMORIES_PER_USER = 50
+EXTRACT_COOLDOWN = 60      # 用户记忆提取冷却秒数（降低以覆盖更多消息）
+MAX_MEMORIES_PER_USER = 100
 MAX_VALUE_LENGTH = 300
 MAX_KEY_LENGTH = 80
-MIN_MESSAGE_LENGTH = 10
+MIN_MESSAGE_LENGTH = 4       # 降低门槛："你好""好的""明白了"都值得记住
 MAX_INJECT_MEMORIES = 5          # 最多注入 5 条最相关记忆
 MAX_CONSO_MEMORIES = 20          # 超过此数量触发后台合并
 CONSO_COOLDOWN = 600             # 合并冷却 10 分钟
@@ -48,6 +60,16 @@ RANK_CACHE_TTL = 30              # 排序结果缓存秒数
 MAX_GROUP_ALIASES = 100          # 同一群最多保存的本人公开称呼数
 FIRESTORE_RETRY_INTERVAL = 60    # Firestore 连接失败后重试间隔秒数
 FIRESTORE_CONNECT_TIMEOUT = 8    # Firestore 首次连接超时秒数
+
+# ── v5.0: 向量语义召回（gemini-embedding-001）+ 全局知识储备 ─────────
+# 注意：text-embedding-004 在本项目配额极小（6 次即 429），统一用 001。
+# 同一集合内向量维度必须一致（001=3072 维），混维度 cosine 会算错。
+EMBED_MODEL = "gemini-embedding-001"
+EMBED_LOCATION = "global"
+RECALL_CANDIDATES = 30           # 向量召回交给 Gemini 重排的候选数
+KNOWLEDGE_CACHE_TTL = 300        # 知识库内容缓存秒数
+MAX_INJECT_KNOWLEDGE = 3
+KNOWLEDGE_MIN_SCORE = 0.55       # cosine 相似度下限，防无关注入
 
 # 注入记忆时附在后面的安全指令
 MEMORY_SAFETY_NOTE = (
@@ -58,6 +80,55 @@ MEMORY_SAFETY_NOTE = (
 
 # 不应提取记忆的场景 —— 被动卷入/主动插话/原因不明时，用户并非在主动分享
 _SKIP_EXTRACT_TRIGGERS = frozenset({"active", "unknown"})
+
+# ── embedding 工具 ──────────────────────────────────────────────
+_embed_client = None
+
+
+def _embed_text(text: object) -> list[float] | None:
+    """gemini-embedding-001（走 Vertex ADC，与 Firestore 同项目）。
+    失败返回 None —— 调用方一律降级到旧的 时间近因/关键词 路径。"""
+    global _embed_client
+    if _genai is None:
+        return None
+    value = str(text or "").strip()
+    if not value:
+        return None
+    try:
+        if _embed_client is None:
+            _embed_client = _genai.Client(
+                vertexai=True, project=FIRESTORE_PROJECT, location=EMBED_LOCATION
+            )
+        result = _embed_client.models.embed_content(
+            model=EMBED_MODEL, contents=value[:2000]
+        )
+        values = getattr(result.embeddings[0], "values", None)
+        return list(values) if values else None
+    except Exception as exc:
+        logger.debug("[小柠记忆] embedding 失败: %s", type(exc).__name__)
+        return None
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = norm_a = norm_b = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        norm_a += x * x
+        norm_b += y * y
+    if not norm_a or not norm_b:
+        return 0.0
+    return dot / ((norm_a ** 0.5) * (norm_b ** 0.5))
+
+
+# 知识储备注入门槛：只在话题明确涉及偶像本人/作品/粉丝文化时召回。
+# 通用词（泡沫/句号/光亮/倒数等歌名是日常词汇）不进门，防"这句话画个句号"
+# 触发邓紫棋资料注入；带歌手名的问句由 周深|邓紫棋 兜底。
+_KNOWLEDGE_QUERY_RE = re.compile(
+    r"(?:周深|卡布|生米|邓紫棋|g\.?e\.?m\.?|棋士|"
+    r"大鱼海棠|达拉崩吧|花开忘忧|少管我|铃芽之旅|亲爱的旅人|"
+    r"光年之外|摩天动物园|来自天堂的魔鬼|睡皇后|新的心跳)",
+    re.I,
+)
 
 # ── 跨对话任务记忆 ────────────────────────────────────────────
 MAX_TASKS_PER_USER = 20
@@ -180,9 +251,6 @@ _SENSITIVE_RE = re.compile(
     r"gh[oprsu]_[a-z0-9]{20,}|AIza[a-z0-9_-]{20,}|"
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----)\b"
 )
-_QQ_ID_RE = re.compile(r"^[1-9]\d{4,11}$")
-
-
 class XiaoningMemory(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -214,7 +282,9 @@ class XiaoningMemory(Star):
         if origin:
             return origin
         group_id = str(getattr(event, "get_group_id", lambda: "")() or "").strip()
-        return f"group:{group_id}:{sender}" if group_id else f"private:{sender}"
+        if group_id:
+            return f"group:{group_id}:{sender}"
+        return f"private:{private_user_key(event) or sender}"
 
     # ── Firestore backend ─────────────────────────────────────────
 
@@ -243,10 +313,10 @@ class XiaoningMemory(Star):
             return None
         return self._db
 
-    # QQ ID 验证 —— 非数字/长度不对的 ID 拒绝访问
+    # Existing QQ ids remain untouched; personal-WeChat ids are namespaced.
     @staticmethod
     def _valid_qq(qq_id: str) -> bool:
-        return bool(_QQ_ID_RE.match(qq_id))
+        return is_private_user_key(qq_id)
 
     @staticmethod
     def _valid_group_id(group_id: str) -> bool:
@@ -302,14 +372,18 @@ class XiaoningMemory(Star):
             if identity in existing:
                 continue
             doc_ref = self._memories_ref(qq_id).document()
-            batch.set(doc_ref, {
+            doc = {
                 "key": sanitized["key"],
                 "value": sanitized["value"],
                 "category": sanitized["category"],
                 "importance": sanitized["importance"],
                 "created_at": now,
                 "updated_at": now,
-            })
+            }
+            vector = _embed_text(f"{sanitized['key']}: {sanitized['value']}")
+            if vector:
+                doc["embedding"] = vector
+            batch.set(doc_ref, doc)
             stored += 1
             existing.add(identity)
         if stored > 0:
@@ -321,6 +395,73 @@ class XiaoningMemory(Star):
             return
         for doc in self._memories_ref(qq_id).stream():
             doc.reference.delete()
+
+    # ── v5.0 向量语义召回 ────────────────────────────────────────
+
+    def _recall_candidates(self, qq_id: str, query: str, limit: int = RECALL_CANDIDATES) -> list[dict]:
+        """cosine 相似度从全量记忆里召回 top-N 候选（交给 Gemini 重排）。
+        相比旧的"最近30条"，超过30条后老但相关的记忆也能进候选池。
+        任何一步失败都降级为最近 N 条。"""
+        if not query:
+            return self._get_memories(qq_id, limit=limit)
+        query_vec = _embed_text(query)
+        if query_vec is None:
+            return self._get_memories(qq_id, limit=limit)
+        try:
+            docs = self._memories_ref(qq_id).limit(MAX_MEMORIES_PER_USER).stream()
+            memories = [{**doc.to_dict(), "doc_id": doc.id} for doc in docs]
+        except Exception:
+            return self._get_memories(qq_id, limit=limit)
+        embedded = [m for m in memories if isinstance(m.get("embedding"), list)]
+        if not embedded:
+            return self._get_memories(qq_id, limit=limit)
+        for m in embedded:
+            m["_vec_score"] = _cosine(query_vec, m["embedding"])
+        embedded.sort(key=lambda m: -m["_vec_score"])
+        picked = embedded[:limit]
+        picked_ids = {m["doc_id"] for m in picked}
+        # 还没来得及 embed 的新记忆按时间捎上，防止写入后短期不可见
+        fresh = sorted(
+            (
+                m for m in memories
+                if m["doc_id"] not in picked_ids and not isinstance(m.get("embedding"), list)
+            ),
+            key=lambda m: str(m.get("created_at", "")),
+            reverse=True,
+        )
+        return picked + fresh[:5]
+
+    # ── v5.0 全局知识储备（偶像资料等稳定事实）────────────────────
+
+    def _get_knowledge(self) -> list[dict]:
+        now = time.time()
+        cache = getattr(self, "_knowledge_cache", None)
+        if cache and now - cache["ts"] < KNOWLEDGE_CACHE_TTL:
+            return cache["items"]
+        docs = self.db.collection("knowledge").stream()
+        items = [doc.to_dict() or {} for doc in docs]
+        self._knowledge_cache = {"ts": now, "items": items}
+        return items
+
+    def _recall_knowledge(self, query: str) -> list[dict]:
+        """话题命中偶像关键词时才做向量召回，避免给无关问题塞粉丝资料。"""
+        if not _KNOWLEDGE_QUERY_RE.search(query):
+            return []
+        query_vec = _embed_text(query)
+        if query_vec is None:
+            return []
+        try:
+            items = self._get_knowledge()
+        except Exception:
+            return []
+        scored = [
+            (item, _cosine(query_vec, item["embedding"]))
+            for item in items
+            if isinstance(item.get("embedding"), list)
+        ]
+        scored = [pair for pair in scored if pair[1] >= KNOWLEDGE_MIN_SCORE]
+        scored.sort(key=lambda pair: -pair[1])
+        return [item for item, _ in scored[:MAX_INJECT_KNOWLEDGE]]
 
     def _group_aliases_ref(self, group_id: str):
         if not self._valid_group_id(group_id) or not self.db:
@@ -405,7 +546,7 @@ class XiaoningMemory(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=900)
     async def on_message(self, event: AstrMessageEvent):
-        sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+        sender = self._sender_id(event)
         if not self._valid_qq(sender):
             return
         text = str(getattr(event, "get_message_str", lambda: "")() or "").strip()
@@ -433,14 +574,6 @@ class XiaoningMemory(Star):
                 asyncio.create_task(
                     asyncio.to_thread(self._store_group_alias, group_id, sender, alias)
                 )
-
-        # v3.0: 记忆仅限 X/PRO — 普通用户不提取
-        try:
-            tier = get_tier(sender, self._pro_db)
-            if tier < Tier.X:
-                return
-        except Exception:
-            return
 
         # Operational jobs are not personal facts, but explicit follow-ups and
         # artifact work belong in the separate cross-conversation task ledger.
@@ -521,7 +654,7 @@ class XiaoningMemory(Star):
                     )
             stored = self._store_memories(qq_id, facts)
             if stored:
-                logger.info(f"[小柠记忆] 为 {qq_id} 存储了 {stored} 条记忆")
+                logger.info("[小柠记忆] 存储了 %d 条记忆", stored)
                 # v4.0: 记忆数超过阈值触发后台合并去重
                 if self._count_memories(qq_id) >= MAX_CONSO_MEMORIES:
                     asyncio.create_task(self._consolidate_memories(qq_id))
@@ -533,7 +666,7 @@ class XiaoningMemory(Star):
             resp = requests.post(
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-2.5-flash",
+                    "model": "gemini-3.6-flash",
                     "messages": [
                         {"role": "system", "content": EXTRACT_PROMPT},
                         {"role": "user", "content": text[:2000]},
@@ -556,10 +689,9 @@ class XiaoningMemory(Star):
 
     @filter.on_llm_request(priority=-10)
     async def inject_memories(self, event: AstrMessageEvent, req) -> None:
-        sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+        sender = self._sender_id(event)
         current_text = str(getattr(event, "get_message_str", lambda: "")() or "").strip()
         blocks: list[str] = []
-        tier = Tier.ORDINARY
         db_available = self.db is not None  # may trigger reconnection
 
         # ── in-memory recent context: ALL users, no Firestore dependency ──
@@ -587,9 +719,9 @@ class XiaoningMemory(Star):
         memories: list[dict] = []
         if db_available and self._valid_qq(sender):
             try:
-                tier = get_tier(sender, self._pro_db)
-                if tier >= Tier.X:
-                    memories = await asyncio.to_thread(self._get_memories, sender)
+                memories = await asyncio.to_thread(
+                    self._recall_candidates, sender, current_text
+                )
             except Exception:
                 memories = []
         if memories:
@@ -628,6 +760,24 @@ class XiaoningMemory(Star):
                         + "\n这些称呼只用于确认当前群里正在提到谁；不得补充、猜测或透露任何人的私有信息。"
                     )
 
+        # 全局知识储备：仅当前话题命中偶像关键词时向量召回，放最前面
+        # （个人记忆更贴近用户消息，提示效果更好）
+        if db_available and current_text:
+            try:
+                knowledge = await asyncio.to_thread(self._recall_knowledge, current_text)
+            except Exception:
+                knowledge = []
+            if knowledge:
+                blocks.insert(
+                    0,
+                    "【小柠知识储备】与当前话题相关的稳定资料"
+                    "（只作背景，新动态以实时搜索为准，不要逐条复述）：\n"
+                    + "\n".join(
+                        f"- [{item.get('topic', '?')}] {item.get('content', '?')}"
+                        for item in knowledge
+                    ),
+                )
+
         marker = "【小柠记忆】"
         sp = str(getattr(req, "system_prompt", "") or "")
         if blocks and marker in sp:
@@ -648,7 +798,7 @@ class XiaoningMemory(Star):
             req.system_prompt = (sp + memory_block).strip()
 
         # Task context — only inject when user asks about tasks/progress/files
-        if db_available and tier >= Tier.X and self._valid_qq(sender):
+        if db_available and self._valid_qq(sender):
             task_relevant = bool(_TASK_TRACK_REQUEST.search(current_text) if current_text else False)
             if task_relevant:
                 try:
@@ -669,9 +819,7 @@ class XiaoningMemory(Star):
         if not hint or not self._valid_qq(sender) or not self.db:
             return ""
         try:
-            if get_tier(sender, self._pro_db) < Tier.X:
-                return ""
-            memories = await asyncio.to_thread(self._get_memories, sender)
+            memories = await asyncio.to_thread(self._recall_candidates, sender, hint)
             ranked = await asyncio.to_thread(
                 self._gemini_rank_memories, memories, hint, sender
             )
@@ -734,7 +882,7 @@ class XiaoningMemory(Star):
             resp = requests.post(
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-2.5-flash",
+                    "model": "gemini-3.6-flash",
                     "messages": [{"role": "user", "content": rank_prompt}],
                     "max_tokens": 100,
                 },
@@ -832,7 +980,7 @@ class XiaoningMemory(Star):
                 requests.post,
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-2.5-flash",
+                    "model": "gemini-3.6-flash",
                     "messages": [{"role": "user", "content": conso_prompt}],
                     "max_tokens": 800,
                 },
@@ -860,13 +1008,23 @@ class XiaoningMemory(Star):
             merged_value = str(merge_op.get("merged_value", ""))[:MAX_VALUE_LENGTH]
             if keep_id and delete_ids and merged_value:
                 try:
-                    batch.update(ref.document(keep_id), {
+                    update = {
                         "value": merged_value,
                         "updated_at": datetime.now(timezone.utc),
                         "importance": min(
                             float(ops.get("importance", 0.8)), 1.0
                         ),
-                    })
+                    }
+                    keep_mem = next(
+                        (m for m in memories if m.get("doc_id") == keep_id), None
+                    )
+                    if keep_mem:
+                        vector = _embed_text(
+                            f"{keep_mem.get('key', '')}: {merged_value}"
+                        )
+                        if vector:
+                            update["embedding"] = vector
+                    batch.update(ref.document(keep_id), update)
                     for did in delete_ids:
                         batch.delete(ref.document(did))
                     merged_count += len(delete_ids)
@@ -926,20 +1084,6 @@ class XiaoningMemory(Star):
         sender = self._sender_id(event)
         if not self._valid_qq(sender):
             yield event.plain_result("无法识别用户身份。")
-            event.stop_event()
-            return
-
-        # v3.0: 普通用户引导升级
-        try:
-            tier = get_tier(sender, self._pro_db)
-        except Exception:
-            tier = Tier.ORDINARY
-        if tier < Tier.X:
-            yield event.plain_result(
-                "记忆功能是 X/PRO 专属。\n"
-                "添加小柠为 QQ 好友即可自动获得 X资格，解锁长期记忆 —— "
-                "小柠会记住你分享的喜好、经历和计划，在聊天中自然地提起。"
-            )
             event.stop_event()
             return
 
@@ -1021,7 +1165,7 @@ class XiaoningMemory(Star):
         recent_done = [t for t in tasks if t.get("_recently_completed")]
         lines = []
         if active:
-            lines.append("【进行中的任务】仅当用户当前消息明确询问进度、要求继续该任务，或清楚引用其中一项时，才可使用这些记录回答。绝不在无关对话中主动汇报、催促、建议下一步或祝贺；不得把旧任务当作当前任务。任务完成只能以实际 QQ 文件交付成功为准。")
+            lines.append("【进行中的任务】仅当用户当前消息明确询问进度、要求继续该任务，或清楚引用其中一项时，才可使用这些记录回答。绝不在无关对话中主动汇报、催促、建议下一步或祝贺；不得把旧任务当作当前任务。任务完成只能以实际成品交付成功为准。")
             for t in active[-8:]:
                 status_emoji = {
                     "pending": "⏳", "in_progress": "🔄",
@@ -1119,7 +1263,7 @@ class XiaoningMemory(Star):
                             "created_at": now_utc,
                             "updated_at": now_utc,
                         })
-                        logger.info("[小柠任务] %s 创建任务: %s", qq_id, title)
+                        logger.info("[小柠任务] 创建任务")
                     except Exception:
                         pass
         except Exception as e:
@@ -1130,7 +1274,7 @@ class XiaoningMemory(Star):
             resp = requests.post(
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-2.5-flash",
+                    "model": "gemini-3.6-flash",
                     "messages": [
                         {"role": "system", "content": TASK_EXTRACT_PROMPT},
                         {"role": "user", "content": text[:2000]},
@@ -1154,19 +1298,6 @@ class XiaoningMemory(Star):
         sender = self._sender_id(event)
         if not self._valid_qq(sender):
             yield event.plain_result("无法识别用户身份。")
-            event.stop_event()
-            return
-
-        try:
-            tier = get_tier(sender, self._pro_db)
-        except Exception:
-            tier = Tier.ORDINARY
-        if tier < Tier.X:
-            yield event.plain_result(
-                "跨对话任务记忆是 X/PRO 专属。\n"
-                "添加小柠为 QQ 好友即可自动获得 X资格 —— "
-                "小柠会追踪你的跨对话任务并在完成时把结果发给你。"
-            )
             event.stop_event()
             return
 
@@ -1243,14 +1374,8 @@ class XiaoningMemory(Star):
         if not self._valid_qq(qq_id) or not self.db:
             return
         try:
-            tier = get_tier(qq_id, self._pro_db)
-            if tier < Tier.X:
-                return
-        except Exception:
-            return
-        now_utc = datetime.now(timezone.utc)
-        title = task_desc[:60].strip()
-        try:
+            now_utc = datetime.now(timezone.utc)
+            title = str(task_desc or "执行任务").strip()[:60]
             active = self._get_active_tasks(qq_id)
             # Check if similar task exists → update
             existing = [t for t in active if str(t.get("title", "")).strip()[:30] == title[:30]]
@@ -1261,7 +1386,7 @@ class XiaoningMemory(Star):
                     "description": task_desc[:200],
                     "updated_at": now_utc,
                 })
-                logger.info("[小柠任务] Agent更新: %s → %s", qq_id, status)
+                logger.info("[小柠任务] Agent更新 → %s", status)
             else:
                 doc_ref = self._tasks_ref(qq_id).document()
                 doc_ref.set({
@@ -1271,7 +1396,7 @@ class XiaoningMemory(Star):
                     "created_at": now_utc,
                     "updated_at": now_utc,
                 })
-                logger.info("[小柠任务] Agent创建: %s → %s", qq_id, status)
+                logger.info("[小柠任务] Agent创建 → %s", status)
         except Exception as e:
             logger.debug("[小柠任务] track_agent_task失败: %s", e)
 
@@ -1321,6 +1446,9 @@ class XiaoningMemory(Star):
 
     @staticmethod
     def _sender_id(event: AstrMessageEvent) -> str:
+        key = private_user_key(event)
+        if key:
+            return key
         g = getattr(event, "get_sender_id", None)
         return str(g() if callable(g) else "").strip()
 
@@ -1373,7 +1501,7 @@ def track_runtime_task_status(
     ``done``; a stable owner/task document id prevents duplicate tasks.
     """
     import re as _re
-    if not _re.match(r"^[1-9]\d{4,11}$", str(qq_id or "")):
+    if not is_private_user_key(qq_id):
         return
     safe_task_id = _re.sub(r"[^a-zA-Z0-9_-]", "", str(task_id or ""))[:64]
     safe_owner = _re.sub(r"[^a-zA-Z0-9_-]", "", str(owner or "runtime").lower())[:24]
@@ -1392,8 +1520,6 @@ def track_runtime_task_status(
             Path(__file__).resolve().parents[2]
             / "plugin_data" / "xiaoning_pro" / "pro_members.db"
         )
-        if get_tier(str(qq_id), pro_db) < Tier.X:
-            return
         now_utc = datetime.now(timezone.utc)
         title = str(task_desc or "")[:60].strip()
         tasks_ref = db.collection("users").document(qq_id).collection("tasks")
@@ -1413,7 +1539,7 @@ def track_runtime_task_status(
         if not existing.exists:
             data["created_at"] = now_utc
         doc_ref.set(data, merge=True)
-        logger.info("[小柠任务] %s/%s: %s → %s", safe_owner, safe_task_id, qq_id, status)
+        logger.info("[小柠任务] 状态 → %s", status)
     except Exception:
         pass  # 不影响Agent主流程
 

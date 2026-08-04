@@ -1,6 +1,11 @@
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
 $env:ASTRBOT_ROOT = Join-Path $Root "astrbot"
+$localConfig = Join-Path $Root "xiaoning.local.ps1"
+if (-not (Test-Path -LiteralPath $localConfig)) {
+    throw "Missing xiaoning.local.ps1. Run .\setup.ps1 first."
+}
+. $localConfig
 
 function Test-LocalPort([int]$Port) {
     foreach ($endpoint in [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()) {
@@ -40,15 +45,25 @@ if (-not (Test-LocalPort 8766)) {
 }
 
 if (-not (Test-LocalPort 6185)) {
+    $python312 = (& py -3.12 -c "import sys; print(sys.executable)").Trim()
+    $scripts = (& $python312 -c "import sysconfig; print(sysconfig.get_path('scripts'))").Trim()
+    $astrbot = Join-Path $scripts "astrbot.exe"
+    if (-not (Test-Path -LiteralPath $astrbot)) {
+        throw "AstrBot 4.26.5 is not installed. Run .\setup.ps1 first."
+    }
     Start-Process powershell.exe `
-        -ArgumentList "-NoProfile -Command Set-Location -LiteralPath `"$Root\astrbot`"; astrbot run" `
+        -ArgumentList "-NoProfile -Command Set-Location -LiteralPath `"$Root\astrbot`"; & `"$astrbot`" run" `
         -WindowStyle Hidden
     Wait-LocalPort 6185 60 | Out-Null
 }
 
 if (-not (Test-LocalPort 5701)) {
+    $napcatNode = Join-Path $Root "napcat-runtime\node.exe"
+    if (-not (Test-Path -LiteralPath $napcatNode)) {
+        throw "NapCat runtime is missing. Run .\setup.ps1 and finish the NapCat installer."
+    }
     Start-Process powershell.exe `
-        -ArgumentList "-NoProfile -Command Set-Location -LiteralPath `"$Root\napcat-runtime`"; node index.js" `
+        -ArgumentList "-NoProfile -Command Set-Location -LiteralPath `"$Root\napcat-runtime`"; & `"$napcatNode`" index.js" `
         -WindowStyle Hidden
 }
 

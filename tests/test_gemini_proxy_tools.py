@@ -114,13 +114,13 @@ class GeminiProxyToolTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_chat_model_role_is_internal_and_preserves_legacy_default(self):
+    def test_chat_model_aliases_resolve_to_latest_stable(self):
         self.assertEqual(
-            self.proxy._resolve_model("gemini-2.5-flash"), "gemini-2.5-flash"
+            self.proxy._resolve_model("gemini-2.5-flash"), "gemini-3.6-flash"
         )
         self.assertEqual(
             self.proxy._resolve_model("gemini-2.5-flash", "quality"),
-            "gemini-3.1-pro-preview",
+            "gemini-3.6-flash",
         )
 
     def test_thinking_models_keep_visible_output_headroom(self):
@@ -143,7 +143,7 @@ class GeminiProxyToolTests(unittest.TestCase):
                     )
                 )
             self.assertEqual(result["choices"][0]["message"]["content"], "OK")
-            self.assertEqual(captured["max_output_tokens"], 512)
+            self.assertEqual(captured["max_output_tokens"], 1000)
 
         asyncio.run(scenario())
 
@@ -167,7 +167,7 @@ class GeminiProxyToolTests(unittest.TestCase):
                     )
                 )
             self.assertEqual(result["choices"][0]["message"]["content"], "OK")
-            self.assertEqual(captured["max_output_tokens"], 256)
+            self.assertEqual(captured["max_output_tokens"], 1000)
 
         asyncio.run(scenario())
 
@@ -299,6 +299,28 @@ class GeminiProxyToolTests(unittest.TestCase):
             "data:image/png;base64,current",
         )
 
+    def test_chat_context_omits_old_inline_media_even_below_budget(self):
+        messages = [
+            {
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,old"}}],
+            },
+            {"role": "assistant", "content": "seen"},
+            {
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,current"}}],
+            },
+        ]
+
+        compacted = self.proxy._compact_chat_messages(messages)
+
+        self.assertEqual(compacted[0]["content"][0]["type"], "text")
+        self.assertEqual(
+            compacted[-1]["content"][0]["image_url"]["url"],
+            "data:image/png;base64,current",
+        )
+        self.assertEqual(messages[0]["content"][0]["type"], "image_url")
+
     def test_image_generation_does_not_block_the_event_loop(self):
         async def scenario():
             started = threading.Event()
@@ -363,7 +385,7 @@ class GeminiProxyToolTests(unittest.TestCase):
         with patch.object(self.proxy.genai, "Client", return_value=client):
             result = self.proxy._edit_image_sync(
                 source,
-                "remove the watermark only",
+                "make the background warmer",
                 self.proxy.IMAGE_MODEL_FALLBACK,
             )
 
@@ -470,7 +492,7 @@ class GeminiProxyToolTests(unittest.TestCase):
                     )
                 )
 
-            self.assertEqual(captured["config"].thinking_config.thinking_budget, 3072)
+            self.assertEqual(captured["config"].thinking_config.thinking_level.value, "HIGH")
             self.assertEqual(result["thinking"]["thoughts"], "分析摘要")
             self.assertIn("最终答案", result["choices"][0]["message"]["content"])
 
@@ -525,6 +547,32 @@ class GeminiProxyToolTests(unittest.TestCase):
                 )
 
             self.assertIsNone(captured["config"].thinking_config)
+
+        asyncio.run(scenario())
+
+    def test_gemini_36_does_not_forward_deprecated_sampling_parameters(self):
+        async def scenario():
+            captured = {}
+
+            def generate_content(**kwargs):
+                captured["config"] = kwargs["config"]
+                return SimpleNamespace(text="OK", usage_metadata=None, candidates=[])
+
+            client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+            with patch.object(self.proxy.genai, "Client", return_value=client):
+                await self.proxy.chat(
+                    request_with_json(
+                        {
+                            "model": "gemini-3.6-flash",
+                            "temperature": 0.7,
+                            "top_p": 0.9,
+                            "messages": [{"role": "user", "content": "test"}],
+                        }
+                    )
+                )
+
+            self.assertIsNone(captured["config"].temperature)
+            self.assertIsNone(captured["config"].top_p)
 
         asyncio.run(scenario())
 

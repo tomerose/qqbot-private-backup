@@ -1724,7 +1724,7 @@ class Main(star.Star):
                     # LRU 淘汰：超过硬上限时移除最旧的
                     while len(self._image_caption_cache) > self._image_caption_cache_max:
                         self._image_caption_cache.popitem(last=False)
-                    logger.debug(f"[ContextAware] 图像转述成功: {caption[:30]}...")
+                    logger.debug("[ContextAware] 图像转述成功: %d chars", len(caption))
                     return caption
 
         except Exception as e:

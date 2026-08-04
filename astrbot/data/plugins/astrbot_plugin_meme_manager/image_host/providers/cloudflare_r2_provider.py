@@ -129,7 +129,7 @@ class CloudflareR2Provider(ImageHostInterface):
                     mime_type = "image/jpeg"
 
                 logger.debug(f"上传文件: {file_path}")
-                logger.info(f"开始上传: {file_path.name}")
+                logger.info("开始上传文件")
 
                 # 生成S3键名（保持分类结构）
                 s3_key = self._generate_s3_key(file_path)

@@ -12,6 +12,10 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Plain, Record
 from astrbot.api.star import Context, Star
 from astrbot.core.message.message_event_result import MessageChain
+try:
+    from xiaoning_runtime import is_weixin_private
+except ImportError:
+    from data.plugins.xiaoning_runtime import is_weixin_private
 
 from .local_tts_client import LocalTTSClient
 from .audio_merge import merge_wav_files
@@ -37,7 +41,7 @@ def _event_text(event: AstrMessageEvent) -> str:
 
 
 class VoiceModelRouter(Star):
-    """Keep normal text on DeepSeek and route only voice requests to Gemini Flash."""
+    """Route voice requests through the configured Gemini provider."""
 
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config)
@@ -115,6 +119,11 @@ class VoiceModelRouter(Star):
         if explicit_voice and allowed_chat:
             event.set_extra("voice_reply_requested", True)
             event.set_extra("selected_provider", self._best_voice_provider())
+            if is_weixin_private(event):
+                # The native adapter accepts voice input but does not yet send
+                # Record components. Keep the request useful as a text reply.
+                event.set_extra("voice_text_fallback", True)
+                event.set_extra("_weixin_voice_text_notice", True)
             return
 
         message_obj = getattr(event, "message_obj", None)
@@ -131,6 +140,8 @@ class VoiceModelRouter(Star):
         # so they want spoken output.  No need for "发语音" keyword.
         if self.config.get("auto_voice_reply", True):
             event.set_extra("voice_reply_requested", True)
+        if is_weixin_private(event):
+            event.set_extra("voice_text_fallback", True)
 
         # The selected audio-capable provider consumes the Record component
         # in the normal AstrBot request pipeline. Do not start a second,
@@ -175,12 +186,17 @@ class VoiceModelRouter(Star):
         ) or ("已排队" in plain_text and plain_text.startswith("任务 ")):
             return
 
+        if is_weixin_private(event):
+            if event.get_extra("_weixin_voice_text_notice", False):
+                result.chain = [Plain("微信这边暂时用文字回复：")] + components
+            return
+
         # Try QQ AI voice for group chats (lighter weight, sounds natural)
         group_id = str(getattr(event, "get_group_id", lambda: "")() or "").strip()
         if group_id:
             sent = await self._send_qq_ai_voice(event, group_id, plain_text)
             if sent:
-                logger.debug("[Voice] QQ AI voice sent OK, group=%s", group_id)
+                logger.debug("[Voice] QQ AI voice sent OK")
                 event.set_extra("_qq_ai_voice_sent", True)
                 result.chain = [component for component in components if not isinstance(component, Plain)]
                 return
@@ -318,7 +334,7 @@ class VoiceModelRouter(Star):
                     character=str(char_id),
                     text=text_clean,
                 )
-                logger.debug("[Voice] QQ AI voice sent: %s chars to group %s", len(text_clean), group_id)
+                logger.debug("[Voice] QQ AI voice sent: %s chars", len(text_clean))
                 return True
         except Exception:
             logger.debug("[Voice] QQ AI voice failed, falling back to local TTS")
