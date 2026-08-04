@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install AstrBot
-        run: pip install astrbot==4.26.5
+        run: pip install astrbot==4.26.5 feedparser
       - name: Run tests
         env:
           PYTHONIOENCODING: utf-8

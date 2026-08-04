@@ -16,7 +16,9 @@ class MemoryScannerTests(unittest.TestCase):
             scanner = MemoryScanner()
             scanner._read_all_memories = Mock(return_value=[("1", [{"key": "exam"}])])
             scanner._extract_events = AsyncMock(return_value=[{"qq_id": "1"}])
-            with patch("friend_core.memory_scanner.asyncio.to_thread", new_callable=AsyncMock) as to_thread:
+            with patch("friend_core.memory_scanner.asyncio.to_thread", new_callable=AsyncMock) as to_thread, \
+                    patch("friend_core.memory_scanner.firestore", object()):
+                # firestore must be non-None: scan_all_users returns [] when the lib is absent (CI has no google-cloud-firestore)
                 to_thread.side_effect = lambda func, *args, **kwargs: func(*args, **kwargs)
                 tasks = await scanner.scan_all_users()
             self.assertEqual(tasks, [{"qq_id": "1"}])

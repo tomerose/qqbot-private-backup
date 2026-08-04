@@ -44,7 +44,9 @@ class ArtifactStagingTests(unittest.TestCase):
 
     def test_standalone_artifact_runs_in_private_job_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            # resolve(): CI runners give 8.3 short temp paths (RUNNER~1) while
+            # select_execution_dir returns the canonical long form
+            root = Path(tmp).resolve()
             job = root / "job"
             work = root / "project"
             job.mkdir()
