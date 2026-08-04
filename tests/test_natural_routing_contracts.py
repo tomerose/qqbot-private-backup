@@ -12,25 +12,34 @@ from data.plugins.ai_interview.main import parse_interview_start  # noqa: E402
 from data.plugins.claude_code_agent.natural_router import route_natural_agent  # noqa: E402
 from data.plugins.deep_think.main import extract_question  # noqa: E402
 from data.plugins.draw_command.draw_core import (  # noqa: E402
-    is_dewatermark_request,
     parse_draw_command,
     parse_edit_command,
 )
-from data.plugins.music_command.main import parse_original_song_prompt, parse_song_search  # noqa: E402
-from data.plugins.search_command.main import parse_action_pack  # noqa: E402
+from data.plugins.draw_command.main import DrawCommand  # noqa: E402
+from data.plugins.music_command.main import MusicCommand, parse_original_song_prompt, parse_song_search  # noqa: E402
+from data.plugins.search_command.main import SearchCommand, parse_action_pack  # noqa: E402
 from data.plugins.smart_translate.main import parse_translate_request  # noqa: E402
 from data.plugins.video_agent.main import _parse_agent_command  # noqa: E402
 from data.plugins.video_command.main import _parse_video_command  # noqa: E402
 from data.plugins.video_pipeline.main import VideoPipelinePlugin  # noqa: E402
-from data.plugins.web_studio.main import parse_web_intent  # noqa: E402
+from data.plugins.web_studio.main import WebStudio, parse_web_intent  # noqa: E402
 
 
 class NaturalRoutingContractTests(unittest.TestCase):
-    def test_image_creation_edit_and_watermark_have_distinct_intents(self):
+    def test_capabilities_do_not_inject_help_into_ordinary_chat(self):
+        for plugin, method in (
+            (SearchCommand, "inject_search_memory"),
+            (DrawCommand, "inject_draw_memory"),
+            (WebStudio, "inject_web_memory"),
+            (MusicCommand, "inject_music_memory"),
+        ):
+            self.assertFalse(hasattr(plugin, method), plugin.__name__)
+
+    def test_image_creation_and_edit_have_distinct_intents(self):
         self.assertEqual(parse_draw_command("帮我画一张雨夜海报"), "雨夜海报")
         self.assertIsNone(parse_edit_command("帮我画一张雨夜海报"))
         self.assertIn("红色", parse_edit_command("把这张图改成红色背景"))
-        self.assertTrue(is_dewatermark_request("把右下角的@作者水印抹掉"))
+        self.assertIsNone(parse_edit_command("把这张图改成去掉水印"))
 
     def test_video_search_generation_and_full_production_do_not_steal_each_other(self):
         self.assertEqual(_parse_video_command("帮我生成一段海边日落视频"), "海边日落")

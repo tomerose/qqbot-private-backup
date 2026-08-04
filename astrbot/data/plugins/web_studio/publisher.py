@@ -44,6 +44,18 @@ class PageSnapshot:
     preview: bytes | None
 
 
+def _replace_atomic(source: Path, target: Path) -> None:
+    """os.replace with retries: Windows AV scans can briefly hold the target."""
+    for attempt in range(5):
+        try:
+            source.replace(target)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.1 * (attempt + 1))
+
+
 def _sandbox_shell(page_id: str, app_html: str) -> str:
     """Wrap generated code in an opaque iframe with page-scoped persistence."""
     encoded = base64.b64encode(str(app_html).encode("utf-8")).decode("ascii")
@@ -223,7 +235,7 @@ class FirebasePublisher:
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_suffix(".html.tmp")
             temporary.write_text(_sandbox_shell(key, str(html)), encoding="utf-8")
-            temporary.replace(target)
+            _replace_atomic(temporary, target)
             return target
         except OSError as exc:
             raise PublishError("网页文件写入失败") from exc
@@ -267,7 +279,7 @@ class FirebasePublisher:
                 target = directory / "index.html"
                 temporary = target.with_suffix(".html.tmp")
                 temporary.write_bytes(snapshot.document)
-                temporary.replace(target)
+                _replace_atomic(temporary, target)
             if snapshot is None or snapshot.preview is None:
                 if preview.is_file():
                     preview.unlink()
@@ -275,7 +287,7 @@ class FirebasePublisher:
                 preview.parent.mkdir(parents=True, exist_ok=True)
                 temporary_preview = preview.with_suffix(".png.tmp")
                 temporary_preview.write_bytes(snapshot.preview)
-                temporary_preview.replace(preview)
+                _replace_atomic(temporary_preview, preview)
         except OSError as exc:
             raise PublishError("网页回滚失败") from exc
 
