@@ -69,17 +69,16 @@ class EmotionalChatTests(unittest.TestCase):
             (
                 "http://127.0.0.1:3000/v1/chat/completions",
                 "sk-gemini-vertex",
-                "gemini-3.5-flash",
+                "gemini-3.6-flash",
             ),
         )
 
-    def test_relationship_identity_is_single_and_privacy_safe(self):
+    def test_relationship_query_gets_no_hardcoded_identity_claim(self):
         async def scenario():
             plugin = EmotionalChat.__new__(EmotionalChat)
             replies = await collect(plugin.on_message(FakeEvent("小柠的对象是谁？", "2000000000")))
-            self.assertEqual(len(replies), 1)
-            self.assertIn("单身", replies[0])
-            self.assertNotIn("3424575956", replies[0])
+            # 隐私契约：不硬编码"单身"等现实身份，身份问题交给人格 prompt 处理
+            self.assertEqual(replies, [])
 
         asyncio.run(scenario())
 
@@ -95,7 +94,7 @@ class EmotionalChatTests(unittest.TestCase):
             self.assertTrue(event.stopped)
             self.assertEqual(
                 replies,
-                ["（放下手边的事，认真听你说…）", "哎，听着就挺累的。"],
+                ["哎，听着就挺累的。"],  # 人格强化后无舞台动作
             )
 
         asyncio.run(scenario())
@@ -146,12 +145,14 @@ class EmotionalChatTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_relationship_reply_never_contains_qq(self):
+    def test_relationship_query_never_leaks_qq(self):
         async def scenario():
             plugin = EmotionalChat.__new__(EmotionalChat)
             replies = await collect(plugin.on_message(FakeEvent("小柠的对象是谁？", "2000000000")))
-            self.assertIn("单身", replies[0])
-            self.assertNotIn("3424575956", replies[0])
+            self.assertEqual(replies, [])
+            # 即使未来加了回复，也绝不允许泄露 QQ 号
+            for reply in replies:
+                self.assertNotIn("3424575956", str(reply))
 
         asyncio.run(scenario())
 

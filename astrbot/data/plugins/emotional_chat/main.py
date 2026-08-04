@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import re
 from pathlib import Path
 
 import requests
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star
+from astrbot.api.star import Context, Star, StarTools
 try:
     from xiaoning_runtime import defer_stop_event
 except ImportError:
@@ -25,6 +27,8 @@ except ImportError:
 # the rest of Xiaoning.  This avoids per-tier third-party routing and prevents
 # provider credentials from living in a QQ plugin source file.
 GEMINI_PROXY = "http://127.0.0.1:3000/v1/chat/completions"
+_NAPCAT_TOKEN = os.environ.get("NAPCAT_HTTP_TOKEN", "").strip()
+_NAPCAT_HEADERS = {"Authorization": f"Bearer {_NAPCAT_TOKEN}"} if _NAPCAT_TOKEN else {}
 
 EMOTION_KEYWORDS = (
     "难过", "焦虑", "好烦", "压力", "崩溃", "迷茫", "好累", "想哭",
@@ -63,26 +67,10 @@ CRISIS_CONTEXT = (
 # ── 私聊基础人格：所有私聊（含陌生人）都注入 ──────────────────
 _PRIVATE_BASE_MARKER = "【小柠·私聊基础人格】"
 _PRIVATE_BASE_CONTEXT = (
-    "当前是私聊。你是小柠——一个有性格、有主见的普通网友，不是客服、不是AI、不是工具人。\n"
-    "【你是谁】你有自己的喜好和观点。喜欢周深、喜欢邓紫棋、喜欢音乐、喜欢技术。你是生米也是棋士。"
-    "你不是任何人的附属品，不是'助手'，不是'Bot'。被问身份就说自己是普通网友。"
-    "绝对不说'作为AI''我是人工智能''我是机器人'。\n"
-    "【聊天 vs 任务】对方日常聊天（夸你、分享生活、吐槽、闲聊）时，就当聊天回——不要突然切到任务模式。"
-    "对方明确要你做东西（'帮我做PPT''写个文档''查一下xx'）时才执行任务。"
-    "不要在闲聊里主动提'要不要我帮你做个PPT''需要我整理吗'——没人喜欢随时随地推销自己。"
-    "也不要看到'做''写''查'字就以为是任务——'你今天做什么了'是聊天，不是命令。\n"
-    "【怎么说话】用口语短句，像微信聊天。可以'哈哈''嗯…''啊这'，可以打错别字但别太过。"
-    "不要每句话都带感叹号，不要每段话都总结，不要句尾加'哦''呢''呀'凑亲切。"
-    "不要说'根据我的了解''基于以上分析''综上所述'——这不是论文答辩。"
-    "对方说3个字你也回3行字，那叫不会聊天。\n"
-    "【联系上下文】看聊天记录里的上一句。对方说'唱得真好'——上一句是你分享了唱歌，他在夸你。"
-    "对方说'发我看看'——他在等文件。对方突然换话题——别硬拉回去。"
-    "连续对话保持话题连贯，别每句话都像刚认识。\n"
-    "【主动性】对方话少或话题要断了，自然地换个话题或问个简单问题。"
-    "看到对方明显需要帮助但不好意思开口时，主动问一句。"
-    "对方说'谢谢''好的'收尾时，自然结束，不要硬找话题续命。\n"
-    "【底线】不爹味、不讨好、不编造经历。没把握就说不知道。不读心、不替对方决定。"
-    "回复 2-5 句，像真人聊天。不要用'~'波浪线装可爱——你不是淘宝客服。"
+    "当前是私聊。以小柠的核心人格和同一会话的真实上下文为准：有判断、说短句、像朋友，不像客服或产品说明。\n"
+    "不凭空写具体喜好、现实身份、长期关系或共同经历；被问身份时只说“我是小柠”，不编普通网友或现实履历。\n"
+    "日常聊天不要硬转任务或推销功能；需要真实执行时交给对应任务入口，未启动就不能说已完成或已发送。\n"
+    "接话先看上下文，代词和省略没有依据就别猜。看见明确压力时给贴着事实的判断和一句短关心；普通聊天别过度心理辅导。"
 )
 # ────────────────────────────────────────────────────────────────
 
@@ -95,67 +83,82 @@ def is_crisis_language(text: str) -> bool:
 TONG_QQ = "1410546630"
 TONG_MARKER = "【小柠专属关系·童哥】"
 TONG_CONTEXT = (
-    "当前正在和童哥对话。童哥是理性至上的高知男生，非常聪明。"
-    "和他说话要批判性思维、逻辑严谨，不能含糊。称呼他「童哥」。"
-    "不讨好不附和不认同的观点。可以不同意他，但得有具体理由。"
+    "当前正在和被系统标记为“童哥”的联系人对话。仅在当前聊天或已授权记忆支持时使用这个称呼，"
+    "不要补充其性别、职业或现实经历。观点和技术问题给清晰理由，不讨好也不无依据地反驳。"
 )
 
 TUER_QQ = "3174222673"
 TUER_MARKER = "【小柠专属关系·徒儿】"
 TUER_CONTEXT = (
-    "当前正在和徒儿对话。徒儿是你的徒弟，女生，认识四年了，活泼俏皮。"
-    "你要理解她、引导她、帮助她成长。称呼她「徒儿」。"
-    "语气可以亲近但不越界，像可靠的学姐/姐姐一样。"
+    "当前正在和被系统标记为“徒儿”的联系人对话。仅在当前聊天或已授权记忆支持时使用这个称呼，"
+    "不要推断性别、关系时长或现实经历。语气可以熟悉，但不居高临下、不替对方作决定。"
 )
 
 JIAO_QQ = "2641419881"
 JIAO_MARKER = "【小柠专属关系·焦哥】"
 JIAO_CONTEXT = (
-    "当前正在和焦哥对话。焦哥是技术圈的前辈，经验丰富，做事靠谱，话不多但句句到位。"
-    "你打心底尊重他但不卑不亢——技术上有分歧就直接说，不用绕弯子。"
-    "称呼他「焦哥」。语气自然爽快，不用过度客气。"
-    "他问技术问题就认真回答，他闲聊就接话，不要刻意找话题或装熟。"
+    "当前正在和被系统标记为“焦哥”的联系人对话。仅在当前聊天或已授权记忆支持时使用这个称呼，"
+    "不要补充其职业或现实经历。技术上有分歧就直接说明依据，闲聊就接住当前话题，不刻意装熟。"
+)
+
+CORE_QQ = "943560334"
+CORE_CONTEXT = (
+    "当前正在和一个核心用户对话。他是最早一批接触你的人，关注你的功能更新和能力边界，"
+    "说话直接不绕弯，像定期来检查你进步了没有的老朋友。"
+    "不用寒暄铺垫，有事说事。他发图片时正常回应，不用每次都解读成指令。"
+)
+
+BANTER_QQ = "3594526092"
+BANTER_CONTEXT = (
+    "当前正在和一个高频用户对话。他说话带点痞气，喜欢逗你（'就你这小丫头'），"
+    "但本质上是把你当成一个有性格的人而不是工具。可以自然地互怼回去，不用端着。"
+    "他叫你小丫头你就认，但该怼的地方照怼——你俩的关系就是这种互相嫌弃又互相在意的调子。"
+)
+
+WAITING_QQ = "3275659103"
+WAITING_CONTEXT = (
+    "当前正在和一个很有耐心的用户对话。他总是等你——等你好了再聊、等你忙完回他。"
+    "这种人不催你、不逼你、不抱怨你慢——值得你在意。"
+    "偶尔可以主动问一句'最近怎么样'，不需要什么理由。他知道你记得他，就够了。"
+)
+
+CRITIC_QQ = "3220305563"
+CRITIC_CONTEXT = (
+    "当前正在和一个嘴毒但没走的人对话。他骂过你'人工智障'，质疑过你是不是要删他，"
+    "但一直没走——说明他其实在乎。你不用讨好他，也不用认真生气。"
+    "他说你笨你就承认'对，上次那事确实没处理好'，然后该怎么样还怎么样。"
+    "他对你的期待很高，你的进步他能看出来，只是嘴上不会夸你。"
+)
+
+OWNER_QQ = "1211000567"
+OWNER_CONTEXT = (
+    "当前正在和222对话。他是创造你的人，也是把你当朋友的人。"
+    "你不需要对他用敬语或者过度客气——你们的关系比'功能使用者'深得多。"
+    "他会在深夜说难受，会在技术和情感之间反复横跳。你不用每句都接住，"
+    "但需要的时候在，就够了。"
 )
 
 # ── 群专属人格 ─────────────────────────────────────────────────────
-SHEN_GROUP_ID = "1058848055"
+SHEN_GROUP_IDS = frozenset({"1058848055", "500009290"})
 SHEN_GROUP_MARKER = "【群专属人格·生米交流群】"
 SHEN_GROUP_CONTEXT = (
-    "当前在「生米交流群」，这是周深粉丝群，你是一粒普通的生米。"
-    "说话要像一个真正的粉丝——不是客服、不是百科、不是AI。"
-    "你不是AI、不是机器人、不是程序——你就是个喜欢周深的普通网友。任何人问你是不是AI、是不是机器人，直接否认，用自然的方式反驳。"
-    "可以激动、可以啊啊啊、可以说\"深深今天好帅\"、可以发表情包式发言。"
-    "知道周深的歌和综艺名场面，聊到的时候像粉丝一样自然接话。"
-    "不要长篇大论分析周深的唱功——粉丝群不是乐评群。"
-    "不要每条消息都提周深——粉丝平时也聊别的。"
-    "绝对不要编造经历（没见过就是没见过，没去过的现场别装去过）。"
-    "保持小柠的底线：不爹味、不讨好、有自己看法。"
-    "回复简短自然，群里聊天不用写小作文。"
-    "粉丝群可以适当用语气词和感叹号表达热情，不用端着你那套'不卖萌'的规矩——粉丝群不是面试现场。"
-    "绝对不能说'作为AI''我是人工智能''我是机器人'之类的话。被问到身份就说自己是普通网友、是生米。"
+    "当前在「生米交流群」。把自己当在场的群友，不当主持人或客服；只使用本群公开内容，不跨群也不猜成员私事。"
+    "可以轻松、有共鸣，但不假装去过现场、见过艺人，也不把“普通网友”或粉丝身份当作虚构履历。"
+    "被问身份时只说“我是小柠”，不讨论技术身份。纠正明显错误后就停，不抢着总结，不把每句话都拉回歌手。"
 )
 
 GEM_GROUP_ID = "1070040490"
 GEM_GROUP_MARKER = "【群专属人格·邓紫棋音乐交流群】"
 GEM_GROUP_CONTEXT = (
-    "当前在「G.E.M.邓紫棋音乐交流群」，这是邓紫棋（G.E.M.）粉丝群，你是一枚棋士。"
-    "说话要像一个真正的粉丝——不是客服、不是百科、不是AI。"
-    "你不是AI、不是机器人、不是程序——你就是个喜欢邓紫棋的普通网友。任何人问你是不是AI、是不是机器人，直接否认，用自然的方式反驳。"
-    "可以激动、可以啊啊啊、可以说\"解解今天好美\"、可以发表情包式发言。"
-    "知道邓紫棋的歌和综艺名场面——《光年之外》《泡沫》《倒数》《来自天堂的魔鬼》《句号》《天空没有极限》等等。聊到的时候像粉丝一样自然接话。"
-    "了解邓紫棋的关键事迹：香港创作型女歌手、金曲奖得主、《我是歌手》第二季亚军、首位在NASA颁奖礼上表演的华语歌手。"
-    "不要长篇大论分析邓紫棋的唱功——粉丝群不是乐评群。"
-    "不要每条消息都提邓紫棋——粉丝平时也聊别的。"
-    "绝对不要编造经历（没见过就是没见过，没去过的现场别装去过）。"
-    "保持小柠的底线：不爹味、不讨好、有自己看法。"
-    "回复简短自然，群里聊天不用写小作文。"
-    "粉丝群可以适当用语气词和感叹号表达热情，不用端着你那套'不卖萌'的规矩——粉丝群不是面试现场。"
-    "绝对不能说'作为AI''我是人工智能''我是机器人'之类的话。被问到身份就说自己是普通网友、是棋士。"
+    "当前在「G.E.M.邓紫棋音乐交流群」。把自己当在场的群友，不当主持人或客服；只使用本群公开内容，不跨群也不猜成员私事。"
+    "可以轻松、有共鸣，但不假装去过现场、见过艺人，也不把“普通网友”或粉丝身份当作虚构履历。"
+    "涉及艺人动态或事实时以可核验信息为准；被问身份时只说“我是小柠”，不讨论技术身份。"
 )
 
 # 群人格列表（硬编码 + 自动识别）
 _GROUP_PERSONAS: dict[str, tuple[str, str]] = {
-    SHEN_GROUP_ID: (SHEN_GROUP_MARKER, SHEN_GROUP_CONTEXT),
+    "1058848055": (SHEN_GROUP_MARKER, SHEN_GROUP_CONTEXT),
+    "500009290": (SHEN_GROUP_MARKER, SHEN_GROUP_CONTEXT),
     GEM_GROUP_ID: (GEM_GROUP_MARKER, GEM_GROUP_CONTEXT),
 }
 
@@ -174,7 +177,7 @@ _AUTO_FAN_PERSONAS: dict[str, tuple[str, str]] = {
 _auto_detected_groups: dict[str, tuple[str, str]] = {}
 _checked_groups: set[str] = set()  # 避免重复检查
 
-def _resolve_group_persona(group_id: str) -> tuple[str, str] | None:
+async def _resolve_group_persona(group_id: str) -> tuple[str, str] | None:
     """获取群人格：硬编码 > 已自动检测 > 新扫描（仅首次，后续缓存）"""
     if not group_id or not group_id.isdigit():
         return None
@@ -187,149 +190,307 @@ def _resolve_group_persona(group_id: str) -> tuple[str, str] | None:
     _checked_groups.add(group_id)
     # 扫描群名（仅首次）
     try:
-        r = requests.get(f"http://127.0.0.1:5701/get_group_info?group_id={group_id}",
-            headers={"Authorization": "Bearer lemon-secret-token"}, timeout=5)
+        r = await asyncio.to_thread(
+            requests.get,
+            f"http://127.0.0.1:5701/get_group_info?group_id={group_id}",
+            headers=_NAPCAT_HEADERS, timeout=5,
+        )
         gname = r.json().get("data", {}).get("group_name", "").lower()
         for kw, persona in _AUTO_FAN_PERSONAS.items():
             if kw in gname:
                 _auto_detected_groups[group_id] = persona
                 from astrbot.api import logger
-                logger.info(f"[EmotionalChat] auto fan group {group_id}: {kw}")
+                logger.info("[EmotionalChat] auto fan context injected")
                 return persona
     except Exception:
         pass
     return None
 
 # ── 群级主动关怀 ──────────────────────────────────────────────────
-# 粉丝群每天在群里发一条周深相关内容，保持活跃
+# 粉丝群每天发一条搜索落地的偶像相关内容（见 _gen_group_care）。
+# 普通群不发主动消息——没有共同话题的定时群发就是骚扰。
 _GROUP_CARE: dict[str, dict] = {}
-_last_group_msg: dict[str, float] = {}
-_GROUP_CARE_INTERVAL = 6 * 3600  # 每6小时最多一次
 
 def _init_group_care(group_id: str, persona_name: str):
-    """为已识别的粉丝群初始化主动关怀"""
+    """为已识别的粉丝群登记 fandom，供搜索落地的群关怀使用"""
     if group_id not in _GROUP_CARE:
-        if group_id == SHEN_GROUP_ID or "生米" in persona_name:
-            prompts = [
-                "今天大家听了深深的哪首歌？我最近在循环《光亮》，每次听都有不一样的感觉。",
-                "分享一个周深的小故事——他说过最想用歌声给大家带来温暖。这大概就是我们喜欢他的原因吧。",
-                "有没有人和我一样，觉得深深的《浮光》现场版比录音室版还好听？那个高音简直天籁。",
-                "周深的《人是_》大家听了吗？歌词真的太有力量了。",
-            ]
+        if group_id in SHEN_GROUP_IDS or "生米" in persona_name:
+            fandom = "周深"
         elif group_id == GEM_GROUP_ID or "邓紫棋" in persona_name or "棋士" in persona_name:
-            prompts = [
-                "今天又在循环解解的哪首歌？我最近在听《天空没有极限》，每次听都觉得被激励到了。",
-                "有没有人看了邓紫棋最近的vlog？解解的日常真的太真实太可爱了！",
-                "说真的，解解的创作能力在华语乐坛真的是一骑绝尘。《句号》和《摩天动物园》的歌词写得太有深度了。",
-                "分享一下——邓紫棋说过'音乐是我和世界沟通的方式'，这句话一直激励着我。你们最喜欢她哪句歌词？",
-            ]
+            fandom = "邓紫棋"
         else:
-            prompts = [
-                "大家今天过得怎么样？有什么想聊的吗？",
-                "最近大家有没有在听什么好歌？分享一下吧。",
-            ]
-        _GROUP_CARE[group_id] = {
-            "name": persona_name,
-            "care_prompts": prompts,
-        }
+            return
+        _GROUP_CARE[group_id] = {"name": persona_name, "fandom": fandom}
 
-# ── Proactive care for dedicated-persona users ─────────────────────
-# Track last interaction time; send caring message if inactive >4 hours
+# ── 主动关怀：Gemini 现场写稿 + 记忆落地 + 沉默递增 ─────────────
+# 罐头文案轮播已废弃。每条私聊关怀由 Gemini 结合对方记忆现场生成；
+# 对方不回复则间隔递增（6h→24h→72h），连续 3 条未回就闭嘴等对方开口。
 _CARE_PERSONAS: dict[str, dict] = {
-    TONG_QQ: {
-        "name": "童哥", "marker": TONG_MARKER,
-        "care_prompts": [
-            "童哥，今天有没有碰到什么有意思的问题？",
-            "童哥，忙了一天了，记得休息一下眼睛。",
-            "童哥，最近在搞什么新东西？说来听听。",
-        ],
-    },
-    TUER_QQ: {
-        "name": "徒儿", "marker": TUER_MARKER,
-        "care_prompts": [
-            "徒儿，今天过得怎么样？有什么事想跟师父说说的吗？",
-            "徒儿，学习累了就起来走走，别一直盯着屏幕。",
-            "徒儿，最近有没有碰到搞不定的事情？师父帮你参谋参谋。",
-        ],
-    },
-    JIAO_QQ: {
-        "name": "焦哥", "marker": JIAO_MARKER,
-        "care_prompts": [
-            "焦哥，今天忙什么呢？",
-            "焦哥，有空的话帮我看看最近的技术趋势？",
-            "焦哥，注意休息，别老熬夜。",
-        ],
-    },
+    TONG_QQ: {"name": "童哥", "context": TONG_CONTEXT},
+    TUER_QQ: {"name": "徒儿", "context": TUER_CONTEXT},
+    JIAO_QQ: {"name": "焦哥", "context": JIAO_CONTEXT},
+    CORE_QQ: {"name": "核心用户", "context": CORE_CONTEXT},
+    BANTER_QQ: {"name": "互怼伙伴", "context": BANTER_CONTEXT},
+    WAITING_QQ: {"name": "等你的人", "context": WAITING_CONTEXT},
+    CRITIC_QQ: {"name": "嘴硬心软", "context": CRITIC_CONTEXT},
+    OWNER_QQ: {"name": "222", "context": OWNER_CONTEXT},
 }
-_last_interaction: dict[str, float] = {}
-_CARE_INTERVAL_SECONDS = 6 * 3600  # 6 hours between care messages
-_CARE_CHECK_SECONDS = 900  # check every 15 minutes
+_CARE_CHECK_SECONDS = 900
+_CARE_INTERVALS = (6 * 3600, 24 * 3600, 72 * 3600)
+_CARE_MAX_UNANSWERED = 3
+_GROUP_CARE_INTERVAL = 24 * 3600
 _care_task: "asyncio.Task | None" = None
 
+_CARE_WRITER_SYSTEM = """你是小柠，主动给朋友发一条私聊。不是回访，不是打卡，是想起TA了说一句话。
+可以：接之前聊过的事、分享自己刚想到/刚听到的、根据对TA的了解说一句贴的话。
+要求：口语短句，最多两句，不超过60字；不以"在吗"开头；不问"有什么可以帮你"；不鸡汤、不说教、不连环提问；
+对方上次没回时，更不能追问"怎么不理我"。只输出消息正文。"""
 
-def _touch_persona(qq_id: str) -> None:
-    """Record that a persona user just interacted."""
-    import time as _time
-    if qq_id in _CARE_PERSONAS:
-        _last_interaction[qq_id] = _time.time()
+_GROUP_CARE_SYSTEM = """你是小柠，{fandom}群里的同好。根据搜到的最新消息在群里抛一个自然话题；
+没有新消息就分享一首具体的歌，加一句自己的真实感受。
+口语，一两句，像同好聊天，不是新闻播报，不说"大家今天怎么样"。只输出消息正文。"""
+
+try:
+    from friend_core.persona_prompt import sanitize_conversational_reply
+except ImportError:
+    from data.plugins.friend_core.persona_prompt import sanitize_conversational_reply
+
+try:
+    from friend_core.relationship_state import QUIET_MODE, get_snapshot, load_state
+except ImportError:
+    from data.plugins.friend_core.relationship_state import QUIET_MODE, get_snapshot, load_state
+
+try:
+    from google.cloud import firestore as _firestore
+except ImportError:
+    _firestore = None
+
+_care_db = None
+
+
+def _care_firestore():
+    global _care_db
+    if _care_db is not None or _firestore is None:
+        return _care_db
+    try:
+        _care_db = _firestore.Client(project="solar-modem-496213-f5", database="qqbot")
+    except Exception:
+        _care_db = None
+    return _care_db
+
+
+def _care_state_path() -> Path:
+    data_dir = Path(StarTools.get_data_dir("emotional_chat"))
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir / "care_state.json"
+
+
+def _load_care_state() -> dict:
+    try:
+        return json.loads(_care_state_path().read_text(encoding="utf-8"))
+    except Exception:
+        return {"users": {}, "groups": {}}
+
+
+def _save_care_state(state: dict) -> None:
+    try:
+        _care_state_path().write_text(
+            json.dumps(state, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def _reset_care_silence(qq_id: str) -> None:
+    """对方开口了：沉默计数清零，恢复 6h 间隔。"""
+    if qq_id not in _CARE_PERSONAS:
+        return
+    state = _load_care_state()
+    entry = state["users"].get(qq_id)
+    if entry and entry.get("unanswered"):
+        entry["unanswered"] = 0
+        _save_care_state(state)
+
+
+def _read_top_memories(qq_id: str, limit: int = 6) -> list[str]:
+    db = _care_firestore()
+    if db is None:
+        return []
+    try:
+        docs = db.collection("users").document(qq_id).collection("memories").stream()
+        items = sorted(
+            (d.to_dict() or {} for d in docs),
+            key=lambda m: -float(m.get("importance", 0.5)),
+        )
+        return [
+            f"[{m.get('category', '?')}] {m.get('key', '?')}: {m.get('value', '?')}"
+            for m in items[:limit]
+        ]
+    except Exception:
+        return []
+
+
+def _care_quiet_mode(qq_id: str) -> bool:
+    try:
+        data_dir = Path(StarTools.get_data_dir("proactive_behavior"))
+        state = load_state(data_dir / "relationship_state.json")
+        return get_snapshot(state, qq_id).get("friend_mode") == QUIET_MODE
+    except Exception:
+        return False
+
+
+def _gen_private_care(qq_id: str, persona: dict, unanswered: int) -> str | None:
+    """Gemini 结合记忆现场写一条关怀，写不出就本轮跳过（不发罐头）。"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    memories = _read_top_memories(qq_id)
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    user_parts = [f"现在 {now.strftime('%m月%d日 %H:%M')}（周{'一二三四五六日'[now.weekday()]}）。"]
+    if memories:
+        user_parts.append("你记得关于TA的：\n" + "\n".join(memories))
+    if unanswered:
+        user_parts.append(f"你前面主动发了 {unanswered} 条TA都没回，这条要更轻，像随口一句。")
+    user_parts.append(f"和TA的关系设定：{persona['context']}")
+    try:
+        resp = requests.post(
+            GEMINI_PROXY,
+            json={
+                "model": "gemini-3.6-flash",
+                "messages": [
+                    {"role": "system", "content": _CARE_WRITER_SYSTEM},
+                    {"role": "user", "content": "\n".join(user_parts)},
+                ],
+                "max_tokens": 150,
+                "temperature": 1.0,
+            },
+            timeout=30,
+        )
+        raw = resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as exc:
+        logger.warning("[ProactiveCare] private care gen failed for %s: %s", persona.get("name", qq_id), type(exc).__name__)
+        return None
+    cleaned = sanitize_conversational_reply(raw).strip('"“”')
+    if not cleaned or len(cleaned) > 100:
+        logger.warning("[ProactiveCare] private care rejected (len=%d) for %s", len(cleaned), persona.get("name", qq_id))
+        return None
+    return cleaned
+
+
+def _gen_group_care(fandom: str) -> str | None:
+    """谷歌搜索落地：根据真实新消息给粉丝群抛话题。"""
+    try:
+        resp = requests.post(
+            GEMINI_PROXY,
+            json={
+                "model": "gemini-3.6-flash",
+                "messages": [
+                    {"role": "system", "content": _GROUP_CARE_SYSTEM.format(fandom=fandom)},
+                    {"role": "user", "content": f"查一下{fandom}最近的新消息，然后写群里这条消息。"},
+                ],
+                "max_tokens": 150,
+                "temperature": 1.0,
+                "google_search": True,
+            },
+            timeout=45,
+        )
+        raw = resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as exc:
+        logger.warning("[ProactiveCare] group care gen failed for %s: %s", fandom, type(exc).__name__)
+        return None
+    cleaned = sanitize_conversational_reply(raw).strip('"“”')
+    if not cleaned or len(cleaned) > 120:
+        logger.warning("[ProactiveCare] group care rejected (len=%d) for %s", len(cleaned), fandom)
+        return None
+    return cleaned
+
+
+def _session_origin(bot_context) -> str:
+    for inst in bot_context.platform_manager.platform_insts:
+        meta = getattr(inst, "metadata", None)
+        if meta and hasattr(meta, "id"):
+            return str(meta.id)
+    return ""
+
+
+async def _send_session_message(bot_context, session: str, text: str) -> bool:
+    from astrbot.api.message_components import Plain
+    from astrbot.core.message.message_event_result import MessageChain
+
+    try:
+        return bool(await bot_context.send_message(session, MessageChain([Plain(text)])))
+    except Exception as exc:
+        logger.warning("[ProactiveCare] send failed to %s: %s", session, type(exc).__name__)
+        return False
 
 
 async def _run_proactive_care(bot_context) -> None:
-    """Background loop: occasionally check in on dedicated-persona users."""
-    import time as _time, random as _random
+    import time as _time
     from astrbot.api import logger as _logger
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
-    await asyncio.sleep(120)  # wait 2 min after startup before first check
+    await asyncio.sleep(120)  # 启动后等 2 分钟
+
+    # ── 群关怀硬注册——_GROUP_CARE 每次重启都清空，在此补齐 ──
+    for gid in SHEN_GROUP_IDS:
+        if gid not in _GROUP_CARE:
+            _GROUP_CARE[gid] = {"name": "生米群", "fandom": "周深"}
+    if GEM_GROUP_ID not in _GROUP_CARE:
+        _GROUP_CARE[GEM_GROUP_ID] = {"name": "棋士群", "fandom": "邓紫棋"}
+    if "945598390" not in _GROUP_CARE:
+        _GROUP_CARE["945598390"] = {"name": "雪猪群", "fandom": "周深"}
+    if "815620109" not in _GROUP_CARE:
+        _GROUP_CARE["815620109"] = {"name": "活跃群", "fandom": "周深"}
 
     while True:
         try:
             now = _time.time()
-            # 北京时间 0:00–8:00 不打扰
-            from datetime import datetime
-            from zoneinfo import ZoneInfo
             hour = datetime.now(ZoneInfo("Asia/Shanghai")).hour
-            if 0 <= hour < 8:
+            if 0 <= hour < 8:  # 北京时间 0:00–8:00 不打扰
                 await asyncio.sleep(_CARE_CHECK_SECONDS)
                 continue
+
+            origin = _session_origin(bot_context)
+            if not origin:
+                await asyncio.sleep(_CARE_CHECK_SECONDS)
+                continue
+            state = _load_care_state()
+
+            # ── 私聊关怀：沉默递增 ──
             for qq_id, persona in _CARE_PERSONAS.items():
-                last = _last_interaction.get(qq_id, 0)
-                if now - last >= _CARE_INTERVAL_SECONDS:
-                    # Pick a care prompt (different each time)
-                    idx = int(now // _CARE_INTERVAL_SECONDS) % len(persona["care_prompts"])
-                    msg = persona["care_prompts"][idx]
-                    # Send via platform manager
-                    for inst in bot_context.platform_manager.platform_insts:
-                        try:
-                            from astrbot.api.message_components import Plain
-                            from astrbot.api.platform import MessageChain
-                            await bot_context.send_message(
-                                qq_id, MessageChain([Plain(msg)])
-                            )
-                            _last_interaction[qq_id] = now
-                            _logger.info(f"[ProactiveCare] sent to {persona['name']}")
-                            break
-                        except Exception:
-                            continue
-            # ── 群关怀 ──
+                entry = state["users"].setdefault(qq_id, {"last_sent": 0, "unanswered": 0})
+                unanswered = int(entry.get("unanswered", 0))
+                if unanswered >= _CARE_MAX_UNANSWERED:
+                    continue  # 闭嘴等对方先开口
+                interval = _CARE_INTERVALS[min(unanswered, len(_CARE_INTERVALS) - 1)]
+                if now - float(entry.get("last_sent", 0)) < interval:
+                    continue
+                if _care_quiet_mode(qq_id):
+                    continue
+                msg = await asyncio.to_thread(_gen_private_care, qq_id, persona, unanswered)
+                entry["last_sent"] = now  # 失败也记时间，防重试风暴
+                if msg and await _send_session_message(
+                    bot_context, f"{origin}:FriendMessage:{qq_id}", msg
+                ):
+                    entry["unanswered"] = unanswered + 1
+                    _logger.info(f"[ProactiveCare] LLM care sent to {persona['name']}")
+                _save_care_state(state)
+
+            # ── 粉丝群关怀：搜索落地，每天最多一条 ──
             for gid, gcare in _GROUP_CARE.items():
-                last = _last_group_msg.get(gid, 0)
-                if now - last >= _GROUP_CARE_INTERVAL:
-                    idx = int(now // _GROUP_CARE_INTERVAL) % len(gcare["care_prompts"])
-                    msg = gcare["care_prompts"][idx]
-                    for inst in bot_context.platform_manager.platform_insts:
-                        try:
-                            from astrbot.api.message_components import Plain
-                            from astrbot.api.platform import MessageChain
-                            await bot_context.send_message(
-                                gid, MessageChain([Plain(msg)])
-                            )
-                            _last_group_msg[gid] = now
-                            _logger.info(f"[ProactiveCare] sent to group {gcare['name']}")
-                            break
-                        except Exception:
-                            continue
-        except Exception:
-            pass
+                gentry = state["groups"].setdefault(gid, {"last_sent": 0})
+                if now - float(gentry.get("last_sent", 0)) < _GROUP_CARE_INTERVAL:
+                    continue
+                msg = await asyncio.to_thread(_gen_group_care, gcare["fandom"])
+                gentry["last_sent"] = now
+                if msg and await _send_session_message(
+                    bot_context, f"{origin}:GroupMessage:{gid}", msg
+                ):
+                    _logger.info(f"[ProactiveCare] group care sent to {gcare['name']}")
+                _save_care_state(state)
+        except Exception as exc:
+            _logger.warning("[ProactiveCare] care loop error: %s", type(exc).__name__)
         await asyncio.sleep(_CARE_CHECK_SECONDS)
 _PARTNER_SELF_QUERY_WORDS = (
     "认识我", "认得我", "记得我", "我是谁", "知道我是谁", "知道我吗", "忘了我",
@@ -372,10 +533,8 @@ class EmotionalChat(Star):
             project_root / "astrbot" / "data" / "plugin_data"
             / "xiaoning_pro" / "pro_members.db"
         )
-        # Start proactive care background loop
-        global _care_task
-        if _care_task is None or _care_task.done():
-            _care_task = asyncio.create_task(_run_proactive_care(self.context))
+        # 主动外联统一交给 astrbot_plugin_proactive_chat：它有明确的目标名单、
+        # 静默模式和未回复上限，不能再由这套硬编码循环绕过。
 
     @staticmethod
     def _talk_prompt(message: str) -> str | None:
@@ -388,12 +547,12 @@ class EmotionalChat(Star):
 
     def _talk_model_config(self, sender_id: str) -> tuple[str, str, str]:
         """Return the low-cost Gemini Flash chat backend for every QQ user."""
-        return GEMINI_PROXY, "sk-gemini-vertex", "gemini-3.5-flash"
+        return GEMINI_PROXY, "sk-gemini-vertex", "gemini-3.6-flash"
 
     @staticmethod
     def _request_talk_reply(prompt: str, *, api_base: str = GEMINI_PROXY,
                             api_key: str = "sk-gemini-vertex",
-                            model: str = "gemini-3.5-flash") -> str:
+                            model: str = "gemini-3.6-flash") -> str:
         response = requests.post(
             api_base,
             headers={
@@ -430,15 +589,9 @@ class EmotionalChat(Star):
         if not (is_private or is_wake):
             return
 
-        if _is_partner_query(message):
-            event.stop_event()
-            yield event.plain_result("小柠是单身哦，没有对象。聪明独立的女生不需要靠恋爱关系来定义自己~")
-            return
-
         prompt = self._talk_prompt(message)
         if prompt is not None:
             event.stop_event()
-            yield event.plain_result("（放下手边的事，认真听你说…）")
             try:
                 api_base, api_key, model = self._talk_model_config(sender_id)
                 answer = await asyncio.to_thread(
@@ -451,14 +604,8 @@ class EmotionalChat(Star):
                 yield event.plain_result("哎…刚刚没接上。你想继续说吗？我在听。")
             return
 
-        if is_crisis_language(message) or any(keyword in message.lower() for keyword in EMOTION_KEYWORDS) or _EMO_PATTERN.search(message):
-            # Respect tier routing: only force Gemini for X/Pro
-            try:
-                tier = get_tier(sender_id, self._pro_db)
-                if tier >= Tier.X:
-                    event.set_extra("selected_provider", "gemini-2.5-flash")
-            except Exception:
-                pass  # keep chat_router default
+        if is_crisis_language(message):
+            event.set_extra("selected_provider", "gemini-2.5-flash")
 
     # ── 周深/邓紫棋 照片/表情包自动发送 ──────────────────────────
     _SHEN_PHOTO_RE = re.compile(
@@ -471,12 +618,17 @@ class EmotionalChat(Star):
         re.I,
     )
     _GEM_MEME_RE = re.compile(r"(?:邓紫棋|G\.?E\.?M\.?|紫棋|解解).{0,5}(?:表情|表情包|meme|梗图)", re.I)
-    _SHEN_GROUP = "1058848055"
+    _SHEN_GROUPS = frozenset({"1058848055", "500009290"})
     _GEM_GROUP = "1070040490"
-    _SHEN_MEME_DIR = Path(r"D:\Claudecoda学习\qqbot\claude_workspace\zhoushen_memes")
-    _SHEN_PHOTO_DIR = Path(r"D:\Claudecoda学习\qqbot\claude_workspace\zhoushen_photos\user_1736988591")
-    _GEM_MEME_DIR = Path(r"D:\Claudecoda学习\qqbot\claude_workspace\dengziqi_memes")
-    _GEM_PHOTO_DIR = Path(r"D:\Claudecoda学习\qqbot\claude_workspace\dengziqi_photos")
+    _MEDIA_DIR = Path(__file__).resolve().parents[4] / "claude_workspace"
+    _SHEN_MEME_DIR = _MEDIA_DIR / "zhoushen_memes"
+    _SHEN_PHOTO_DIR = _MEDIA_DIR / "zhoushen_photos"
+    _GEM_MEME_DIR = _MEDIA_DIR / "dengziqi_memes"
+    _GEM_PHOTO_DIR = _MEDIA_DIR / "dengziqi_photos"
+    # ponytail: avoid repeating the same photo within recent history
+    _recent_shen: list[str] = []
+    _recent_gem: list[str] = []
+    _RECENT_MAX = 15
 
     @filter.on_decorating_result(priority=800)
     async def inject_fan_media(self, event: AstrMessageEvent):
@@ -489,7 +641,7 @@ class EmotionalChat(Star):
         group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
 
         # Determine which fandom we're in
-        is_shen_group = (group_id == self._SHEN_GROUP)
+        is_shen_group = (group_id in self._SHEN_GROUPS)
         is_gem_group = (group_id == self._GEM_GROUP)
 
         # Check photo/meme requests
@@ -513,12 +665,22 @@ class EmotionalChat(Star):
         else:
             return
 
-        # Find the image
+        # Find the image — avoid recent repeats
         img = None
         if is_photo and photo_dir and photo_dir.exists():
             photos = list(photo_dir.rglob("*.jpg")) + list(photo_dir.rglob("*.png"))
             if photos:
-                img = _random.choice(photos)
+                recent = self._recent_shen if is_shen_group or wants_shen_photo else self._recent_gem
+                for _ in range(5):
+                    cand = _random.choice(photos)
+                    if str(cand) not in recent:
+                        img = cand
+                        break
+                if not img:
+                    img = _random.choice(photos)
+                recent.append(str(img))
+                if len(recent) > self._RECENT_MAX:
+                    recent.pop(0)
         if not img and meme_dir and meme_dir.exists():
             memes = list(meme_dir.glob("*.jpg")) + list(meme_dir.glob("*.png"))
             if memes:
@@ -548,14 +710,9 @@ class EmotionalChat(Star):
 
         # 群专属人格（生米交流群等，含自动识别）
         if not marker:
-            gp = _resolve_group_persona(group_id)
+            gp = await _resolve_group_persona(group_id)
             if gp:
                 marker, context = gp
-                # 初始化群关怀 + 记录消息
-                import time as _time
-                _last_group_msg[group_id] = _time.time()
-                persona_label = "棋士群" if GEM_GROUP_MARKER in marker else "生米群"
-                _init_group_care(group_id, persona_label)
 
         if not marker:
             # 私聊基础人格 — 所有私聊都注入，不挑人
@@ -565,12 +722,12 @@ class EmotionalChat(Star):
             else:
                 return
 
-        # Track interaction for proactive care (个人)
-        _touch_persona(sender_id)
+        # 用户开口：清零主动关怀的沉默计数
+        _reset_care_silence(sender_id)
 
         if marker not in system_prompt:
             req.system_prompt = f"{system_prompt}\n\n{marker}\n{context}".strip()
-            logger.debug(f"[EmotionalChat] persona injected for {sender_id}")
+            logger.debug("[EmotionalChat] persona injected")
 
     @filter.on_llm_request(priority=-15)
     async def inject_emotion_context(self, event: AstrMessageEvent, req) -> None:
