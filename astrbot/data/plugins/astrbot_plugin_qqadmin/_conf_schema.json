@@ -213,7 +213,7 @@
       "provider_id": {
         "description": "独立审核模型 Provider ID",
         "type": "string",
-        "default": "gemini-2.5-flash"
+        "default": "gemini-3.6-flash"
       },
       "confidence_threshold": {
         "description": "最低处罚置信度",

@@ -74,10 +74,10 @@ class ChatRouterTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                "gemini-2.5-flash",
-                "gemini-2.5-flash",
-                "gemini-2.5-flash",
-                "gemini-2.5-flash",
+                "gemini-3.6-flash",
+                "gemini-3.6-flash",
+                "gemini-3.6-flash",
+                "gemini-3.6-flash",
             ],
         )
 
@@ -102,7 +102,7 @@ class ChatRouterTests(unittest.TestCase):
             await asyncio.gather(router.route_provider(Event()), router.route_provider(Event()))
 
         asyncio.run(run())
-        self.assertEqual(calls, ["gemini-2.5-flash"])
+        self.assertEqual(calls, ["gemini-3.6-flash"])
 
     def test_short_same_speaker_followup_is_coalesced(self):
         module = load_router()
@@ -207,7 +207,7 @@ class ChatRouterTests(unittest.TestCase):
                 return "帮我解这道数学题"
 
         asyncio.run(router.route_provider(Event()))
-        self.assertEqual(calls, ["gemini-2.5-flash"])
+        self.assertEqual(calls, ["gemini-3.6-flash"])
 
 
 if __name__ == "__main__":
