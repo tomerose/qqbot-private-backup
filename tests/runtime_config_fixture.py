@@ -41,25 +41,48 @@ def _persona_ok(prompt: str) -> bool:
 PROACTIVE_CONFIG = {
     "friend_settings": {
         "enable": True,
+        "proactive_prompt": "不复述用户立场来表示赞同；有真实切口才主动联系。",
         "all_x_pro_sessions": False,
         "all_friend_sessions": True,
         "session_list": ["default:FriendMessage:1211000567"],
         "auto_trigger_settings": {
             "enable_auto_trigger": True,
-            "auto_trigger_after_minutes": 3,
+            "auto_trigger_after_minutes": 360,
         },
         "schedule_settings": {
             "min_interval_minutes": 180,
-            "max_unanswered_times": 2,
+            "max_unanswered_times": 1,
         },
         "context_settings": {"conversation_history_limit": 40},
     },
     "group_settings": {
+        "enable": True,
+        "proactive_prompt": "不复述群友观点来附和；结合群聊上下文自然回应。",
         "session_list": ["945598390", "815620109", "679937076"],
-        "group_idle_trigger_minutes": 5,
-        "group_min_messages_before_proactive": 2,
+        "auto_trigger_settings": {"enable_auto_trigger": False},
+        "group_idle_trigger_minutes": 0,
+        "group_min_messages_before_proactive": 3,
         "schedule_settings": {"max_unanswered_times": 1},
+        "context_settings": {
+            "include_bot_messages": False,
+            "source_mode": "platform_message_history",
+            "platform_history_prompt": "结合最近群消息，只有自然且有价值时才回复。",
+        },
     },
+}
+
+DESIGNATED_GROUP_IDS = ["945598390", "815620109", "679937076"]
+
+QQADMIN_CONFIG = {
+    rule_name: {"group_ids": DESIGNATED_GROUP_IDS}
+    for rule_name in ("ai_moderation", "identity_guard", "insult_warning")
+}
+
+XIAONING_CORE_CONFIG = {
+    "proactive_rollout_percent": 10,
+    "proactive_kill_switch": False,
+    "enforce_ownership": False,
+    "allowed_group_ids": DESIGNATED_GROUP_IDS,
 }
 
 
@@ -125,5 +148,18 @@ def ensure_runtime_configs(root: Path) -> None:
         proactive_path.parent.mkdir(parents=True, exist_ok=True)
         proactive_path.write_text(
             json.dumps(PROACTIVE_CONFIG, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    runtime_configs = {
+        "astrbot_plugin_qqadmin_config.json": QQADMIN_CONFIG,
+        "xiaoning_core_config.json": XIAONING_CORE_CONFIG,
+    }
+    for filename, fixture in runtime_configs.items():
+        path = proactive_path.parent / filename
+        if path.exists():
+            continue
+        path.write_text(
+            json.dumps(fixture, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
