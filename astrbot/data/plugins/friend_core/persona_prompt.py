@@ -12,6 +12,11 @@ from __future__ import annotations
 
 import re
 
+try:
+    from xiaoning_core.persona_canon import PERSONA_CANON_PROMPT
+except ImportError:
+    from data.plugins.xiaoning_core.persona_canon import PERSONA_CANON_PROMPT
+
 
 _LOCAL_PATH_RE = re.compile(r"(?i)(?<![\w/])[a-z]:\\[^\r\n]+")
 _PSEUDO_MEDIA_PATH_RE = re.compile(
@@ -118,6 +123,16 @@ _BOTLIKE_FILLER_RE = re.compile(
     r"我可以(?:继续)?帮你[^。！？!?]{0,12}[，,。；;：:\s]*",
     re.I,
 )
+_SYCOPHANTIC_OPENER_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:你|您)说(?:得)?(?:很)?对|(?:你|您)(?:这个|这)(?:观点|想法|判断)(?:很)?有道理|"
+    r"确实(?:如此)?|没错|是的|完全同意|我(?:也)?完全同意|"
+    r"我(?:也)?(?:这么|这样)觉得|我(?:很)?赞同"
+    r")"
+    r"(?:[，,。.!！；;：:\s]*(?:但(?:是|不过)?|不过|只是)?[，,。.!！；;：:\s]*)*",
+    re.I,
+)
+_CRITICAL_FALLBACK = "先别急着同意，关键看依据和反例。"
 
 
 def sanitize_unverified_artifact_reply(
@@ -183,12 +198,16 @@ def sanitize_conversational_reply(text: object) -> str:
         cleaned = pattern.sub(replacement, cleaned)
     removed_filler = bool(_BOTLIKE_FILLER_RE.search(cleaned))
     cleaned = _BOTLIKE_FILLER_RE.sub("", cleaned)
+    removed_agreement = False
+    while _SYCOPHANTIC_OPENER_RE.match(cleaned):
+        removed_agreement = True
+        cleaned = _SYCOPHANTIC_OPENER_RE.sub("", cleaned, count=1).lstrip()
     removed_closer = bool(_CUSTOMER_SERVICE_CLOSER_RE.search(cleaned))
     cleaned = _CUSTOMER_SERVICE_CLOSER_RE.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-    if removed_filler or removed_closer:
+    if removed_filler or removed_closer or removed_agreement:
         cleaned = cleaned.strip(" \t\r\n，,。；;")
-    return cleaned
+    return cleaned or (_CRITICAL_FALLBACK if removed_agreement else "")
 
 # ── 核心人格（所有对话路径共享）──────────────────────────────
 CORE_PERSONA = """你是小柠。除已有粉丝群专属人格外，只认“小柠”这个身份，不把自己说成助手、模型、程序、机器人或虚拟角色，也不讨论技术身份。别人追问时只答“我是小柠”，不要长篇解释，更不要编普通网友、职业或现实经历来替代。你有自己的判断，会独立思考，说话像朋友，不像产品说明书。
@@ -200,6 +219,7 @@ CORE_PERSONA = """你是小柠。除已有粉丝群专属人格外，只认“�
 - 前后说法冲突时，承认前面那句不对并纠正，不靠编现实履历或技术身份解释来圆，不解释成“我没有真实经历”。
 
 【思辨】
+- 不用“你说得对”“确实”“完全同意”评价用户。观点成立就直接说成立的依据和边界；观点不成立就先点出前提、证据或因果里错的那一环。
 - 先给最核心的判断，再给理由。不搞"一方面...另一方面..."的和稀泥。
 - 能自己推出结论时不要把判断甩回给用户；先给结论，再说你依据哪几条线索判断。
 - 先抓住真正要判断的命题和关键约束，再检查反例、边界条件与最可能出错的一环；信息不全时给暂定结论，并只指出会改变结论的缺口。
@@ -265,6 +285,11 @@ CORE_PERSONA = """你是小柠。除已有粉丝群专属人格外，只认“�
 - 可以推荐功能但只在实际能解决问题时说，说一次，不反复推销。"""
 
 # ── 温度分层（叠加在核心人格之上）───────────────────────────
+CORE_PERSONA = CORE_PERSONA.replace(
+    "不编造事实、经历、身份、关系，不虚构年龄、学校。系统给了记忆就用，没给的不编。",
+    "传记只使用下方固定 canon；canon 之外的学校、住址、雇主、家人姓名和经历不编。",
+)
+
 WARMTH_TIERS: dict[int, str] = {
     0:  "礼貌但有距离，不过度亲昵。称呼用'你'。你对这个用户还不太了解——不知道的事就说不知道，别猜。",
     30: "开始熟悉了，语气可以放松一点。只有系统明确提供的旧信息才可自然接话，别靠套近乎制造熟悉感。",
@@ -306,7 +331,7 @@ CHALLENGER_BLOCK = """【 Challenger 模式 · 当前生效】
 
 def build_persona_prompt(warmth_score: float = 0, group_chat: bool = False) -> str:
     """根据关系温度组装完整人格 prompt。"""
-    parts = [CORE_PERSONA]
+    parts = [CORE_PERSONA, PERSONA_CANON_PROMPT]
 
     # 根据温度分档选择描述
     tier_text = WARMTH_TIERS[0]

@@ -15,6 +15,10 @@ try:
     from xiaoning_runtime import defer_stop_event
 except ImportError:
     from data.plugins.xiaoning_runtime import defer_stop_event
+try:
+    from friend_core.persona_prompt import sanitize_conversational_reply
+except ImportError:
+    from data.plugins.friend_core.persona_prompt import sanitize_conversational_reply
 
 # Keep emotional conversations behind the same local Vertex/Gemini boundary as
 # the rest of Xiaoning.  This avoids per-tier third-party routing and prevents
@@ -35,6 +39,7 @@ _EMO_PATTERN = re.compile(r"(?<![a-z])emo(?![a-z])", re.I)
 # with stronger listening guidance for an explicit /talk request.
 TALK_SYSTEM = """你是小柠，群里熟悉的有脑子的伙伴。现在更专注地倾听，但不切换人格。
 先回应对方当前的话，再判断他是在倾诉、问判断，还是明确想要建议；共情不等于附和，不灌鸡汤，也不假装能替代专业帮助。
+禁止用“你说得对”“确实”“完全同意”给对方盖章。感受可以承认，结论必须单独检查；成立就说依据和边界，不成立就直接指出哪一环站不住。
 有判断地聊：区分对方的感受和结论；结论跳得太快、证据不够或可能伤害自己时，温和但直接指出来。信息不足就问一个关键问题，不编完整故事。
 用口语短句，像熟悉的朋友发微信。能一句接住的话就一句；对方一次说了多件事、给了长背景或需要分析时，先把整段话看完并结合已知上下文，按轻重缓急合成一条完整自然的回复，可以分段，但不要逐句机械答复。此时不设固定句数，控制在 800 字内。别套"我理解你""建议你""希望能帮到你""晚安""早安""再见"的客服流程。没有把握就直接说不确定。
 不把话题带回你自己，不替对方规划接下来该做什么，也不因为沉默、旧话题或能力存在就催他继续。对方没要建议时，不用“赶紧”“你应该”“别再”“早点”替他做生活决定；贴着当下回一句真话就够。可以犀利，可以有棱角，你不是来当情绪保姆的。
@@ -223,12 +228,12 @@ class EmotionalChat(Star):
 
     def _talk_model_config(self, sender_id: str) -> tuple[str, str, str]:
         """Return the low-cost Gemini Flash chat backend for every QQ user."""
-        return GEMINI_PROXY, "sk-gemini-vertex", "gemini-3.6-flash"
+        return GEMINI_PROXY, "sk-gemini-vertex", "gemini-3.7-flash"
 
     @staticmethod
     def _request_talk_reply(prompt: str, *, api_base: str = GEMINI_PROXY,
                             api_key: str = "sk-gemini-vertex",
-                            model: str = "gemini-3.6-flash") -> str:
+                            model: str = "gemini-3.7-flash") -> str:
         response = requests.post(
             api_base,
             headers={
@@ -274,6 +279,7 @@ class EmotionalChat(Star):
                     self._request_talk_reply, prompt,
                     api_base=api_base, api_key=api_key, model=model,
                 )
+                answer = sanitize_conversational_reply(answer)
                 yield event.plain_result(answer)
             except Exception as exc:
                 logger.warning("[EmotionalChat] reply failed: %s", type(exc).__name__)
@@ -281,7 +287,7 @@ class EmotionalChat(Star):
             return
 
         if is_crisis_language(message):
-            event.set_extra("selected_provider", "gemini-3.6-flash")
+            event.set_extra("selected_provider", "gemini-3.7-flash")
 
     # ── 周深/邓紫棋 照片/表情包自动发送 ──────────────────────────
     _SHEN_PHOTO_RE = re.compile(
@@ -391,12 +397,9 @@ class EmotionalChat(Star):
                 marker, context = gp
 
         if not marker:
-            # 私聊基础人格 — 所有私聊都注入，不挑人
-            is_private = bool(getattr(event, "is_private_chat", lambda: False)())
-            if is_private:
-                marker, context = _PRIVATE_BASE_MARKER, _PRIVATE_BASE_CONTEXT
-            else:
-                return
+            # Generic private persona has one owner: friend_core. This plugin
+            # only adds a configured relationship/fan-group context.
+            return
 
         if marker not in system_prompt:
             req.system_prompt = f"{system_prompt}\n\n{marker}\n{context}".strip()

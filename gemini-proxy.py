@@ -45,7 +45,7 @@ from image_proxy_core import (
 app = FastAPI()
 PROJECT = os.getenv("VERTEX_PROJECT", "solar-modem-496213-f5")
 LOCATION = os.getenv("VERTEX_LOCATION", "global")
-CHAT_MODEL = "gemini-3.6-flash"
+CHAT_MODEL = "gemini-3.7-flash"
 MODEL_IDS = {CHAT_MODEL}
 LEGACY_CHAT_MODEL_ALIASES = {
     "gemini-2.5-flash": CHAT_MODEL,
@@ -53,6 +53,7 @@ LEGACY_CHAT_MODEL_ALIASES = {
     "gemini-2.5-pro": CHAT_MODEL,
     "gemini-3.1-pro-preview": CHAT_MODEL,
     "gemini-3.5-flash": CHAT_MODEL,
+    "gemini-3.6-flash": CHAT_MODEL,
 }
 MODEL_ROLES = {
     "fast": CHAT_MODEL,
@@ -69,6 +70,7 @@ SEARCH_MODEL_ALIASES = {
     "gemini-2.5-pro-search",
     "gemini-3.5-flash-search",
     "gemini-3.6-flash-search",
+    "gemini-3.7-flash-search",
 }
 MUSIC_MODEL = "lyria-3-clip-preview"
 MAX_MUSIC_BYTES = 20 * 1024 * 1024
@@ -107,7 +109,7 @@ async def healthz(deep: bool = False):
                 contents="Reply OK",
                 config=types.GenerateContentConfig(
                     max_output_tokens=8,
-                    thinking_config=types.ThinkingConfig(thinking_level="minimal"),
+                    thinking_config=types.ThinkingConfig(thinking_level="low"),
                 ),
             ),
             timeout=15,
@@ -131,7 +133,7 @@ async def list_models():
             for model_id in sorted(MODEL_IDS)
         ]
         + [
-            {"id": "gemini-3.6-flash-search", "object": "model", "capabilities": {"vision": True, "audio": True, "search": True}}
+            {"id": "gemini-3.7-flash-search", "object": "model", "capabilities": {"vision": True, "audio": True, "search": True}}
         ],
     }
 

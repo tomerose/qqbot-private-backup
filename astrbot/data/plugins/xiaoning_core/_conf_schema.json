@@ -1,0 +1,42 @@
+{
+  "shadow_mode": {
+    "description": "Record route decisions without blocking legacy handlers.",
+    "type": "bool",
+    "default": true
+  },
+  "enforce_ownership": {
+    "description": "Allow the kernel to stop handlers that do not own a turn.",
+    "type": "bool",
+    "default": false
+  },
+  "proactive_rollout_percent": {
+    "description": "Stable percentage of activated private users eligible for event-driven proactive messages.",
+    "type": "int",
+    "default": 10
+  },
+  "proactive_kill_switch": {
+    "description": "Immediately block all automatic proactive candidates without disabling passive continuity.",
+    "type": "bool",
+    "default": false
+  },
+  "group_followup_seconds": {
+    "description": "How long an addressed group conversation remains active.",
+    "type": "int",
+    "default": 300
+  },
+  "allowed_group_ids": {
+    "description": "Groups where configured community events may wake Xiaoning.",
+    "type": "list",
+    "default": ["945598390"]
+  },
+  "bot_sender_ids": {
+    "description": "Known bot sender IDs or names that must never count as human turns.",
+    "type": "list",
+    "default": []
+  },
+  "community_event_keywords": {
+    "description": "Explicitly configured group event keywords that may wake Xiaoning.",
+    "type": "list",
+    "default": []
+  }
+}

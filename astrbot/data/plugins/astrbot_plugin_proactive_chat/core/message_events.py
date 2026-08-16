@@ -124,15 +124,10 @@ class EventsMixin:
         session_id = event.unified_msg_origin
         normalized_session_id = self._normalize_session_id(session_id)
 
-        # 缓存 self_id
-        if event.get_self_id():
-            async with self.data_lock:
-                self.session_data.setdefault(session_id, {})["self_id"] = (
-                    event.get_self_id()
-                )
-
-        # 过滤 Bot 自身消息，避免把机器人发言误判成“用户活跃”
+        # 只允许真实成员发言驱动群主动消息状态。在写入任何计数器或
+        # 计时器前过滤自身、已知 Bot 和来源不明的消息。
         sender_id = None
+        sender_name = ""
         try:
             if hasattr(event, "message_obj") and event.message_obj:
                 sender = getattr(event.message_obj, "sender", None)
@@ -140,6 +135,12 @@ class EventsMixin:
                     sender_id = getattr(sender, "id", None) or getattr(
                         sender, "user_id", None
                     )
+                    sender_name = str(
+                        getattr(sender, "nickname", None)
+                        or getattr(sender, "card", None)
+                        or getattr(sender, "name", None)
+                        or ""
+                    ).strip()
             if not sender_id:
                 sender_id = getattr(event, "user_id", None) or getattr(
                     event, "sender_id", None
@@ -150,11 +151,46 @@ class EventsMixin:
         self_id = event.get_self_id() or self.session_data.get(session_id, {}).get(
             "self_id"
         )
-        if self_id and sender_id and str(sender_id) == str(self_id):
+        session_config = self._get_session_config(normalized_session_id) or {}
+        context_settings = session_config.get("context_settings", {}) or {}
+        configured_identifiers = context_settings.get("bot_identifiers", []) or []
+        if isinstance(configured_identifiers, str):
+            configured_identifiers = (configured_identifiers,)
+        bot_identifiers = {
+            str(item).strip().casefold()
+            for item in configured_identifiers
+            if str(item).strip()
+        }
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        raw_sender = raw.get("sender", {}) if isinstance(raw, dict) else {}
+        raw_bot_flag = bool(
+            (isinstance(raw, dict) and (raw.get("is_bot") or raw.get("bot")))
+            or (
+                isinstance(raw_sender, dict)
+                and (
+                    raw_sender.get("is_bot")
+                    or raw_sender.get("bot")
+                    or str(raw_sender.get("role", "")).casefold() == "bot"
+                )
+            )
+        )
+        if (
+            not sender_id
+            or (self_id and str(sender_id) == str(self_id))
+            or str(sender_id).strip().casefold() in bot_identifiers
+            or sender_name.casefold() in bot_identifiers
+            or raw_bot_flag
+        ):
             logger.debug(
-                f"[主动消息] 检测到 {self._get_session_log_str(session_id)} 的 Bot 自身消息，跳过用户逻辑喵。"
+                f"[主动消息] 检测到 {self._get_session_log_str(session_id)} 的 Bot/未知来源消息，跳过用户逻辑喵。"
             )
             return
+
+        if event.get_self_id():
+            async with self.data_lock:
+                self.session_data.setdefault(session_id, {})["self_id"] = (
+                    event.get_self_id()
+                )
 
         # 记录群聊最近用户活跃时间（用于临时态超时清理）
         current_time = time.time()

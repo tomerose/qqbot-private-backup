@@ -210,10 +210,16 @@
         "type": "bool",
         "default": false
       },
+      "group_ids": {
+        "description": "强制启用审核的群号",
+        "hint": "只对列出的群启用高置信度审核；其他群仍遵守各自的手动开关。",
+        "type": "list",
+        "default": []
+      },
       "provider_id": {
         "description": "独立审核模型 Provider ID",
         "type": "string",
-        "default": "gemini-3.6-flash"
+        "default": "gemini-3.7-flash"
       },
       "confidence_threshold": {
         "description": "最低处罚置信度",
@@ -229,6 +235,67 @@
         "description": "匿名上下文消息数",
         "type": "int",
         "default": 8
+      }
+    }
+  },
+  "identity_guard": {
+    "description": "小柠身份贬称防护",
+    "hint": "指定群内普通成员只要提及配置词语即触发：先公开警告，再执行配置时长的有限禁言；群主、管理员与机器人豁免。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用身份贬称防护",
+        "type": "bool",
+        "default": false
+      },
+      "group_ids": {
+        "description": "生效群号",
+        "type": "list",
+        "default": []
+      },
+      "terms": {
+        "description": "字面触发词",
+        "hint": "只要消息正文包含任一词就触发，不判断语境、引用、玩笑或指向对象。",
+        "type": "list",
+        "default": ["人工智障", "人机", "机器人", "AI"]
+      },
+      "mute_seconds": {
+        "description": "命中后的禁言秒数",
+        "type": "int",
+        "default": 60
+      },
+      "rebuttal": {
+        "description": "禁言前发送的反驳",
+        "type": "text",
+        "default": "严正警告：本群已明令禁止提及“人工智障”“人机”“机器人”“AI”。无论玩笑、引用、讨论或是否指向小柠，出现即触发；请立即停止，勿再试探规则。"
+      }
+    }
+  },
+  "insult_warning": {
+    "description": "指定群辱骂用语警告",
+    "hint": "普通成员命中配置词时只发送警告，不撤回、不禁言；群主、管理员与机器人豁免。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用辱骂用语警告",
+        "type": "bool",
+        "default": false
+      },
+      "group_ids": {
+        "description": "生效群号",
+        "type": "list",
+        "default": []
+      },
+      "terms": {
+        "description": "警告触发词",
+        "hint": "忽略大小写、空格、点号、下划线、连字符和星号；不要配置单独字母，以免误报。",
+        "type": "list",
+        "default": []
+      },
+      "warning": {
+        "description": "命中后发送的警告",
+        "type": "text",
+        "default": "警告：群聊可以尖锐，但别用辱骂代替论证。请针对观点说话，停止人身攻击。"
       }
     }
   },

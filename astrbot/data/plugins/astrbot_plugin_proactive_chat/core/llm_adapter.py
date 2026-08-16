@@ -330,6 +330,100 @@ class LlmMixin:
                 deduped.append(key)
         return deduped
 
+    async def _load_live_group_history_records(
+        self,
+        session_id: str,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Read the current public QQ group tail through the active OneBot client."""
+        parsed = self._parse_session_id(session_id)
+        if not parsed or "Group" not in parsed[1] or limit <= 0:
+            return [], 0
+
+        platform_id, _message_type, group_id = parsed
+        if not str(group_id).strip():
+            return [], 0
+
+        platform_manager = getattr(self.context, "platform_manager", None)
+        if not platform_manager:
+            return [], 0
+
+        platform_insts = list(
+            getattr(platform_manager, "platform_insts", None) or []
+        )
+        if not platform_insts:
+            get_insts = getattr(platform_manager, "get_insts", None)
+            if callable(get_insts):
+                platform_insts = list(get_insts() or [])
+
+        def _platform_id(inst: Any) -> str:
+            try:
+                meta = inst.meta()
+                return str(getattr(meta, "id", "") or "")
+            except Exception:
+                return ""
+
+        platform_insts.sort(key=lambda inst: _platform_id(inst) != platform_id)
+        group_id_param: int | str = (
+            int(group_id) if str(group_id).isdigit() else str(group_id)
+        )
+
+        for platform_inst in platform_insts:
+            get_client = getattr(platform_inst, "get_client", None)
+            if not callable(get_client):
+                continue
+            try:
+                client = get_client()
+                action_client = (
+                    client
+                    if callable(getattr(client, "call_action", None))
+                    else getattr(client, "api", None)
+                )
+                call_action = getattr(action_client, "call_action", None)
+                if not callable(call_action):
+                    continue
+                result = await call_action(
+                    "get_group_msg_history",
+                    group_id=group_id_param,
+                    message_seq=0,
+                    count=limit,
+                    reverseOrder=True,
+                )
+                payload = result.get("data", result) if isinstance(result, dict) else {}
+                messages = payload.get("messages", []) if isinstance(payload, dict) else []
+                records: list[dict[str, Any]] = []
+                for message in list(messages or [])[-limit:]:
+                    if not isinstance(message, dict):
+                        continue
+                    sender = message.get("sender") or {}
+                    if not isinstance(sender, dict):
+                        sender = {}
+                    records.append(
+                        {
+                            "sender_id": str(sender.get("user_id", "") or ""),
+                            "sender_name": str(
+                                sender.get("card")
+                                or sender.get("nickname")
+                                or sender.get("user_id")
+                                or "未知用户"
+                            ),
+                            "content": message.get("message")
+                            or message.get("raw_message")
+                            or "",
+                            "_time": message.get("time", 0),
+                        }
+                    )
+                records.sort(key=lambda item: float(item.pop("_time", 0) or 0))
+                if records:
+                    return records, len(records)
+            except Exception as e:
+                logger.warning(
+                    f"[主动消息] 读取实时群流水失败喵：群号为“{group_id}”，异常信息：{e}",
+                    exc_info=True,
+                )
+
+        return [], 0
+
     async def _load_platform_message_history_records(
         self,
         session_id: str,
@@ -342,6 +436,14 @@ class LlmMixin:
         parsed = self._parse_umo_for_platform_history(session_id)
         if not parsed:
             return [], 0
+
+        parsed_session = self._parse_session_id(session_id)
+        if parsed_session and "Group" in parsed_session[1]:
+            live_records, live_count = await self._load_live_group_history_records(
+                session_id, limit
+            )
+            if live_records:
+                return live_records, live_count
 
         platform_id, raw_user_key = parsed
         user_candidates = self._build_platform_history_user_candidates(raw_user_key)
@@ -421,6 +523,8 @@ class LlmMixin:
             part_type = str(part.get("type") or "").lower()
             if part_type in {"plain", "text"}:
                 text = part.get("text")
+                if not isinstance(text, str) and isinstance(part.get("data"), dict):
+                    text = part["data"].get("text")
                 if isinstance(text, str):
                     texts.append(text)
             elif part_type == "file":
@@ -856,6 +960,11 @@ class LlmMixin:
     ) -> tuple[str | None, str]:
         """统一 LLM 调用入口，返回(生成文本, 用户提示词)。"""
         motivation_template = session_config.get("proactive_prompt", "")
+        candidate_context = getattr(self, "_xiaoning_candidate_context", lambda _id: "")(
+            session_id
+        )
+        if candidate_context:
+            motivation_template += candidate_context
         now_str = datetime.now(self.timezone).strftime("%Y年%m月%d日 %H:%M")
         final_user_simulation_prompt = motivation_template.replace(
             "{{unanswered_count}}", str(unanswered_count)

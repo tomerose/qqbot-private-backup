@@ -2,7 +2,9 @@ import asyncio
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 
@@ -16,7 +18,7 @@ from pdf_analysis import main as pdf_module  # noqa: E402
 from smart_translate.main import parse_translate_request  # noqa: E402
 from welcome_card.main import WelcomeCard, _private_sender_id  # noqa: E402
 from time_capsule.main import TimeCapsule, parse_capsule_request  # noqa: E402
-from xiaoning_scheduled.main import XiaoningScheduled  # noqa: E402
+from xiaoning_scheduled.main import DEFAULT_CONFIG, XiaoningScheduled  # noqa: E402
 
 
 async def collect(generator):
@@ -174,6 +176,100 @@ class NewFeaturePluginTests(unittest.TestCase):
         plugin = XiaoningScheduled.__new__(XiaoningScheduled)
         self.assertEqual(asyncio.run(plugin._resolve_groups([])), [])
         self.assertEqual(asyncio.run(plugin._resolve_groups("")), [])
+
+    def test_group_summary_feature_is_removed_from_active_scheduler(self):
+        self.assertFalse(any(key.startswith("group_summary") for key in DEFAULT_CONFIG))
+        self.assertFalse(hasattr(XiaoningScheduled, "_push_group_summary"))
+
+    def test_beautiful_moment_targets_only_the_designated_group(self):
+        self.assertTrue(DEFAULT_CONFIG["beautiful_moment_enabled"])
+        self.assertEqual(DEFAULT_CONFIG["beautiful_moment_time"], "23:00")
+        self.assertEqual(DEFAULT_CONFIG["beautiful_moment_groups"], ["945598390"])
+
+        async def scenario():
+            plugin = XiaoningScheduled.__new__(XiaoningScheduled)
+            plugin.config = DEFAULT_CONFIG.copy()
+            plugin._resolve_groups = AsyncMock(return_value=["945598390"])
+            plugin._get_bot = AsyncMock()
+            plugin._load_today_group_messages = AsyncMock(
+                return_value=["今天一起解决了一个小问题", "大家互相说了晚安"]
+            )
+            plugin._generate_beautiful_moment = lambda _messages: (
+                "🌙 今日美好时刻：一起解决问题，也认真道了晚安。"
+            )
+            bot = plugin._get_bot.return_value
+            bot.call_action = AsyncMock(return_value={"status": "ok", "retcode": 0})
+
+            delivered = await plugin._push_beautiful_moment()
+
+            self.assertTrue(delivered)
+            bot.call_action.assert_awaited_once()
+            self.assertEqual(bot.call_action.await_args.args[0], "send_group_msg")
+            self.assertEqual(bot.call_action.await_args.kwargs["group_id"], 945598390)
+            self.assertIn(
+                "今日美好时刻", bot.call_action.await_args.kwargs["message"]
+            )
+
+        asyncio.run(scenario())
+
+    def test_group_send_treats_message_id_receipt_as_success_without_retry(self):
+        async def scenario():
+            plugin = XiaoningScheduled.__new__(XiaoningScheduled)
+            bot = SimpleNamespace(
+                call_action=AsyncMock(return_value={"message_id": 123456789})
+            )
+
+            with patch("xiaoning_scheduled.main.asyncio.sleep", new=AsyncMock()) as sleep:
+                delivered = await plugin._send_group_message_with_retry(
+                    bot, "945598390", "test", attempts=2
+                )
+
+            self.assertTrue(delivered)
+            bot.call_action.assert_awaited_once()
+            sleep.assert_not_awaited()
+
+        asyncio.run(scenario())
+
+    def test_beautiful_moment_manual_trigger_is_consumed_when_already_sent_today(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                plugin = XiaoningScheduled.__new__(XiaoningScheduled)
+                plugin._opt_in_file = root / "ai_news_opt_in.json"
+                plugin._runtime_file = root / "runtime.json"
+                plugin._runtime = {
+                    "beautiful_moment": datetime.now().strftime("%Y-%m-%d")
+                }
+                plugin._push_beautiful_moment = AsyncMock(return_value=True)
+                plugin._save_json = lambda *_args: None
+                trigger = root / "trigger_beautiful_moment"
+                trigger.touch()
+
+                await plugin._check_and_fire()
+
+                self.assertFalse(trigger.exists())
+                plugin._push_beautiful_moment.assert_not_awaited()
+
+        asyncio.run(scenario())
+
+    def test_failed_beautiful_moment_trigger_is_kept_for_retry(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                plugin = XiaoningScheduled.__new__(XiaoningScheduled)
+                plugin._opt_in_file = root / "ai_news_opt_in.json"
+                plugin._runtime_file = root / "runtime.json"
+                plugin._runtime = {}
+                plugin._push_beautiful_moment = AsyncMock(return_value=False)
+                trigger = root / "trigger_beautiful_moment"
+                trigger.touch()
+
+                await plugin._check_and_fire()
+
+                self.assertTrue(trigger.exists())
+                self.assertNotIn("beautiful_moment", plugin._runtime)
+
+        asyncio.run(scenario())
 
     def test_ai_news_falls_back_to_real_rss_and_retries_failed_trigger(self):
         plugin = XiaoningScheduled.__new__(XiaoningScheduled)

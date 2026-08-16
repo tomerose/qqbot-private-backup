@@ -116,12 +116,23 @@ class GeminiProxyToolTests(unittest.TestCase):
 
     def test_chat_model_aliases_resolve_to_latest_stable(self):
         self.assertEqual(
-            self.proxy._resolve_model("gemini-2.5-flash"), "gemini-3.6-flash"
+            self.proxy._resolve_model("gemini-2.5-flash"), "gemini-3.7-flash"
         )
         self.assertEqual(
             self.proxy._resolve_model("gemini-2.5-flash", "quality"),
-            "gemini-3.6-flash",
+            "gemini-3.7-flash",
         )
+        self.assertEqual(
+            self.proxy._resolve_model("gemini-3.6-flash"), "gemini-3.7-flash"
+        )
+
+    def test_model_listing_exposes_only_latest_stable_chat_ids(self):
+        result = asyncio.run(self.proxy.list_models())
+        ids = {item["id"] for item in result["data"]}
+        self.assertIn("gemini-3.7-flash", ids)
+        self.assertIn("gemini-3.7-flash-search", ids)
+        self.assertNotIn("gemini-3.6-flash", ids)
+        self.assertNotIn("gemini-3.6-flash-search", ids)
 
     def test_thinking_models_keep_visible_output_headroom(self):
         async def scenario():
@@ -235,13 +246,24 @@ class GeminiProxyToolTests(unittest.TestCase):
 
     def test_deep_health_checks_real_vertex_prediction_permission(self):
         async def scenario():
-            generate = lambda **_kwargs: SimpleNamespace(text="OK")
+            captured = {}
+
+            def generate(**kwargs):
+                captured.update(kwargs)
+                return SimpleNamespace(text="OK")
+
             client = SimpleNamespace(models=SimpleNamespace(generate_content=generate))
             with patch.object(self.proxy.genai, "Client", return_value=client):
                 result = await self.proxy.healthz(deep=True)
             self.assertTrue(result["ok"])
             self.assertEqual(result["upstream"], "ok")
+            self.assertEqual(result["primary_model"], "gemini-3.7-flash")
             self.assertEqual(result["image_model"], "gemini-3-pro-image")
+            self.assertEqual(captured["model"], "gemini-3.7-flash")
+            self.assertEqual(
+                captured["config"].thinking_config.thinking_level.value,
+                "LOW",
+            )
 
         asyncio.run(scenario())
 
@@ -550,7 +572,7 @@ class GeminiProxyToolTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_gemini_36_does_not_forward_deprecated_sampling_parameters(self):
+    def test_gemini_37_does_not_forward_compatibility_sampling_parameters(self):
         async def scenario():
             captured = {}
 
@@ -563,7 +585,7 @@ class GeminiProxyToolTests(unittest.TestCase):
                 await self.proxy.chat(
                     request_with_json(
                         {
-                            "model": "gemini-3.6-flash",
+                            "model": "gemini-3.7-flash",
                             "temperature": 0.7,
                             "top_p": 0.9,
                             "messages": [{"role": "user", "content": "test"}],

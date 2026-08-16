@@ -42,7 +42,7 @@ class WebStudioGeneratorTests(unittest.TestCase):
         )
         self.assertEqual(generate_draft("制作一个可以增删的旅行清单"), HTML)
         payload = post.call_args.kwargs["json"]
-        self.assertEqual(payload["model"], "gemini-3.6-flash")
+        self.assertEqual(payload["model"], "gemini-3.7-flash")
         self.assertIn("禁止任何联网行为", payload["messages"][0]["content"])
         self.assertNotIn("thinking", payload)
 
@@ -79,7 +79,7 @@ class WebStudioGeneratorTests(unittest.TestCase):
         with self.assertRaises(GenerationError):
             generate_draft("制作一个可以增删的旅行清单")
         models = [call.kwargs["json"]["model"] for call in post.call_args_list]
-        self.assertEqual(models, ["gemini-3.6-flash"])
+        self.assertEqual(models, ["gemini-3.7-flash"])
 
 
 if __name__ == "__main__":

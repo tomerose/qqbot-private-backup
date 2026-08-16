@@ -14,6 +14,14 @@ try:
     from xiaoning_runtime import defer_stop_event
 except ImportError:
     from data.plugins.xiaoning_runtime import defer_stop_event
+try:
+    from xiaoning_core.ownership import route_allows
+except ImportError:
+    try:
+        from data.plugins.xiaoning_core.ownership import route_allows
+    except ImportError:
+        def route_allows(_event, _owner):
+            return True
 
 try:
     from draw_command.pro_access import get_tier, is_active_pro_group, Tier
@@ -84,7 +92,7 @@ def parse_debate_topic(text: str) -> str | None:
 def _call_gemini(messages: list[dict], max_tokens: int = 800) -> str:
     resp = requests.post(
         PROXY,
-        json={"model": "gemini-3.6-flash", "messages": messages, "max_tokens": max_tokens},
+        json={"model": "gemini-3.7-flash", "messages": messages, "max_tokens": max_tokens},
         timeout=60,
     )
     resp.raise_for_status()
@@ -105,6 +113,8 @@ class AiDebate(Star):
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=960)
     @defer_stop_event
     async def on_message(self, event: AstrMessageEvent):
+        if not route_allows(event, "ai_debate"):
+            return
         text = self._msg(event)
         topic = parse_debate_topic(text)
         if topic is None:

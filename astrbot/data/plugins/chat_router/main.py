@@ -1,7 +1,6 @@
 """Route every ordinary chat through the local Gemini provider."""
 
 import asyncio
-import random
 import re
 
 from astrbot.api import logger
@@ -9,23 +8,14 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderType
 from astrbot.api.star import Context, Star
 
-# ── 群消息自动回复概率 ──────────────────────────────────────────
-# 仅对未 @mention、未被其他插件拦截的群聊消息生效。设为 0 关闭。
-GROUP_AUTO_REPLY_PROBABILITY = 0.30
-
-# 高活跃群：主动回复概率更高，能帮上忙时积极展示能力
-# 1058848055 是生米群——粉丝群气氛靠接话
-_HIGH_ENGAGEMENT_GROUPS = {
-    "945598390": 0.40,
-    "1058848055": 0.30,
-}
-# 高频聊天用户：这些用户的群消息更大概率触发回复
-_FREQUENT_CHATTERS = frozenset({
-    "3431017350", "1410546630", "3174222673",
-    "2641419881", "3220305563", "1634854415",
-})
-# 指定用户回复概率（覆盖群和频率设置，1.0=100%必回）
-_HIGH_ENGAGEMENT_USERS = {"943560334": 1.0}
+try:
+    from xiaoning_capabilities import match_capability
+except ImportError:
+    try:
+        from data.plugins.xiaoning_capabilities import match_capability
+    except ImportError:  # Minimal direct-module test harness.
+        def match_capability(_text):
+            return None
 
 # Give ordinary chat a brief chance to finish a thought.  This is deliberately
 # short: commands, @mentions, media and urgent language must still be handled
@@ -160,7 +150,7 @@ class ChatRouter(Star):
         if not umo:
             return
 
-        target = "gemini-3.6-flash"
+        target = "gemini-3.7-flash"
         if self._routes.get(umo) == target:
             return
 
@@ -178,7 +168,7 @@ class ChatRouter(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=-200)
     async def gate_group_reply(self, event: AstrMessageEvent):
-        """Randomly skip non-@ group messages. Higher probability for engaged groups/chatters."""
+        """Apply deterministic group boundaries; never use per-user probabilities."""
         if event.is_private_chat():
             return
         if getattr(event, "is_at_or_wake_command", False):
@@ -186,21 +176,20 @@ class ChatRouter(Star):
         if getattr(event, "_stop_event", False):
             return
 
-        # ── per-group + per-user probability ──
         group_id = str(getattr(event, "get_group_id", lambda: "")() or "").strip()
-        sender_id = str(getattr(event, "get_sender_id", lambda: "")() or "").strip()
-        # Questions in search groups always get a reply
         text = str(getattr(event, "get_message_str", lambda: "")() or "")
+        # XiaoningCore marks an addressed continuation, explicit capability,
+        # configured community event, or safety turn with this bounded flag.
+        get_extra = getattr(event, "get_extra", None)
+        if callable(get_extra) and bool(get_extra("xiaoning_force_group_reply", False)):
+            return
+        if _URGENT_LANGUAGE_RE.search(text):
+            return
+        # Explicit capability requests remain usable if the core plugin is
+        # temporarily rolled back or unavailable.
+        if match_capability(text) is not None:
+            return
+        # Configured search group questions are an explicit community rule.
         if group_id in _SEARCH_GROUPS and _is_question(text):
             return
-        prob = float(GROUP_AUTO_REPLY_PROBABILITY)
-        if sender_id in _HIGH_ENGAGEMENT_USERS:
-            prob = _HIGH_ENGAGEMENT_USERS[sender_id]
-        elif group_id in _HIGH_ENGAGEMENT_GROUPS:
-            prob = _HIGH_ENGAGEMENT_GROUPS[group_id]
-        elif sender_id in _FREQUENT_CHATTERS:
-            prob = 0.35
-        if prob >= 1.0:
-            return
-        if random.random() >= prob:
-            event.stop_event()
+        event.stop_event()

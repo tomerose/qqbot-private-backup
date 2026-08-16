@@ -25,6 +25,14 @@ import requests
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
+try:
+    from xiaoning_core.ownership import route_allows
+except ImportError:
+    try:
+        from data.plugins.xiaoning_core.ownership import route_allows
+    except ImportError:
+        def route_allows(_event, _owner):
+            return True
 
 try:
     from ..draw_command.pro_access import Tier, get_tier
@@ -203,7 +211,7 @@ def _generate_script(topic: str, max_duration: int, max_scenes: int) -> dict | N
             resp = requests.post(
                 PROXY_CHAT,
                 json={
-                "model": "gemini-3.6-flash",
+                "model": "gemini-3.7-flash",
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": f"主题：{topic}"},
@@ -594,7 +602,7 @@ def _generate_script_retry(topic: str, max_duration: int, max_scenes: int) -> di
             GEMINI_RETRY_URL,
             headers={"Authorization": f"Bearer {GEMINI_RETRY_KEY}"},
             json={
-                "model": "gemini-3.6-flash",
+                "model": "gemini-3.7-flash",
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": f"主题：{topic}"},
@@ -630,7 +638,7 @@ def _review_script(script: dict) -> dict | None:
             GEMINI_RETRY_URL,
             headers={"Authorization": f"Bearer {GEMINI_RETRY_KEY}"},
             json={
-                "model": "gemini-3.6-flash",
+                "model": "gemini-3.7-flash",
                 "messages": [
                     {"role": "system", "content": (
                         "你是视频脚本审核专家。从吸引力、节奏、画面多样性、叙事连贯性四个维度"
@@ -951,6 +959,8 @@ class VideoAgent(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=934)
     async def on_message(self, event: AstrMessageEvent):
+        if not route_allows(event, "video_agent"):
+            return
         text = self._msg(event)
         topic = _parse_agent_command(text)
         if topic is None:

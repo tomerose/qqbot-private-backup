@@ -53,11 +53,18 @@ class ConversationGuardTests(unittest.TestCase):
         self.assertNotIn("凌晨3点被cue", prompt)
         self.assertNotIn("想你了", prompt)
 
-    def test_runtime_config_scopes_unsolicited_chat_to_one_group(self):
+    def test_runtime_config_uses_event_driven_private_followups_and_silent_groups(self):
         config_path = Path(__file__).resolve().parents[1] / "astrbot" / "data" / "cmd_config.json"
         config = json.loads(config_path.read_text(encoding="utf-8-sig"))
         proactive_path = config_path.parent / "config" / "astrbot_plugin_proactive_chat_config.json"
         proactive = json.loads(proactive_path.read_text(encoding="utf-8-sig"))
+        qqadmin_path = config_path.parent / "config" / "astrbot_plugin_qqadmin_config.json"
+        qqadmin = json.loads(qqadmin_path.read_text(encoding="utf-8-sig"))
+        core_config = json.loads(
+            (config_path.parent / "config" / "xiaoning_core_config.json").read_text(
+                encoding="utf-8-sig"
+            )
+        )
         prompt = config["provider_settings"]["prompt_prefix"]
         persona = config["persona"][0]["prompt"]
 
@@ -69,18 +76,57 @@ class ConversationGuardTests(unittest.TestCase):
         self.assertNotIn("22岁", persona)
         self.assertNotIn("学金融", persona)
         self.assertIn("astrbot_plugin_proactive_chat", config["plugin_set"])
+        self.assertEqual(core_config["proactive_rollout_percent"], 10)
+        self.assertFalse(core_config["proactive_kill_switch"])
+        self.assertFalse(core_config["enforce_ownership"])
+        self.assertEqual(
+            core_config["allowed_group_ids"],
+            ["945598390", "815620109", "679937076"],
+        )
         self.assertTrue(proactive["friend_settings"]["enable"])
+        self.assertIn(
+            "不复述用户立场来表示赞同",
+            proactive["friend_settings"]["proactive_prompt"],
+        )
         self.assertFalse(proactive["friend_settings"]["all_x_pro_sessions"])
         self.assertTrue(proactive["friend_settings"]["all_friend_sessions"])
         self.assertEqual(proactive["friend_settings"]["session_list"], ["default:FriendMessage:1211000567"])
         self.assertTrue(proactive["friend_settings"]["auto_trigger_settings"]["enable_auto_trigger"])
-        self.assertEqual(proactive["friend_settings"]["auto_trigger_settings"]["auto_trigger_after_minutes"], 3)
+        self.assertEqual(proactive["friend_settings"]["auto_trigger_settings"]["auto_trigger_after_minutes"], 360)
         self.assertEqual(proactive["friend_settings"]["schedule_settings"]["min_interval_minutes"], 180)
-        self.assertEqual(proactive["friend_settings"]["schedule_settings"]["max_unanswered_times"], 2)
+        self.assertEqual(proactive["friend_settings"]["schedule_settings"]["max_unanswered_times"], 1)
         self.assertEqual(proactive["friend_settings"]["context_settings"]["conversation_history_limit"], 40)
-        self.assertEqual(proactive["group_settings"]["session_list"], ["945598390"])
-        self.assertEqual(proactive["group_settings"]["group_idle_trigger_minutes"], 5)
-        self.assertEqual(proactive["group_settings"]["group_min_messages_before_proactive"], 2)
+        self.assertTrue(proactive["group_settings"]["enable"])
+        self.assertIn(
+            "不复述群友观点来附和",
+            proactive["group_settings"]["proactive_prompt"],
+        )
+        self.assertEqual(
+            proactive["group_settings"]["session_list"],
+            ["945598390", "815620109", "679937076"],
+        )
+        for rule_name in ("ai_moderation", "identity_guard", "insult_warning"):
+            self.assertEqual(
+                qqadmin[rule_name]["group_ids"],
+                ["945598390", "815620109", "679937076"],
+            )
+        self.assertFalse(
+            proactive["group_settings"]["auto_trigger_settings"]["enable_auto_trigger"]
+        )
+        self.assertEqual(proactive["group_settings"]["group_idle_trigger_minutes"], 0)
+        self.assertFalse(
+            proactive["group_settings"]["context_settings"]["include_bot_messages"]
+        )
+        self.assertEqual(
+            proactive["group_settings"]["context_settings"]["source_mode"],
+            "platform_message_history",
+        )
+        self.assertEqual(proactive["group_settings"]["group_min_messages_before_proactive"], 3)
+        self.assertEqual(proactive["group_settings"]["group_min_messages_before_proactive"], 3)
+        self.assertNotIn(
+            "NO_SEND",
+            proactive["group_settings"]["context_settings"]["platform_history_prompt"],
+        )
         self.assertEqual(proactive["group_settings"]["schedule_settings"]["max_unanswered_times"], 1)
 
     def test_old_prompt_prefix_is_removed_without_losing_real_context(self):
@@ -146,11 +192,14 @@ class ConversationGuardTests(unittest.TestCase):
             clean_request_history(request)
             self.assertEqual(request.prompt, "你在哪")
 
-    def test_persona_requires_context_consistency_without_fake_biography(self):
+    def test_persona_requires_context_consistency_with_fixed_canon(self):
         prompt = build_persona_prompt(100)
         self.assertIn("先读最近几轮", prompt)
         self.assertIn("前面那句不对", prompt)
-        self.assertIn("不虚构年龄、学校", prompt)
+        self.assertIn("2002年10月18日", prompt)
+        self.assertIn("现居杭州", prompt)
+        self.assertIn("独立数字内容策划与创作", prompt)
+        self.assertIn("canon 之外的学校、住址、雇主", prompt)
         self.assertIn("不写“（托腮）”", prompt)
         self.assertIn("不解释成“我没有真实经历”", prompt)
 

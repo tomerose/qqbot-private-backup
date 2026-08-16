@@ -48,5 +48,20 @@
     "description": "目标群号，逗号分隔；填 * 才表示全部群",
     "type": "string",
     "default": ""
+  },
+  "beautiful_moment_enabled": {
+    "description": "每天向指定群发送一条今日美好时刻（不是群总结）",
+    "type": "bool",
+    "default": true
+  },
+  "beautiful_moment_time": {
+    "description": "今日美好时刻发送时间（HH:MM）",
+    "type": "string",
+    "default": "23:00"
+  },
+  "beautiful_moment_groups": {
+    "description": "目标群号，逗号分隔；仅发送到明确配置的群",
+    "type": "string",
+    "default": "945598390"
   }
 }

@@ -1,0 +1,4 @@
+name: xiaoning_core
+desc: Typed turn kernel, shadow routing, consent, and privacy-safe trace for Xiaoning.
+version: 0.1.0
+author: xiaoning

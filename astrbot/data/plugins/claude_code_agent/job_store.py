@@ -11,12 +11,13 @@ from pathlib import Path
 
 TERMINAL_STATES = {"completed", "failed", "cancelled", "timeout", "recovery_blocked"}
 ACTIVE_STATES = {
-    "planned", "queued", "awaiting_approval", "executing", "running",
+    "accepted", "planned", "queued", "awaiting_approval", "executing", "running",
     "recovering", "verifying", "delivering", "delivery_pending",
 }
 ALLOWED_STATES = TERMINAL_STATES | ACTIVE_STATES | {"interrupted"}
 _DELIVERY_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _TRANSITIONS = {
+    "accepted": {"planned", "cancelled", "failed", "recovery_blocked"},
     "planned": {"awaiting_approval", "queued", "executing", "cancelled", "recovery_blocked"},
     "queued": {"awaiting_approval", "executing", "running", "recovering", "cancelled", "recovery_blocked"},
     "awaiting_approval": {"queued", "executing", "running", "cancelled", "recovery_blocked"},

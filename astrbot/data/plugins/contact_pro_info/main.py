@@ -15,9 +15,9 @@ try:
 except ImportError:
     from data.plugins.xiaoning_runtime import defer_stop_event
 try:
-    from xiaoning_capabilities import capability_prompt_block
+    from xiaoning_capabilities import capability_prompt_block, match_capability
 except ImportError:
-    from data.plugins.xiaoning_capabilities import capability_prompt_block
+    from data.plugins.xiaoning_capabilities import capability_prompt_block, match_capability
 try:
     from xiaoning_runtime import is_weixin_private
 except ImportError:
@@ -36,6 +36,24 @@ def _load_text(filename):
 USER_GUIDE = _load_text('user_guide.txt')
 CAPABILITY_MEMORY = _load_text('capability_memory.txt')
 CAPABILITY_CATALOG_MEMORY = capability_prompt_block()
+
+
+def capability_contract_block(text: str) -> str:
+    """Return only the matched execution contract, never the whole menu."""
+    capability = match_capability(text)
+    if capability is None or capability.id == "chat":
+        return ""
+    delivery = (
+        f"；交付产物={','.join(capability.artifacts)}，收件端确认后才算完成"
+        if capability.artifacts
+        else ""
+    )
+    return (
+        "【本轮能力契约】\n"
+        f"能力={capability.id}；唯一处理器={capability.owner}；"
+        f"资格={'/'.join(capability.tiers)}{delivery}。\n"
+        "只处理当前明确请求；失败必须给出终态，不要扩展成能力菜单。"
+    )
 
 CONTACT_REPLY = (
     "联系邮箱：portelamicheli636@gmail.com。"
@@ -292,7 +310,13 @@ class ContactProInfo(Star):
                     f"{system_prompt}\n\n{WEIXIN_PRIVATE_CAPABILITY_MEMORY}"
                 ).strip()
             return
-        if "【公开能力事实】" not in system_prompt:
+        text = str(getattr(event, "get_message_str", lambda: "")() or "")
+        contract = capability_contract_block(text)
+        get_extra = getattr(event, "get_extra", None)
+        route_kind = str(get_extra("xiaoning_route_kind", "") if callable(get_extra) else "")
+        if route_kind and route_kind not in {"capability", "task"}:
+            return
+        if contract and "【本轮能力契约】" not in system_prompt:
             req.system_prompt = (
-                f"{system_prompt}\n\n{CAPABILITY_MEMORY}\n\n{CAPABILITY_CATALOG_MEMORY}"
+                f"{system_prompt}\n\n{contract}"
             ).strip()

@@ -16,6 +16,7 @@ XIAONING_PROMPT = (
     "【小柠】是用户的小助手，说话自然，有自己立场，不刻意讨好。"
     "没有实际需求时不介绍功能；被追问时先确认用户真实目的，主动给一个具体判断或行动建议。"
     "回答诚实，QQ 实际收到文件才算完成；不公开管理入口。"
+    "不要用“你说得对”“确实”“完全同意”做开场；同意也直接说依据和边界。"
     "连续短句合并理解，前后说法冲突时纠正具体错误；"
     "不编造用户说过的话，不泄露 QQ 号、路径、密钥、令牌和内部信息。"
 )
@@ -54,7 +55,7 @@ PROACTIVE_CONFIG = {
         "context_settings": {"conversation_history_limit": 40},
     },
     "group_settings": {
-        "session_list": ["945598390"],
+        "session_list": ["945598390", "815620109", "679937076"],
         "group_idle_trigger_minutes": 5,
         "group_min_messages_before_proactive": 2,
         "schedule_settings": {"max_unanswered_times": 1},

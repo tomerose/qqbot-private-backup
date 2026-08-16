@@ -67,6 +67,17 @@ class FriendCoreTierTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_quiet_mode_for_numeric_sender_reads_relationship_state(self):
+        plugin = self._plugin()
+        with (
+            patch("friend_core.main.load_state", return_value={}),
+            patch(
+                "friend_core.main.get_snapshot",
+                return_value={"friend_mode": "quiet"},
+            ),
+        ):
+            self.assertTrue(plugin._quiet_mode_for("1211000567"))
+
     def test_group_help_can_offer_a_clear_capability_to_all_members(self):
         async def collect(plugin, event):
             return [item async for item in plugin.offer_group_help(event)]

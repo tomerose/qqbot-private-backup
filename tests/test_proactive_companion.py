@@ -3,6 +3,7 @@ import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -13,11 +14,13 @@ from astrbot_plugin_proactive_chat.core.llm_adapter import (  # noqa: E402
     LlmMixin,
     PROACTIVE_HISTORY_MARKER,
 )
+from astrbot_plugin_proactive_chat.core.chat_flow import ProactiveCoreMixin  # noqa: E402
 from astrbot_plugin_proactive_chat.core.message_events import EventsMixin  # noqa: E402
 from astrbot_plugin_proactive_chat.core.session_config import (  # noqa: E402
     ConfigMixin,
     Tier,
 )
+from astrbot_plugin_proactive_chat.core.session_parser import SessionMixin  # noqa: E402
 from astrbot_plugin_proactive_chat.core.task_scheduler import (  # noqa: E402
     SchedulerMixin,
 )
@@ -27,6 +30,7 @@ from friend_core.relationship_state import (  # noqa: E402
     record_proactive_send,
     set_friend_mode,
 )
+from xiaoning_core.models import ProactiveCandidate  # noqa: E402
 
 
 class ConfigProbe(ConfigMixin):
@@ -44,6 +48,20 @@ class ConfigProbe(ConfigMixin):
         return session_id
 
 
+class CompositeGroupSessionProbe(ConfigMixin, SessionMixin):
+    def __init__(self):
+        self.config = {
+            "friend_settings": {"enable": False, "session_list": []},
+            "group_settings": {"enable": True, "session_list": ["945598390"]},
+        }
+        self.session_override_manager = None
+        self.session_data = {}
+
+    @staticmethod
+    def _resolve_full_umo(target_id, msg_type, preferred_platform=None):
+        return f"{preferred_platform or 'default'}:{msg_type}:{target_id}"
+
+
 class LlmProbe(LlmMixin):
     @staticmethod
     def _parse_session_id(session_id):
@@ -52,7 +70,7 @@ class LlmProbe(LlmMixin):
 
 
 class SchedulerProbe(SchedulerMixin):
-    def __init__(self, message_count):
+    def __init__(self, message_count, *, idle_minutes=10):
         self.data_lock = asyncio.Lock()
         self.session_data = {
             "bot:GroupMessage:945598390": {
@@ -64,9 +82,14 @@ class SchedulerProbe(SchedulerMixin):
         self.scheduler = JobSchedulerProbe()
         self.checked_sessions = []
         self.tasks = []
+        self.idle_minutes = idle_minutes
 
     def _get_session_config(self, _session_id):
-        return {"enable": True, "group_min_messages_before_proactive": 3}
+        return {
+            "enable": True,
+            "group_min_messages_before_proactive": 3,
+            "group_idle_trigger_minutes": self.idle_minutes,
+        }
 
     @staticmethod
     def _normalize_session_id(session_id):
@@ -142,13 +165,72 @@ class GroupEventProbe(EventsMixin):
 
     @staticmethod
     def _get_session_config(_session_id):
-        return {"enable": True, "group_min_messages_before_proactive": 2}
+        return {
+            "enable": True,
+            "group_min_messages_before_proactive": 2,
+            "context_settings": {"bot_identifiers": ["bot", "helperbot"]},
+        }
 
     async def _reset_group_silence_timer(self, session_id):
         self.reset_calls.append(session_id)
 
     async def _schedule_group_reply_after_threshold(self, session_id):
         self.reply_calls.append(session_id)
+
+
+class GroupChatFlowProbe(ProactiveCoreMixin):
+    def __init__(self):
+        self.data_lock = asyncio.Lock()
+        self.session_data = {
+            "bot:GroupMessage:945598390": {
+                "unanswered_count": 0,
+                "group_user_messages_since_proactive": 3,
+            }
+        }
+        self.last_message_times = {}
+        self.telemetry = None
+        self.manual_trigger_sessions = set()
+        self.web_admin_server = None
+        self.prepared = False
+        self.private_gate_calls = 0
+        self.rescheduled = 0
+
+    @staticmethod
+    def _normalize_session_id(session_id):
+        return session_id
+
+    @staticmethod
+    def _parse_session_id(session_id):
+        return tuple(session_id.split(":", 2))
+
+    @staticmethod
+    async def _is_chat_allowed(_session_id):
+        return True, "allowed"
+
+    @staticmethod
+    def _get_session_config(_session_id):
+        return {
+            "enable": True,
+            "schedule_settings": {
+                "min_interval_minutes": 1,
+                "max_unanswered_times": 1,
+            },
+        }
+
+    def _private_proactive_allowed(self, _session_id, _cooldown_seconds):
+        self.private_gate_calls += 1
+        return False
+
+    async def _prepare_llm_request(self, _session_id):
+        self.prepared = True
+        return None
+
+    async def _schedule_next_chat_and_save(self, _session_id):
+        self.rescheduled += 1
+
+    @staticmethod
+    def _get_session_log_str(session_id, _config=None):
+        return session_id
 
 
 class EventSchedulerProbe:
@@ -164,9 +246,18 @@ class EventSchedulerProbe:
 class GroupEvent:
     unified_msg_origin = "bot:GroupMessage:945598390"
 
-    class message_obj:
-        class sender:
-            id = "member"
+    def __init__(self, sender_id="member", sender_name="member"):
+        self.message_obj = type(
+            "MessageObject",
+            (),
+            {
+                "sender": type(
+                    "Sender",
+                    (),
+                    {"id": sender_id, "user_id": sender_id, "nickname": sender_name},
+                )()
+            },
+        )()
 
     @staticmethod
     def get_messages():
@@ -218,6 +309,30 @@ class AutoTriggerProbe(SchedulerMixin):
 
 
 class ProactiveCompanionTests(unittest.TestCase):
+    def test_group_threshold_reply_skips_private_manual_authorization_gate(self):
+        async def scenario():
+            probe = GroupChatFlowProbe()
+            await probe.check_and_chat("bot:GroupMessage:945598390")
+            self.assertTrue(probe.prepared)
+            self.assertEqual(probe.private_gate_calls, 0)
+
+        asyncio.run(scenario())
+
+    def test_sender_scoped_group_umo_resolves_to_configured_group_session(self):
+        probe = CompositeGroupSessionProbe()
+        first_member = "llbot-3806573022:GroupMessage:2998891949_945598390"
+        second_member = "llbot-3806573022:GroupMessage:3376903140_945598390"
+
+        self.assertEqual(
+            probe._normalize_session_id(first_member),
+            "llbot-3806573022:GroupMessage:945598390",
+        )
+        self.assertEqual(
+            probe._normalize_session_id(second_member),
+            probe._normalize_session_id(first_member),
+        )
+        self.assertIsNotNone(probe._get_session_config(first_member))
+
     def test_all_x_pro_sessions_excludes_ordinary_users_and_keeps_group_whitelist(self):
         probe = ConfigProbe(
             {
@@ -265,6 +380,56 @@ class ProactiveCompanionTests(unittest.TestCase):
         set_friend_mode(state, "1211000567", QUIET_MODE)
         self.assertFalse(can_send_proactive(state, "1211000567", 0, now=22000))
 
+    def test_private_automatic_run_requires_and_injects_claimed_candidate(self):
+        candidate = ProactiveCandidate(
+            candidate_id="candidate-1",
+            open_loop_id="loop-1",
+            why_now="围绕用户原话自然接续：我明天面试",
+            source_type="open_loop",
+            relevance=0.94,
+            timing=0.9,
+            novelty=0.9,
+            evidence_confidence=0.96,
+            not_before=1,
+            expires_at=9_999_999_999,
+        )
+
+        class Gateway:
+            @staticmethod
+            def get_consent(_sender):
+                return SimpleNamespace(proactive=True)
+
+            @staticmethod
+            def get_relationship_profile(_sender):
+                return SimpleNamespace(
+                    activated=True, first_proactive_notice_sent=False
+                )
+
+            @staticmethod
+            def claim_due_candidate(_sender):
+                return candidate
+
+        probe = ConfigProbe({})
+        probe.manual_trigger_sessions = set()
+        probe._xiaoning_memory_gateway = Gateway()
+        with patch("astrbot_plugin_proactive_chat.core.session_config.load_state", return_value={}), patch.object(
+            probe, "_xiaoning_rollout_allowed", return_value=True
+        ):
+            self.assertTrue(
+                probe._private_proactive_allowed(
+                    "bot:FriendMessage:1211000567", 0
+                )
+            )
+        context = probe._xiaoning_candidate_context(
+            "bot:FriendMessage:1211000567"
+        )
+        self.assertIn("我明天面试", context)
+        self.assertIn("综合分", context)
+        decorated = probe._decorate_private_proactive_message(
+            "bot:FriendMessage:1211000567", "面试结束了吗？"
+        )
+        self.assertIn("直接说一声就行", decorated)
+
     def test_output_filter_blocks_dependency_group_mentions_and_no_send(self):
         probe = LlmProbe()
         self.assertIsNone(
@@ -279,6 +444,10 @@ class ProactiveCompanionTests(unittest.TestCase):
         self.assertEqual(
             probe._sanitize_proactive_response("上次那个方案后来顺了吗？", "bot:FriendMessage:1", ""),
             "上次那个方案后来顺了吗？",
+        )
+        self.assertEqual(
+            probe._sanitize_proactive_response("你说得对，这个方案没有风险。", "bot:FriendMessage:1", ""),
+            "这个方案没有风险",
         )
         self.assertIsNone(
             probe._sanitize_proactive_response(
@@ -363,6 +532,84 @@ class ProactiveCompanionTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_group_hybrid_context_prefers_live_onebot_history(self):
+        class History:
+            async def get(self, **_kwargs):
+                return []
+
+        class OneBotClient:
+            def __init__(self):
+                self.calls = []
+
+            async def call_action(self, action, **kwargs):
+                self.calls.append((action, kwargs))
+                return {
+                    "messages": [
+                        {
+                            "time": 100,
+                            "sender": {"user_id": 10001, "nickname": "甲"},
+                            "message": [
+                                {"type": "text", "data": {"text": "现在在聊新方案"}}
+                            ],
+                        },
+                        {
+                            "time": 101,
+                            "sender": {"user_id": 10002, "nickname": "乙"},
+                            "message": [
+                                {"type": "text", "data": {"text": "先看接口设计"}}
+                            ],
+                        },
+                    ]
+                }
+
+        class PlatformMeta:
+            id = "llbot-3806573022"
+
+        class Platform:
+            def __init__(self, client):
+                self.client = client
+
+            @staticmethod
+            def meta():
+                return PlatformMeta()
+
+            def get_client(self):
+                return self.client
+
+        class PlatformManager:
+            def __init__(self, platform):
+                self.platform_insts = [platform]
+
+        class Context:
+            def __init__(self, client):
+                self.message_history_manager = History()
+                self.platform_manager = PlatformManager(Platform(client))
+
+        async def scenario():
+            client = OneBotClient()
+            probe = LlmProbe()
+            probe.context = Context(client)
+            probe.timezone = timezone.utc
+            history = await probe._build_effective_history_context(
+                "llbot-3806573022:GroupMessage:945598390",
+                [{"role": "assistant", "content": "白猪还在画着呢"}],
+                {
+                    "source_mode": "hybrid",
+                    "platform_history_count": 20,
+                    "platform_history_prompt": "{{platform_history_lines}}",
+                    "include_bot_messages": False,
+                    "bot_identifiers": {"bot", "3806573022"},
+                    "platform_context_max_chars": 4000,
+                },
+            )
+
+            self.assertIn("现在在聊新方案", history[0]["content"])
+            self.assertIn("先看接口设计", history[0]["content"])
+            self.assertEqual(client.calls[0][0], "get_group_msg_history")
+            self.assertEqual(client.calls[0][1]["group_id"], 945598390)
+
+        asyncio.run(scenario())
+
     def test_context_history_keeps_only_the_recent_configured_tail(self):
         async def scenario():
             probe = LlmProbe()
@@ -427,6 +674,30 @@ class ProactiveCompanionTests(unittest.TestCase):
             await probe.on_group_message(GroupEvent())
             self.assertEqual(probe.reset_calls, [GroupEvent.unified_msg_origin])
             self.assertEqual(probe.reply_calls, [])
+
+        asyncio.run(scenario())
+
+    def test_zero_idle_window_waits_for_three_messages_without_a_timer(self):
+        async def scenario():
+            session_id = "bot:GroupMessage:945598390"
+            probe = SchedulerProbe(message_count=1, idle_minutes=0)
+            previous_timer = probe.group_timers[session_id]
+
+            await probe._reset_group_silence_timer(session_id)
+
+            self.assertTrue(previous_timer.cancelled)
+            self.assertNotIn(session_id, probe.group_timers)
+            self.assertEqual(probe.tasks, [])
+
+        asyncio.run(scenario())
+
+    def test_known_bot_message_does_not_count_as_human_group_activity(self):
+        async def scenario():
+            probe = GroupEventProbe()
+            await probe.on_group_message(GroupEvent(sender_id="helperbot"))
+            self.assertEqual(probe.reset_calls, [])
+            self.assertEqual(probe.reply_calls, [])
+            self.assertEqual(probe.session_data, {})
 
         asyncio.run(scenario())
 

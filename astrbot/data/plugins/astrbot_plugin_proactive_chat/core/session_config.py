@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,12 @@ try:
     from draw_command.pro_access import Tier, get_tier
 except ImportError:
     from data.plugins.draw_command.pro_access import Tier, get_tier
+try:
+    from xiaoning_core.memory import MemoryGateway
+    from xiaoning_core.trace import TraceStore, new_trace_id
+except ImportError:
+    from data.plugins.xiaoning_core.memory import MemoryGateway
+    from data.plugins.xiaoning_core.trace import TraceStore, new_trace_id
 
 
 _PRO_DB = (
@@ -47,12 +55,86 @@ class ConfigMixin:
     config: dict
     session_override_manager: Any
 
+    @staticmethod
+    def _xiaoning_rollout_allowed(target_id: str) -> bool:
+        try:
+            path = Path(__file__).resolve().parents[3] / "config" / "xiaoning_core_config.json"
+            settings = json.loads(path.read_text(encoding="utf-8-sig"))
+            if bool(settings.get("proactive_kill_switch", False)):
+                return False
+            percent = max(0, min(100, int(settings.get("proactive_rollout_percent", 0))))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+        bucket = int.from_bytes(
+            hashlib.sha256(f"xiaoning-rollout-v1:{target_id}".encode()).digest()[:4],
+            "big",
+        ) % 100
+        return bucket < percent
+
     def _private_proactive_allowed(self, session_id: str, cooldown_seconds: float) -> bool:
         parsed = self._parse_session_id(session_id)
-        if not parsed or ("Friend" not in parsed[1] and "Private" not in parsed[1]):
-            return True
+        if not parsed:
+            return False
+        normalized = self._normalize_session_id(session_id)
+        manual = normalized in getattr(self, "manual_trigger_sessions", set())
+        if "Friend" not in parsed[1] and "Private" not in parsed[1]:
+            return manual
+        gateway = getattr(self, "_xiaoning_memory_gateway", None)
+        if gateway is None:
+            try:
+                root = Path(StarTools.get_data_dir("xiaoning_core"))
+                gateway = MemoryGateway(root / "xiaoning-memory.sqlite3")
+                self._xiaoning_memory_gateway = gateway
+            except Exception:
+                return False
+        if not gateway.get_consent(parsed[2]).proactive:
+            return False
+        profile = gateway.get_relationship_profile(parsed[2])
+        if not profile.activated:
+            return False
         state_path = Path(StarTools.get_data_dir("proactive_behavior")) / "relationship_state.json"
-        return can_send_proactive(load_state(state_path), parsed[2], cooldown_seconds)
+        if not can_send_proactive(load_state(state_path), parsed[2], cooldown_seconds):
+            return False
+        if manual:
+            return True
+        if not self._xiaoning_rollout_allowed(parsed[2]):
+            return False
+        candidate = gateway.claim_due_candidate(parsed[2])
+        if candidate is None:
+            return False
+        selected = getattr(self, "_xiaoning_selected_candidates", None)
+        if selected is None:
+            selected = {}
+            self._xiaoning_selected_candidates = selected
+        selected[normalized] = candidate
+        return True
+
+    def _xiaoning_candidate_context(self, session_id: str) -> str:
+        selected = getattr(self, "_xiaoning_selected_candidates", {})
+        candidate = selected.get(self._normalize_session_id(session_id))
+        if candidate is None:
+            return ""
+        return (
+            "\n\n【本次主动联系的唯一具体切口】\n"
+            f"原因：{candidate.why_now}\n"
+            f"证据类型：{candidate.source_type}；综合分：{candidate.score:.3f}\n"
+            "只围绕这个切口写一句自然短消息；证据不足或时机不对就输出 NO_SEND。"
+        )
+
+    def _decorate_private_proactive_message(self, session_id: str, text: str) -> str:
+        parsed = self._parse_session_id(session_id)
+        if not parsed or ("Friend" not in parsed[1] and "Private" not in parsed[1]):
+            return text
+        gateway = getattr(self, "_xiaoning_memory_gateway", None)
+        if gateway is None:
+            return text
+        selected = getattr(self, "_xiaoning_selected_candidates", {})
+        if self._normalize_session_id(session_id) not in selected:
+            return text
+        profile = gateway.get_relationship_profile(parsed[2])
+        if profile.first_proactive_notice_sent:
+            return text
+        return text.rstrip() + "\n最近不想我主动找你，直接说一声就行。"
 
     def _record_private_proactive_send(self, session_id: str) -> None:
         parsed = self._parse_session_id(session_id)
@@ -62,6 +144,28 @@ class ConfigMixin:
         state = load_state(state_path)
         record_proactive_send(state, parsed[2])
         save_state(state_path, state)
+        selected = getattr(self, "_xiaoning_selected_candidates", {})
+        candidate = selected.pop(self._normalize_session_id(session_id), None)
+        gateway = getattr(self, "_xiaoning_memory_gateway", None)
+        if candidate is not None and gateway is not None:
+            if not gateway.mark_candidate_sent(parsed[2], candidate.candidate_id):
+                logger.error(
+                    "[主动消息] 已发送但候选状态未能记为 sent；候选保持不可重发状态。"
+                )
+            else:
+                try:
+                    root = Path(StarTools.get_data_dir("xiaoning_core"))
+                    TraceStore(root / "events.jsonl").record_engagement(
+                        trace_id=new_trace_id(),
+                        scope=session_id,
+                        event_type="proactive_sent",
+                        attributes={
+                            "source_type": candidate.source_type,
+                            "score": candidate.score,
+                        },
+                    )
+                except Exception:
+                    logger.warning("[主动消息] 匿名主动效果事件写入失败。")
 
     async def _validate_config(self) -> None:
         """验证插件配置的完整性和有效性"""
@@ -167,6 +271,9 @@ class ConfigMixin:
         session_list = settings.get("session_list", [])
         normalized_session_id = self._normalize_session_id(session_id)
         candidates = {session_id, normalized_session_id, target_id}
+        normalized_parsed = self._parse_session_id(normalized_session_id)
+        if normalized_parsed:
+            candidates.add(normalized_parsed[2])
         from_session_list = any(candidate in session_list for candidate in candidates)
         all_x_pro = session_type == "friend" and bool(
             settings.get("all_x_pro_sessions", False)

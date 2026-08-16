@@ -663,7 +663,18 @@ class SchedulerMixin:
                 finally:
                     del self.group_timers[timer_key]
 
-        idle_minutes = session_config.get("group_idle_trigger_minutes", 10)
+        try:
+            idle_minutes = float(
+                session_config.get("group_idle_trigger_minutes", 10)
+            )
+        except (TypeError, ValueError):
+            idle_minutes = 10.0
+        if idle_minutes <= 0:
+            logger.debug(
+                f"[主动消息] {self._get_session_log_str(normalized_session_id, session_config)} "
+                "未启用群沉默触发，仅按成员消息条数门槛回复喵。"
+            )
+            return
 
         # 群聊沉默回调仅负责投递受控协程，
         # 真正的状态检查与调度写入放到异步上下文中统一处理。

@@ -1,5 +1,6 @@
 [
   "chat_router",
+  "xiaoning_core",
   "astrbot_plugin_recall_cancel",
   "astrbot_plugin_retry_v2",
   "astrbot_plugin_context_aware",

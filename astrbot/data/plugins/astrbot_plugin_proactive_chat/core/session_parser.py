@@ -187,6 +187,34 @@ class SessionMixin:
         fallback_p_id = list(active_insts.keys())[0] if active_insts else "default"
         return f"{fallback_p_id}:{msg_type}:{target_id}"
 
+    def _canonical_group_target_id(self, target_id: str) -> str:
+        """Collapse sender-scoped QQ group targets onto a configured group ID."""
+        config = getattr(self, "config", {})
+        if not isinstance(config, dict):
+            return target_id
+
+        group_settings = config.get("group_settings", {})
+        if not isinstance(group_settings, dict):
+            return target_id
+
+        session_list = group_settings.get("session_list", [])
+        if not isinstance(session_list, (list, tuple, set)):
+            return target_id
+
+        for raw_candidate in session_list:
+            candidate = str(raw_candidate).strip()
+            parsed_candidate = self._parse_session_id(candidate)
+            if parsed_candidate and "Group" in parsed_candidate[1]:
+                candidate = parsed_candidate[2]
+            if not candidate:
+                continue
+            if target_id == candidate:
+                return candidate
+            if candidate.isdigit() and target_id.endswith(f"_{candidate}"):
+                return candidate
+
+        return target_id
+
     def _normalize_session_id(self, session_id: str) -> str:
         """
         规范化 UMO，确保使用可运行的平台前缀。
@@ -196,4 +224,6 @@ class SessionMixin:
             return session_id
 
         platform, msg_type, target_id = parsed
+        if "Group" in msg_type:
+            target_id = self._canonical_group_target_id(target_id)
         return self._resolve_full_umo(target_id, msg_type, platform)

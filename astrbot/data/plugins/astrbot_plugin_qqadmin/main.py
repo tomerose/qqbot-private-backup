@@ -55,6 +55,8 @@ class QQAdminPlugin(Star):
         self.curfew = CurfewHandle(self.context, self.cfg)
         self.llm = LLMHandle(self.context, self.cfg, self.db)
         ai_cfg = dict(self.cfg.raw_data().get("ai_moderation") or {})
+        identity_guard_cfg = dict(self.cfg.raw_data().get("identity_guard") or {})
+        insult_warning_cfg = dict(self.cfg.raw_data().get("insult_warning") or {})
         try:
             private_dir = self.cfg.data_dir / "ai_moderation_private"
             self.ai_moderation_store = AIModerationStore(
@@ -65,10 +67,31 @@ class QQAdminPlugin(Star):
             self.ai_moderation = AIModerationHandler(
                 context=self.context,
                 store=self.ai_moderation_store,
-                provider_id=str(ai_cfg.get("provider_id", "gemini-3.6-flash")),
+                provider_id=str(ai_cfg.get("provider_id", "gemini-3.7-flash")),
                 timeout_seconds=float(ai_cfg.get("timeout_seconds", 8)),
                 context_messages=int(ai_cfg.get("context_messages", 8)),
                 owner_id=OWNER_ID,
+                ai_moderation_group_ids=ai_cfg.get("group_ids") or [],
+                identity_guard_enabled=bool(
+                    identity_guard_cfg.get("enabled", False)
+                ),
+                identity_guard_group_ids=identity_guard_cfg.get("group_ids") or [],
+                identity_guard_terms=identity_guard_cfg.get("terms")
+                or ["人工智障", "人机", "机器人", "AI"],
+                identity_guard_mute_seconds=int(
+                    identity_guard_cfg.get("mute_seconds", 60)
+                ),
+                identity_guard_rebuttal=str(
+                    identity_guard_cfg.get("rebuttal", "") or ""
+                ),
+                insult_warning_enabled=bool(
+                    insult_warning_cfg.get("enabled", False)
+                ),
+                insult_warning_group_ids=insult_warning_cfg.get("group_ids") or [],
+                insult_warning_terms=insult_warning_cfg.get("terms") or [],
+                insult_warning_text=str(
+                    insult_warning_cfg.get("warning", "") or ""
+                ),
             )
         except Exception:
             self.ai_moderation_store = None

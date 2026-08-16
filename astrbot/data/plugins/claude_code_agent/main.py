@@ -21,6 +21,14 @@ try:
     from xiaoning_runtime import ArtifactDeliveryResult, deliver_local_artifact
 except ImportError:
     from data.plugins.xiaoning_runtime import ArtifactDeliveryResult, deliver_local_artifact
+try:
+    from xiaoning_core.ownership import route_allows
+except ImportError:
+    try:
+        from data.plugins.xiaoning_core.ownership import route_allows
+    except ImportError:
+        def route_allows(_event, _owner):
+            return True
 
 from .agent_core import (
     ApprovalRegistry,
@@ -1199,10 +1207,11 @@ class ClaudeCodeAgent(Star):
                     task,
                     plan.preferred_backend,
                     "planned",
-                    state="planned",
+                    state="accepted",
                     recovery=payload.recovery,
                     step_count=len(plan.steps),
                 )
+                self._job_store.transition(job_id, "planned", "planned")
         except (ValueError, PayloadIntegrityError) as exc:
             logger.warning(f"[LocalAgent] job plan rejected: {type(exc).__name__}")
             yield self._reply(ctx, Plain("任务计划无效或已失效，请重新提交。"))
@@ -1618,6 +1627,8 @@ class ClaudeCodeAgent(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=900)
     async def on_message(self, ctx: Context):
+        if not route_allows(ctx, "claude_code_agent"):
+            return
         message = self._command_text(ctx)
         natural_intent = None
         if not message.startswith("/agent"):

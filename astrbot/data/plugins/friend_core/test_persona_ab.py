@@ -34,7 +34,7 @@ CASES = [
     ("casual3", "闲聊", "周末干嘛好，无聊死了"),
 ]
 
-MODELS = ["gemini-3.6-flash"]
+MODELS = ["gemini-3.7-flash"]
 
 results = {}
 lock = threading.Lock()

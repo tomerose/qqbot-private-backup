@@ -12,6 +12,14 @@ import requests
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
+try:
+    from xiaoning_core.ownership import route_allows
+except ImportError:
+    try:
+        from data.plugins.xiaoning_core.ownership import route_allows
+    except ImportError:
+        def route_allows(_event, _owner):
+            return True
 
 try:
     from draw_command.pro_access import get_tier, Tier
@@ -54,7 +62,7 @@ class DeepThink(Star):
 
     def _think_config(self, sender_id: str) -> tuple[str, str, str, str]:
         """Return the single supported chat backend."""
-        return GEMINI_PROXY, "sk-gemini-vertex", "gemini-3.6-flash", "Gemini 3.6 Flash"
+        return GEMINI_PROXY, "sk-gemini-vertex", "gemini-3.7-flash", "Gemini 3.7 Flash"
 
     @staticmethod
     def _call_think(question: str, *, api_base: str, api_key: str,
@@ -93,6 +101,8 @@ class DeepThink(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=965)
     async def on_message(self, ctx: AstrMessageEvent):
+        if not route_allows(ctx, "deep_think"):
+            return
         if not (ctx.is_private_chat() or ctx.is_at_or_wake_command):
             return
         getter = getattr(ctx, "get_message_str", None)

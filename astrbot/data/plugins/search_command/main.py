@@ -42,13 +42,21 @@ except ImportError:
         deliver_local_artifact,
         mirror_runtime_task_status,
     )
+try:
+    from xiaoning_core.ownership import route_allows
+except ImportError:
+    try:
+        from data.plugins.xiaoning_core.ownership import route_allows
+    except ImportError:
+        def route_allows(_event, _owner):
+            return True
 
 SEARCH_PROXY_URL = "http://127.0.0.1:3000/v1/chat/completions"
-SEARCH_MODEL = "gemini-3.6-flash-search"
-PLAIN_MODEL = "gemini-3.6-flash"
+SEARCH_MODEL = "gemini-3.7-flash-search"
+PLAIN_MODEL = "gemini-3.7-flash"
 # PRO action reports (research/decision/trip) use the strongest model
-ACTION_MODEL_PRO = "gemini-3.6-flash"
-ACTION_MODEL_GO  = "gemini-3.6-flash"
+ACTION_MODEL_PRO = "gemini-3.7-flash"
+ACTION_MODEL_GO  = "gemini-3.7-flash"
 SEARCH_TIMEOUT = (15, 90)
 GO_ACTION_DAILY = 3
 PRO_ACTION_DAILY = 10
@@ -713,7 +721,7 @@ class SearchCommand(Star):
         event.stop_event()
         yield event.plain_result("正在看图分析…")
         payload = {
-            "model": "gemini-3.6-flash",
+            "model": "gemini-3.7-flash",
             "max_tokens": 2048,
             "messages": [{
                 "role": "user",
@@ -1050,6 +1058,8 @@ class SearchCommand(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=978)
     async def on_message(self, event: AstrMessageEvent):
+        if not route_allows(event, "search_command"):
+            return
         text = str(getattr(event, "get_message_str", lambda: "")() or "").strip()
         in_private = bool(event.is_private_chat())
         is_at_or_wake = bool(getattr(event, "is_at_or_wake_command", False))

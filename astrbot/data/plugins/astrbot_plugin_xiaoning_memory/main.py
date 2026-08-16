@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -43,6 +44,10 @@ try:
     from xiaoning_runtime import is_private_user_key, private_user_key
 except ImportError:
     from data.plugins.xiaoning_runtime import is_private_user_key, private_user_key
+try:
+    from xiaoning_core.memory import MemoryGateway
+except ImportError:
+    from data.plugins.xiaoning_core.memory import MemoryGateway
 
 PROXY_CHAT = "http://127.0.0.1:3000/v1/chat/completions"
 FIRESTORE_PROJECT = "solar-modem-496213-f5"
@@ -52,7 +57,7 @@ MAX_MEMORIES_PER_USER = 100
 MAX_VALUE_LENGTH = 300
 MAX_KEY_LENGTH = 80
 MIN_MESSAGE_LENGTH = 4       # 降低门槛："你好""好的""明白了"都值得记住
-MAX_INJECT_MEMORIES = 5          # 最多注入 5 条最相关记忆
+MAX_INJECT_MEMORIES = 8          # 本地混合召回最多注入 8 条
 MAX_CONSO_MEMORIES = 20          # 超过此数量触发后台合并
 CONSO_COOLDOWN = 600             # 合并冷却 10 分钟
 RANK_TIMEOUT = 3.0               # Gemini 排序超时秒数
@@ -80,6 +85,10 @@ MEMORY_SAFETY_NOTE = (
 
 # 不应提取记忆的场景 —— 被动卷入/主动插话/原因不明时，用户并非在主动分享
 _SKIP_EXTRACT_TRIGGERS = frozenset({"active", "unknown"})
+_EXPLICIT_REMEMBER_RE = re.compile(
+    r"(?:请)?记住(?:一下)?[：:，,\s]*(?P<value>[^\r\n]{1,600})$",
+    re.IGNORECASE,
+)
 
 # ── embedding 工具 ──────────────────────────────────────────────
 _embed_client = None
@@ -89,7 +98,7 @@ def _embed_text(text: object) -> list[float] | None:
     """gemini-embedding-001（走 Vertex ADC，与 Firestore 同项目）。
     失败返回 None —— 调用方一律降级到旧的 时间近因/关键词 路径。"""
     global _embed_client
-    if _genai is None:
+    if _genai is None or os.environ.get("XIAONING_OFFLINE_TESTS") == "1":
         return None
     value = str(text or "").strip()
     if not value:
@@ -265,10 +274,34 @@ class XiaoningMemory(Star):
         self._recent_context_max = 6  # per user, oldest evicted
         data_dir = Path(StarTools.get_data_dir("xiaoning_memory"))
         data_dir.mkdir(parents=True, exist_ok=True)
+        self._local_gateway: MemoryGateway | None = None
+        self._local_gateway_error_at = 0.0
         self._pro_db = (
             Path(__file__).resolve().parents[2]
             / "plugin_data" / "xiaoning_pro" / "pro_members.db"
         )
+
+    @property
+    def local_gateway(self) -> MemoryGateway | None:
+        # Some compatibility tests and external integrations construct a
+        # minimal object via __new__; that legacy path has no local store.
+        if not hasattr(self, "_local_gateway"):
+            return None
+        if self._local_gateway is not None:
+            return self._local_gateway
+        now = time.time()
+        if getattr(self, "_local_gateway_error_at", 0.0) and now - self._local_gateway_error_at < 60:
+            return None
+        try:
+            shared_dir = Path(StarTools.get_data_dir("xiaoning_core"))
+            shared_dir.mkdir(parents=True, exist_ok=True)
+            self._local_gateway = MemoryGateway(shared_dir / "xiaoning-memory.sqlite3")
+            self._local_gateway_error_at = 0.0
+        except Exception as exc:
+            self._local_gateway_error_at = now
+            logger.warning("[小柠记忆] 本地加密记忆不可用: %s", type(exc).__name__)
+            return None
+        return self._local_gateway
 
     def _ensure_recent_context(self) -> None:
         if not hasattr(self, "_recent_context"):
@@ -337,7 +370,11 @@ class XiaoningMemory(Star):
         docs = self._memories_ref(qq_id).order_by(
             "created_at", direction="DESCENDING"
         ).limit(limit).stream()
-        memories = [{**doc.to_dict(), "doc_id": doc.id} for doc in docs]
+        memories = [
+            {**doc.to_dict(), "doc_id": doc.id}
+            for doc in docs
+            if not (doc.to_dict() or {}).get("valid_to")
+        ]
         memories.reverse()  # oldest first for consistent injection
         return memories
 
@@ -532,8 +569,12 @@ class XiaoningMemory(Star):
     # ── lifecycle ─────────────────────────────────────────────────
 
     async def initialize(self):
+        if self.local_gateway is None:
+            logger.error("[小柠记忆] 本地加密主存储不可用；长期记忆保持关闭")
+        else:
+            logger.info("[小柠记忆] 本地加密 SQLite 主存储已就绪；Firestore 为兼容回退")
         if self.db is None:
-            logger.warning("[小柠记忆] Firestore 不可用，记忆功能已降级")
+            logger.warning("[小柠记忆] Firestore 不可用；本地聊天与已授权记忆不受影响")
         else:
             logger.info("[小柠记忆] Firestore 后端已就绪 (qqbot) | 安全: 按QQ隔离+敏感过滤")
             # Replay any local fallback task events that accumulated during Firestore outage.
@@ -541,6 +582,65 @@ class XiaoningMemory(Star):
                 await asyncio.to_thread(self._replay_local_task_events)
             except Exception:
                 logger.debug("[小柠记忆] local fallback replay skipped")
+            try:
+                await asyncio.to_thread(self._sync_local_outbox)
+            except Exception:
+                logger.debug("[小柠记忆] local memory outbox replay skipped")
+
+    def _sync_local_outbox(self) -> int:
+        """Idempotently mirror encrypted local memory events to Firestore."""
+        gateway = self.local_gateway
+        database = self.db
+        if gateway is None or database is None:
+            return 0
+        completed = 0
+        blocked_scopes: set[str] = set()
+        for item in gateway.pending_sync(limit=25):
+            user_scope = str(item.payload.get("user_scope", ""))
+            # Preserve causal order per user. If an earlier upsert cannot be
+            # mirrored, a later delete must remain pending instead of being
+            # applied first and then accidentally resurrected by the retry.
+            if user_scope in blocked_scopes:
+                continue
+            if not self._valid_qq(user_scope):
+                gateway.mark_sync(item.event_id, succeeded=False)
+                blocked_scopes.add(user_scope)
+                continue
+            try:
+                if item.operation == "upsert":
+                    supersedes_id = str(item.payload.get("supersedes_id", ""))
+                    if supersedes_id:
+                        self._memories_ref(user_scope).document(supersedes_id).set(
+                            {"valid_to": datetime.now(timezone.utc)}, merge=True
+                        )
+                    value = str(item.payload.get("value", ""))[:MAX_VALUE_LENGTH]
+                    self._memories_ref(user_scope).document(item.aggregate_id).set(
+                        {
+                            "key": value[:MAX_KEY_LENGTH],
+                            "value": value,
+                            "category": str(item.payload.get("kind", "other"))[:30],
+                            "importance": 1.0,
+                            "created_at": datetime.now(timezone.utc),
+                            "source_type": str(item.payload.get("source_type", ""))[:30],
+                            "source_digest": str(item.payload.get("source_digest", ""))[:64],
+                            "source_ref": str(item.payload.get("source_ref", ""))[:240],
+                            "local_memory_id": item.aggregate_id,
+                        },
+                        merge=True,
+                    )
+                elif item.operation == "delete_all":
+                    self._clear_memories(user_scope)
+                elif item.operation == "delete":
+                    self._memories_ref(user_scope).document(item.aggregate_id).delete()
+                else:
+                    raise ValueError("unsupported memory sync operation")
+            except Exception:
+                gateway.mark_sync(item.event_id, succeeded=False)
+                blocked_scopes.add(user_scope)
+                continue
+            gateway.mark_sync(item.event_id, succeeded=True)
+            completed += 1
+        return completed
 
     # ── message listener ──────────────────────────────────────────
 
@@ -560,6 +660,38 @@ class XiaoningMemory(Star):
             ctx_list.append((now_ts, text[:200]))
             if len(ctx_list) > self._recent_context_max:
                 ctx_list[:] = ctx_list[-self._recent_context_max:]
+
+        # Long-term personal memory is opt-in and only accepts text that can be
+        # quoted verbatim from an explicit private "记住..." request. Model
+        # inference is never written into the local store.
+        gateway = self.local_gateway
+        consent = gateway.get_consent(sender) if gateway is not None else None
+        explicit = _EXPLICIT_REMEMBER_RE.search(text)
+        if (
+            gateway is not None
+            and consent is not None
+            and consent.memory
+            and event.is_private_chat()
+            and explicit is not None
+            and not _COMMAND_LIKE.match(text)
+        ):
+            value = explicit.group("value").strip()
+            kind = "commitment" if re.search(r"(?:提醒|约定|答应|日程|生日)", value) else "preference"
+            try:
+                await asyncio.to_thread(
+                    gateway.add_memory,
+                    sender,
+                    kind=kind,
+                    value=value,
+                    source_type="user_quote",
+                    source_quote=text,
+                    source_ref=str(getattr(event, "unified_msg_origin", "") or "")[:240],
+                )
+                event.set_extra("xiaoning_memory_written", True)
+                if self.db is not None:
+                    asyncio.create_task(asyncio.to_thread(self._sync_local_outbox))
+            except Exception as exc:
+                logger.warning("[小柠记忆] 本地显式记忆写入失败: %s", type(exc).__name__)
 
         if not self.db:
             return
@@ -586,21 +718,9 @@ class XiaoningMemory(Star):
             self._last_task_extract[sender] = now
             asyncio.create_task(self._task_extract_and_store(sender, text))
 
-        if len(text) < MIN_MESSAGE_LENGTH:
-            return
-        if _COMMAND_LIKE.match(text) or _OPERATIONAL_REQUEST.match(text):
-            return
-
-        # ── 场景感知：被动卷入/主动插话时不提取记忆 ──────────────
-        if not event.is_private_chat():
-            if not self._is_meaningful_interaction(event, text):
-                return
-
-        now = time.time()
-        if now - self._last_extract.get(sender, 0) < EXTRACT_COOLDOWN:
-            return
-        self._last_extract[sender] = now
-        asyncio.create_task(self._extract_and_store(sender, text))
+        # Legacy LLM extraction is deliberately no longer scheduled. Firestore
+        # remains a read fallback and future outbox sync target, not an implicit
+        # inference sink.
 
     @staticmethod
     def _is_meaningful_interaction(event: AstrMessageEvent, text: str) -> bool:
@@ -666,7 +786,7 @@ class XiaoningMemory(Star):
             resp = requests.post(
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-3.6-flash",
+                    "model": "gemini-3.7-flash",
                     "messages": [
                         {"role": "system", "content": EXTRACT_PROMPT},
                         {"role": "user", "content": text[:2000]},
@@ -693,6 +813,10 @@ class XiaoningMemory(Star):
         current_text = str(getattr(event, "get_message_str", lambda: "")() or "").strip()
         blocks: list[str] = []
         db_available = self.db is not None  # may trigger reconnection
+        legacy_compat_instance = not hasattr(self, "_local_gateway")
+        gateway = self.local_gateway
+        consent = gateway.get_consent(sender) if gateway is not None else None
+        memory_enabled = legacy_compat_instance or bool(consent and consent.memory)
 
         # ── in-memory recent context: ALL users, no Firestore dependency ──
         # Only inject messages from the last 2 hours — stale context causes confusion.
@@ -717,14 +841,30 @@ class XiaoningMemory(Star):
         # Private personal memories stay strictly tied to the current sender
         # and remain an X/Pro capability.
         memories: list[dict] = []
-        if db_available and self._valid_qq(sender):
+        local_memories = []
+        if memory_enabled and gateway is not None and self._valid_qq(sender):
+            try:
+                local_memories = await asyncio.to_thread(
+                    gateway.recall, sender, current_text, limit=MAX_INJECT_MEMORIES
+                )
+            except Exception:
+                local_memories = []
+        set_extra = getattr(event, "set_extra", None)
+        if callable(set_extra):
+            set_extra("_xiaoning_local_memory_authoritative", bool(local_memories))
+        if local_memories:
+            blocks.append(
+                "关于当前发送者的已授权本地记忆（仅在相关时使用，均有用户原话或验证来源）：\n"
+                + "\n".join(f"- [{item.kind}] {item.value}" for item in local_memories)
+            )
+        elif memory_enabled and db_available and self._valid_qq(sender):
             try:
                 memories = await asyncio.to_thread(
                     self._recall_candidates, sender, current_text
                 )
             except Exception:
                 memories = []
-        if memories:
+        if memories and not local_memories:
             if current_text:
                 memories = self._gemini_rank_memories(memories, current_text, sender)
                 memories = [m for m in memories if m.get("_score", 0) > 0]
@@ -882,7 +1022,7 @@ class XiaoningMemory(Star):
             resp = requests.post(
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-3.6-flash",
+                    "model": "gemini-3.7-flash",
                     "messages": [{"role": "user", "content": rank_prompt}],
                     "max_tokens": 100,
                 },
@@ -980,7 +1120,7 @@ class XiaoningMemory(Star):
                 requests.post,
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-3.6-flash",
+                    "model": "gemini-3.7-flash",
                     "messages": [{"role": "user", "content": conso_prompt}],
                     "max_tokens": 800,
                 },
@@ -1089,38 +1229,139 @@ class XiaoningMemory(Star):
 
         parts = self._msg_text(event).strip().split()
         sub = parts[1].strip() if len(parts) > 1 else ""
-
-        if not self.db:
-            yield event.plain_result("记忆功能暂不可用（Firestore 未连接）。")
+        gateway = self.local_gateway
+        if gateway is None:
+            yield event.plain_result("本地加密记忆暂不可用；小柠不会把这次对话写入长期记忆。")
             event.stop_event()
             return
 
-        if sub in ("清除", "clear", "清空"):
-            try:
-                self._clear_memories(sender)
-                yield event.plain_result("已清除所有记忆。")
-            except Exception as e:
-                yield event.plain_result(f"清除失败: {e}")
+        if not event.is_private_chat():
+            yield event.plain_result("长期记忆设置只可由本人在私聊中查看和修改。")
             event.stop_event()
             return
 
-        try:
-            memories = self._get_memories(sender)
-        except Exception as e:
-            yield event.plain_result(f"读取记忆失败: {e}")
-            event.stop_event()
-            return
-
-        if not memories:
+        if sub in {"开启", "开", "enable", "on"}:
+            gateway.set_consent(sender, memory=True)
             yield event.plain_result(
-                "暂无关于你的记忆。当你在对话中分享信息时，小柠会自动记住。"
+                "已开启长期记忆。只有你明确说“记住……”的原话，或已验证的任务结果，才会进入本地加密记忆；"
+                "不会保存聊天全文或模型猜测。可用 /记忆 查看、/记忆 关闭、/记忆 删除全部。"
             )
-        else:
-            lines = [f"【小柠记住了关于你的 {len(memories)} 件事】"]
-            for m in memories[-20:]:
-                lines.append(f"  [{m.get('category', 'other')}] {m.get('key', '?')}")
-            lines.append(f"\n共 {len(memories)} 条 | /记忆 清除 — 删除所有记忆")
-            yield event.plain_result("\n".join(lines))
+            event.stop_event()
+            return
+
+        if sub in {"关闭", "关", "pause", "off", "disable"}:
+            gateway.set_consent(sender, memory=False)
+            yield event.plain_result(
+                "已关闭长期记忆写入和召回；已有本地记忆暂时保留但不会使用。"
+                "如需永久删除，请使用 /记忆 删除全部 并完成二次确认。"
+            )
+            event.stop_event()
+            return
+
+        if sub in {"清除", "clear", "清空"}:
+            yield event.plain_result(
+                "为防止误删，请改用 /记忆 删除全部；小柠会返回一个 5 分钟有效的确认码。"
+            )
+            event.stop_event()
+            return
+
+        if sub == "更正":
+            if len(parts) < 4:
+                yield event.plain_result("用法：/记忆 更正 <记忆编号> <新的准确原话>")
+                event.stop_event()
+                return
+            if not gateway.get_consent(sender).memory:
+                yield event.plain_result("请先用 /记忆 开启，再更正长期记忆。")
+                event.stop_event()
+                return
+            try:
+                old_id = gateway.resolve_memory_id(sender, parts[2])
+                old_record = next(
+                    item for item in gateway.list_memories(sender) if item.memory_id == old_id
+                )
+                value = " ".join(parts[3:]).strip()
+                await asyncio.to_thread(
+                    gateway.add_memory,
+                    sender,
+                    kind=old_record.kind,
+                    value=value,
+                    source_type="user_quote",
+                    source_quote=self._msg_text(event),
+                    source_ref=str(getattr(event, "unified_msg_origin", "") or "")[:240],
+                    supersedes_id=old_id,
+                )
+                if self.db is not None:
+                    asyncio.create_task(asyncio.to_thread(self._sync_local_outbox))
+                yield event.plain_result("已用你的新原话更正这条记忆，旧事实保留为失效版本。")
+            except Exception as exc:
+                yield event.plain_result(f"更正失败：{exc}")
+            event.stop_event()
+            return
+
+        if sub == "删除" and len(parts) >= 3:
+            try:
+                gateway.delete_memory(sender, parts[2])
+                if self.db is not None:
+                    asyncio.create_task(asyncio.to_thread(self._sync_local_outbox))
+                yield event.plain_result("这条记忆已删除，并已建立远端兼容删除请求。")
+            except Exception as exc:
+                yield event.plain_result(f"删除失败：{exc}")
+            event.stop_event()
+            return
+
+        if sub == "删除全部":
+            if len(parts) < 3:
+                token = gateway.request_delete_all(sender)
+                yield event.plain_result(
+                    "这会永久删除你的本地长期记忆，并建立远端兼容数据删除请求。"
+                    f"确认请在 5 分钟内发送：/记忆 删除全部 {token}"
+                )
+            elif gateway.confirm_delete_all(sender, parts[2]):
+                if self.db is not None:
+                    asyncio.create_task(asyncio.to_thread(self._sync_local_outbox))
+                yield event.plain_result(
+                    "本地长期记忆已删除；远端兼容数据删除请求已进入幂等同步队列。"
+                )
+            else:
+                yield event.plain_result("确认码无效或已过期，未删除任何记忆。")
+            event.stop_event()
+            return
+
+        consent = gateway.get_consent(sender)
+        if not consent.memory:
+            yield event.plain_result(
+                "长期记忆当前为：已关闭。\n"
+                "开启后也只记录你明确要求记住的原话或已验证结果。\n"
+                "可用：/记忆 开启 | /记忆 查看 | /记忆 删除全部"
+            )
+            event.stop_event()
+            return
+
+        local_memories = gateway.list_memories(sender, limit=100)
+        lines = [f"【本地加密记忆：{len(local_memories)} 条】"]
+        for item in local_memories[:20]:
+            lines.append(f"  {item.memory_id[:8]} [{item.kind}] {item.value[:80]}")
+        if len(local_memories) > 20:
+            lines.append(f"  ……另有 {len(local_memories) - 20} 条")
+        # During migration, read legacy Firestore only after explicit consent
+        # and only for the requesting user. It remains a fallback, never the
+        # authority for new writes.
+        if not local_memories and self.db:
+            try:
+                legacy = self._get_memories(sender)
+            except Exception:
+                legacy = []
+            if legacy:
+                lines.append(f"【兼容回退记忆：{len(legacy)} 条，尚未迁入本地】")
+                for item in legacy[-10:]:
+                    lines.append(
+                        f"  [{item.get('category', 'other')}] {item.get('key', '?')}"
+                    )
+        lines.append(
+            "\n控制：/记忆 更正 <编号> <新原话> | /记忆 删除 <编号> | "
+            "/记忆 关闭 | /记忆 删除全部"
+        )
+        yield event.plain_result("\n".join(lines))
         event.stop_event()
 
     # ── 跨对话任务记忆 ─────────────────────────────────────────
@@ -1274,7 +1515,7 @@ class XiaoningMemory(Star):
             resp = requests.post(
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-3.6-flash",
+                    "model": "gemini-3.7-flash",
                     "messages": [
                         {"role": "system", "content": TASK_EXTRACT_PROMPT},
                         {"role": "user", "content": text[:2000]},

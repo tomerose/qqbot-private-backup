@@ -303,7 +303,7 @@ class VoiceModelRouter(Star):
         except Exception:
             pass
         logger.info("[VoiceRouter] Falling back to Gemini proxy for voice")
-        return 'gemini-3.6-flash'
+        return 'gemini-3.7-flash'
 
     async def _send_qq_ai_voice(self, event: AstrMessageEvent, group_id: str, text: str) -> bool:
         """Try QQ AI voice for group chat. Returns True if sent successfully."""

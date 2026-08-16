@@ -15,6 +15,14 @@ import requests
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
+try:
+    from xiaoning_core.ownership import route_allows
+except ImportError:
+    try:
+        from data.plugins.xiaoning_core.ownership import route_allows
+    except ImportError:
+        def route_allows(_event, _owner):
+            return True
 
 API = "https://api.github.com"
 GRAPHQL = "https://api.github.com/graphql"
@@ -136,6 +144,8 @@ class GitHubTools(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL)
     async def on_message(self, event: AstrMessageEvent):
+        if not route_allows(event, "github_tools"):
+            return
         msg = str(getattr(event, "get_message_str", lambda: "")() or "").strip()
         if not msg.startswith("/gh "):
             return

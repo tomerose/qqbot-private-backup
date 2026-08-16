@@ -13,6 +13,14 @@ try:
     from xiaoning_runtime import chat_response_content, defer_stop_event
 except ImportError:
     from data.plugins.xiaoning_runtime import chat_response_content, defer_stop_event
+try:
+    from xiaoning_core.ownership import route_allows
+except ImportError:
+    try:
+        from data.plugins.xiaoning_core.ownership import route_allows
+    except ImportError:
+        def route_allows(_event, _owner):
+            return True
 
 try:
     from draw_command.pro_access import is_active_pro_group
@@ -46,6 +54,8 @@ class LinkSummary(Star):
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=970)
     @defer_stop_event
     async def on_message(self, event: AstrMessageEvent):
+        if not route_allows(event, "link_summary"):
+            return
         text = self._msg(event)
 
         is_private = event.is_private_chat()
@@ -82,7 +92,7 @@ class LinkSummary(Star):
                 requests.post,
                 PROXY,
                 json={
-                    "model": "gemini-3.6-flash",
+                    "model": "gemini-3.7-flash",
                     "url_context": True,
                     "google_search": True,
                     "messages": [

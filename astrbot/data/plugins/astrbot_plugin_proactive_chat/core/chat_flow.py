@@ -186,10 +186,18 @@ class ProactiveCoreMixin:
             cooldown_seconds = int(
                 schedule_conf.get("min_interval_minutes", 30)
             ) * 60
-            if not self._private_proactive_allowed(
+            parsed_session = self._parse_session_id(normalized_session_id)
+            is_private_session = bool(
+                parsed_session
+                and (
+                    "Friend" in parsed_session[1]
+                    or "Private" in parsed_session[1]
+                )
+            )
+            if is_private_session and not self._private_proactive_allowed(
                 normalized_session_id, cooldown_seconds
             ):
-                logger.info("[主动消息] 私聊已进入安静或共享冷却期，延后本轮问候喵。")
+                logger.info("[主动消息] 未满足授权、克制触发条件或共享冷却，延后本轮消息喵。")
                 await self._schedule_next_chat_and_save(normalized_session_id)
                 return
 
@@ -292,6 +300,9 @@ class ProactiveCoreMixin:
                 return
 
             # 发送消息与收尾
+            response_text = getattr(
+                self, "_decorate_private_proactive_message", lambda _id, text: text
+            )(session_id, response_text)
             sent = await self._send_proactive_message(session_id, response_text)
             if not sent:
                 parsed = self._parse_session_id(session_id)

@@ -270,6 +270,53 @@ class XiaoningMemoryScopeTests(unittest.TestCase):
         self.assertIn("等待交付", request.system_prompt)
         self.assertNotIn("当前发送者的私有记忆", request.system_prompt)
 
+    def test_firestore_outbox_stops_same_user_after_first_failure(self):
+        first = SimpleNamespace(
+            event_id="event-1",
+            operation="upsert",
+            aggregate_id="memory-1",
+            payload={"user_scope": "1211000567", "value": "记忆"},
+        )
+        second = SimpleNamespace(
+            event_id="event-2",
+            operation="delete_all",
+            aggregate_id="all",
+            payload={"user_scope": "1211000567"},
+        )
+
+        class Gateway:
+            def __init__(self):
+                self.marks = []
+
+            def pending_sync(self, *, limit):
+                self.limit = limit
+                return [first, second]
+
+            def mark_sync(self, event_id, *, succeeded):
+                self.marks.append((event_id, succeeded))
+
+        class Document:
+            def set(self, *_args, **_kwargs):
+                raise RuntimeError("Firestore unavailable")
+
+        class Reference:
+            def document(self, _document_id):
+                return Document()
+
+        plugin = memory_module.XiaoningMemory.__new__(memory_module.XiaoningMemory)
+        gateway = Gateway()
+        plugin._local_gateway = gateway
+        plugin._local_gateway_error_at = 0.0
+        plugin._db = object()
+        plugin._valid_qq = lambda _scope: True
+        plugin._memories_ref = lambda _scope: Reference()
+        plugin._clear_memories = lambda _scope: self.fail(
+            "later delete_all must remain pending"
+        )
+
+        self.assertEqual(plugin._sync_local_outbox(), 0)
+        self.assertEqual(gateway.marks, [("event-1", False)])
+
     def test_legacy_agent_completion_wrapper_supplies_evidence(self):
         with patch.object(memory_module, "track_runtime_task_status") as tracker:
             memory_module.track_agent_task_complete("1211000567", "生成报告")

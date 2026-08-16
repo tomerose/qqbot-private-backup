@@ -10,6 +10,7 @@ from astrbot_plugin_qqadmin.core.ai_moderation_policy import (  # noqa: E402
     ModerationDecision,
     build_anonymous_context,
     is_candidate,
+    matches_ai_identity_attack,
     parse_decision,
     resolve_action,
     sanitize_message,
@@ -60,6 +61,22 @@ class AIModerationPolicyTests(unittest.TestCase):
         self.assertFalse(is_candidate("今天晚上吃什么", recent_same=0))
         self.assertTrue(is_candidate("点击链接领取返现 https://example.test", recent_same=0))
         self.assertTrue(is_candidate("同一句话", recent_same=2))
+
+    def test_identity_term_gate_matches_every_literal_mention(self):
+        for text in (
+            "小柠就是人工智障",
+            "今天讨论人机协作",
+            "你怎么看人机关系",
+            "机器人技术发展很快",
+            "什么AI？",
+            "你才是ai",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(matches_ai_identity_attack(text))
+
+        for text in ("今天晚上吃什么",):
+            with self.subTest(text=text):
+                self.assertFalse(matches_ai_identity_attack(text))
 
 
 if __name__ == "__main__":

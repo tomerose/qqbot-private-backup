@@ -216,6 +216,20 @@ print(subprocess.run('gh auth status', shell=True))
             "这个说法站不住",
         )
 
+    def test_sycophantic_agreement_is_not_allowed_to_lead_the_reply(self):
+        self.assertEqual(
+            sanitize_conversational_reply("你说得对，但是这个结论缺少证据。"),
+            "这个结论缺少证据",
+        )
+        self.assertEqual(
+            sanitize_conversational_reply("确实，我完全同意。"),
+            "先别急着同意，关键看依据和反例。",
+        )
+        self.assertEqual(
+            sanitize_conversational_reply("这个结论成立，因为样本覆盖了全部目标用户。"),
+            "这个结论成立，因为样本覆盖了全部目标用户。",
+        )
+
     def test_empty_followup_questions_are_trimmed(self):
         self.assertEqual(
             sanitize_conversational_reply("这个判断大概率是对的。要不要我继续帮你分析？"),

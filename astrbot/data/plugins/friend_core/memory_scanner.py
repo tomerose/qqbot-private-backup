@@ -153,7 +153,7 @@ class MemoryScanner:
                 requests.post,
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-3.6-flash",
+                    "model": "gemini-3.7-flash",
                     "messages": [
                         {"role": "system", "content": EVENT_EXTRACTION_PROMPT},
                         {"role": "user", "content": memory_text[:3000]},

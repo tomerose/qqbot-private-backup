@@ -105,7 +105,7 @@ class ScriptEngine:
             resp = requests.post(
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-3.6-flash",
+                    "model": "gemini-3.7-flash",
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": f"主题：{topic}"},
@@ -129,7 +129,7 @@ class ScriptEngine:
                 GEMINI_RETRY_URL,
                 headers={"Authorization": f"Bearer {GEMINI_RETRY_KEY}"},
                 json={
-                    "model": "gemini-3.6-flash",
+                    "model": "gemini-3.7-flash",
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": f"主题：{topic}"},
@@ -154,7 +154,7 @@ class ScriptEngine:
                 GEMINI_RETRY_URL,
                 headers={"Authorization": f"Bearer {GEMINI_RETRY_KEY}"},
                 json={
-                    "model": "gemini-3.6-flash",
+                    "model": "gemini-3.7-flash",
                     "messages": [
                         {"role": "system", "content": REVIEW_PROMPT},
                         {"role": "user", "content": json.dumps(raw_script, ensure_ascii=False)},

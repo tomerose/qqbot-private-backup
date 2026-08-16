@@ -27,6 +27,14 @@ from .draw_core import (
 from .pro_access import get_tier, is_active_pro_group, Tier
 from .pro_client import ProClient
 from .edit_sessions import ImageEditSessionStore
+try:
+    from xiaoning_core.ownership import route_allows
+except ImportError:
+    try:
+        from data.plugins.xiaoning_core.ownership import route_allows
+    except ImportError:
+        def route_allows(_event, _owner):
+            return True
 
 try:
     from xiaoning_runtime import (
@@ -402,6 +410,8 @@ class DrawCommand(Star):
     # Image edits own their explicit intent before generic vision/search plugins.
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=986)
     async def on_message(self, event: AstrMessageEvent):
+        if not route_allows(event, "draw_command"):
+            return
         text = self._message_text(event)
         sender_id = self._safe_sender_id(event)
 

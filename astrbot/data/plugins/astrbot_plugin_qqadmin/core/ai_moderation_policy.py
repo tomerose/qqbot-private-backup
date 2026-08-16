@@ -34,6 +34,7 @@ SUSPICIOUS_RE = re.compile(
     r"广告|诈骗|转账|傻逼|死妈|滚开|操你|领取红包|http://|https://",
     re.IGNORECASE,
 )
+DEFAULT_AI_IDENTITY_TERMS = ("人工智障", "人机", "机器人", "AI")
 
 
 @dataclass(frozen=True)
@@ -147,3 +148,11 @@ def is_candidate(text: str, recent_same: int = 0) -> bool:
     if SUSPICIOUS_RE.search(value):
         return True
     return bool(re.search(r"(.{2,12})\1{2,}", value))
+
+
+def matches_ai_identity_attack(
+    text: str, terms: tuple[str, ...] = DEFAULT_AI_IDENTITY_TERMS
+) -> bool:
+    """Match every literal configured term, regardless of intent or context."""
+    value = str(text or "").casefold()
+    return any(str(term).casefold() in value for term in terms if str(term))

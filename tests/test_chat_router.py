@@ -74,10 +74,10 @@ class ChatRouterTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                "gemini-3.6-flash",
-                "gemini-3.6-flash",
-                "gemini-3.6-flash",
-                "gemini-3.6-flash",
+                "gemini-3.7-flash",
+                "gemini-3.7-flash",
+                "gemini-3.7-flash",
+                "gemini-3.7-flash",
             ],
         )
 
@@ -102,7 +102,7 @@ class ChatRouterTests(unittest.TestCase):
             await asyncio.gather(router.route_provider(Event()), router.route_provider(Event()))
 
         asyncio.run(run())
-        self.assertEqual(calls, ["gemini-3.6-flash"])
+        self.assertEqual(calls, ["gemini-3.7-flash"])
 
     def test_short_same_speaker_followup_is_coalesced(self):
         module = load_router()
@@ -207,7 +207,45 @@ class ChatRouterTests(unittest.TestCase):
                 return "帮我解这道数学题"
 
         asyncio.run(router.route_provider(Event()))
-        self.assertEqual(calls, ["gemini-3.6-flash"])
+        self.assertEqual(calls, ["gemini-3.7-flash"])
+
+    def test_group_gate_has_no_random_or_user_specific_path(self):
+        module = load_router()
+        router = module.ChatRouter(types.SimpleNamespace())
+
+        class Event:
+            is_at_or_wake_command = False
+            _stop_event = False
+
+            def __init__(self, *, allowed=False, text="普通群聊"):
+                self.allowed = allowed
+                self.text = text
+                self.stopped = False
+
+            def is_private_chat(self):
+                return False
+
+            def get_group_id(self):
+                return "123456"
+
+            def get_message_str(self):
+                return self.text
+
+            def get_extra(self, key, default=None):
+                return self.allowed if key == "xiaoning_force_group_reply" else default
+
+            def stop_event(self):
+                self.stopped = True
+
+        blocked = Event()
+        asyncio.run(router.gate_group_reply(blocked))
+        self.assertTrue(blocked.stopped)
+        allowed = Event(allowed=True)
+        asyncio.run(router.gate_group_reply(allowed))
+        self.assertFalse(allowed.stopped)
+        urgent = Event(text="救命，有人晕倒了")
+        asyncio.run(router.gate_group_reply(urgent))
+        self.assertFalse(urgent.stopped)
 
 
 if __name__ == "__main__":

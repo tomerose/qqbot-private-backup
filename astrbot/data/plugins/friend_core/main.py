@@ -12,6 +12,7 @@ import asyncio
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -58,6 +59,20 @@ try:
     from draw_command.pro_access import Tier, get_tier
 except ImportError:
     from data.plugins.draw_command.pro_access import Tier, get_tier
+try:
+    from xiaoning_core.memory import MemoryGateway
+    from xiaoning_core.persona_canon import (
+        get_daily_persona_event,
+        guard_persona_reply,
+        persona_age,
+    )
+except ImportError:
+    from data.plugins.xiaoning_core.memory import MemoryGateway
+    from data.plugins.xiaoning_core.persona_canon import (
+        get_daily_persona_event,
+        guard_persona_reply,
+        persona_age,
+    )
 
 PERSONA_MARKER = "【小柠人格】"
 FIRESTORE_PROJECT = "solar-modem-496213-f5"
@@ -74,6 +89,9 @@ class FriendCore(Star):
         super().__init__(context, config)
         self.config = config or {}
         self.enabled = bool(self.config.get("enabled", True))
+        self._legacy_checkins_enabled = bool(
+            self.config.get("legacy_memory_checkins_enabled", False)
+        )
         self._scheduler = CheckinScheduler(context, self._send_memory_checkin)
         self._db: FirestoreClient | None = None
         # warmth cache: {qq_id: (warmth_score, cached_at)}
@@ -81,6 +99,7 @@ class FriendCore(Star):
         self._poll_task: asyncio.Task | None = None
         self._last_group_help_at: dict[str, float] = {}
         self._birthday_scan_day = ""
+        self._local_memory_gateway: MemoryGateway | None = None
         self._birthday_song_root = Path(__file__).resolve().parents[4] / "claude_workspace" / "birthday_songs"
         self._group_help_llm = bool(self.config.get("group_help_llm", True))
         self._pro_db = Path(
@@ -118,7 +137,8 @@ class FriendCore(Star):
 
     async def initialize(self):
         if self.enabled:
-            await self._scheduler.start()
+            if self._legacy_checkins_enabled:
+                await self._scheduler.start()
             if self._gift_store:
                 await asyncio.to_thread(self._gift_store.purge_expired)
             # ── Google ecosystem: Firestore-backed scheduled action poller + delivery worker ──
@@ -165,8 +185,25 @@ class FriendCore(Star):
         except Exception:
             return False
 
+    def _proactive_opted_in(self, sender: str) -> bool:
+        # Compatibility objects created via __new__ keep historical unit-test
+        # behavior; every real plugin instance has the explicit consent gate.
+        if not hasattr(self, "_local_memory_gateway"):
+            return True
+        gateway = getattr(self, "_local_memory_gateway", None)
+        if gateway is None:
+            try:
+                root = Path(StarTools.get_data_dir("xiaoning_core"))
+                gateway = MemoryGateway(root / "xiaoning-memory.sqlite3")
+                self._local_memory_gateway = gateway
+            except Exception:
+                return False
+        return gateway.get_consent(sender).proactive
+
     async def _send_memory_checkin(self, qq_id: str, message: str) -> bool:
         """Send a due memory check-in through the same opt-out and cooldown gate."""
+        if not self._proactive_opted_in(qq_id):
+            return False
         state_path = Path(StarTools.get_data_dir("proactive_behavior")) / "relationship_state.json"
         state = load_state(state_path)
         if not can_send_proactive(state, qq_id, 6 * 3600):
@@ -238,6 +275,37 @@ class FriendCore(Star):
 
         warmth = 0.0 if quiet_mode else float(event.get_extra("_friend_warmth", 0) or 0)
         persona_block = build_persona_prompt(warmth, group_chat=not event.is_private_chat())
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        daily_line = f"今天是 {today.isoformat()}，小柠现在 {persona_age(today)} 岁。"
+        gateway = getattr(self, "_local_memory_gateway", None)
+        if gateway is None:
+            try:
+                root = Path(StarTools.get_data_dir("xiaoning_core"))
+                gateway = MemoryGateway(root / "xiaoning-memory.sqlite3")
+                self._local_memory_gateway = gateway
+            except Exception:
+                gateway = None
+        if gateway is not None:
+            try:
+                daily_event = get_daily_persona_event(gateway, today)
+                daily_line += f"\n【今日生活线；当天对所有用户一致】{daily_event.narrative}"
+            except Exception:
+                pass
+        persona_block += "\n\n" + daily_line
+
+        related_loops = event.get_extra("xiaoning_relevant_open_loops", []) or []
+        if related_loops:
+            quoted = "\n".join(f"- {item}" for item in list(related_loops)[:3])
+            persona_block += (
+                "\n\n【可能相关的未完话题】\n"
+                + quoted
+                + "\n只有与当前消息确实相关时才自然接续；不说‘我还记得’，不展示记忆能力。"
+            )
+        notice = event.get_extra("xiaoning_relationship_notice", "") or event.get_extra(
+            "xiaoning_activation_notice", ""
+        )
+        if notice:
+            persona_block += f"\n\n【本轮需自然带到】{notice} 不要写成设置回执或客服通知。"
         if challenger_triggered(event.get_message_str()):
             persona_block += "\n\n" + CHALLENGER_BLOCK
         req.system_prompt = (
@@ -261,6 +329,8 @@ class FriendCore(Star):
         cleaned = sanitize_conversational_reply(
             sanitize_unverified_artifact_reply(original, request_text)
         )
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        cleaned = guard_persona_reply(cleaned, day=today)
         if cleaned != original:
             resp.completion_text = cleaned
             logger.warning(
@@ -536,7 +606,7 @@ class FriendCore(Star):
                 requests.post,
                 "http://127.0.0.1:3000/v1/chat/completions",
                 json={
-                    "model": "gemini-3.6-flash",
+                    "model": "gemini-3.7-flash",
                     "messages": [{"role": "user", "content": prompt}],
                     "response_json_schema": schema,
                     "temperature": 0,
@@ -655,6 +725,8 @@ class FriendCore(Star):
             return
         self._birthday_scan_day = day_key
         for qq_id, doc_ref, profile in due:
+            if not self._proactive_opted_in(qq_id):
+                continue
             if not await self._send_reminder_message(qq_id, birthday_greeting(profile.get("display_name"))):
                 continue
             try:

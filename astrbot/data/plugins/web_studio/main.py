@@ -21,6 +21,14 @@ try:
     from xiaoning_runtime import deliver_local_artifact, mirror_runtime_task_status
 except ImportError:
     from data.plugins.xiaoning_runtime import deliver_local_artifact, mirror_runtime_task_status
+try:
+    from xiaoning_core.ownership import route_allows
+except ImportError:
+    try:
+        from data.plugins.xiaoning_core.ownership import route_allows
+    except ImportError:
+        def route_allows(_event, _owner):
+            return True
 
 from .core import (
     PageStore,
@@ -488,6 +496,8 @@ class WebStudio(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=985)
     async def on_message(self, event: AstrMessageEvent):
+        if not route_allows(event, "web_studio"):
+            return
         intent = parse_web_intent(
             str(getattr(event, "get_message_str", lambda: "")() or "")
         )

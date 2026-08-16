@@ -225,7 +225,7 @@ class PdfAnalysis(Star):
                 requests.post,
                 PROXY,
                 json={
-                    "model": "gemini-3.6-flash",
+                    "model": "gemini-3.7-flash",
                     "messages": [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_message},

@@ -13,6 +13,14 @@ try:
     from xiaoning_runtime import chat_response_content, defer_stop_event
 except ImportError:
     from data.plugins.xiaoning_runtime import chat_response_content, defer_stop_event
+try:
+    from xiaoning_core.ownership import route_allows
+except ImportError:
+    try:
+        from data.plugins.xiaoning_core.ownership import route_allows
+    except ImportError:
+        def route_allows(_event, _owner):
+            return True
 
 try:
     from draw_command.pro_access import get_tier, Tier
@@ -78,14 +86,16 @@ class SmartTranslate(Star):
         try:
             tier = get_tier(sender_id, self._pro_db)
             if tier >= Tier.X:
-                return GEMINI_PROXY, "sk-gemini-vertex", "gemini-3.6-flash"
+                return GEMINI_PROXY, "sk-gemini-vertex", "gemini-3.7-flash"
         except Exception:
             pass
-        return GEMINI_PROXY, "local-proxy", "gemini-3.6-flash"
+        return GEMINI_PROXY, "local-proxy", "gemini-3.7-flash"
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=980)
     @defer_stop_event
     async def on_message(self, event: AstrMessageEvent):
+        if not route_allows(event, "smart_translate"):
+            return
         text = self._msg(event)
         request = parse_translate_request(text)
         if request is None:

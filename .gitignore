@@ -45,7 +45,9 @@ data/cmd_config.json
 # AstrBot private runtime data
 astrbot/astrbot.log
 astrbot/plugin_data/
+data/plugin_data/
 astrbot/data/attachments/
+astrbot/data/backups/
 astrbot/data/config/
 astrbot/data/knowledge_base/
 astrbot/data/logs/

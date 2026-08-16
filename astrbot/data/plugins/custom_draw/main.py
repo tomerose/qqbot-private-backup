@@ -25,6 +25,14 @@ try:
     from xiaoning_runtime import mirror_runtime_task_status
 except ImportError:
     from data.plugins.xiaoning_runtime import mirror_runtime_task_status
+try:
+    from xiaoning_core.ownership import route_allows
+except ImportError:
+    try:
+        from data.plugins.xiaoning_core.ownership import route_allows
+    except ImportError:
+        def route_allows(_event, _owner):
+            return True
 
 REVIEWER_ID = "1211000567"
 CUSTOM_DRAW_DAILY = 1
@@ -123,6 +131,8 @@ class CustomDraw(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=965)
     async def on_custom_draw(self, event: AstrMessageEvent):
+        if not route_allows(event, "custom_draw"):
+            return
         text = self._text(event)
         if not _TRIGGER_RE.search(text):
             return

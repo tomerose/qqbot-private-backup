@@ -123,7 +123,7 @@ def _search_douyin_public(query: str, max_results: int = 5) -> list[dict]:
         resp = requests.post(
             SEARCH_PROXY_URL,
             json={
-                "model": "gemini-3.6-flash-search",
+                "model": "gemini-3.7-flash-search",
                 "google_search": True,
                 "max_tokens": 600,
                 "messages": [{

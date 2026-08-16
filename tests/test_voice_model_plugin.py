@@ -81,7 +81,7 @@ class VoiceModelPluginTests(unittest.TestCase):
             event = FakeEvent("请用语音回答我")
             await plugin.route_voice_request(event)
             self.assertTrue(event.get_extra("voice_reply_requested"))
-            self.assertEqual(event.get_extra("selected_provider"), "gemini-3.6-flash")
+            self.assertEqual(event.get_extra("selected_provider"), "gemini-3.7-flash")
 
         asyncio.run(scenario())
 
@@ -215,7 +215,7 @@ class VoiceModelPluginTests(unittest.TestCase):
             )
             await plugin.route_voice_request(event)
             self.assertTrue(event.get_extra("voice_reply_requested"))
-            self.assertEqual(event.get_extra("selected_provider"), "gemini-3.6-flash")
+            self.assertEqual(event.get_extra("selected_provider"), "gemini-3.7-flash")
 
         asyncio.run(scenario())
 

@@ -17,6 +17,7 @@ from contact_pro_info.main import (  # noqa: E402
     CAPABILITY_CATALOG_MEMORY,
     CONVERSATIONAL_HELP_REPLY,
     ContactProInfo,
+    capability_contract_block,
     contact_reply_for,
     feature_help_for,
     version_reply_for,
@@ -89,32 +90,37 @@ class ContactProInfoTests(unittest.TestCase):
         self.assertIn("直接说", CONVERSATIONAL_HELP_REPLY)
         self.assertNotIn("【小柠使用指南】", CONVERSATIONAL_HELP_REPLY)
 
-    def test_capability_memory_injected_into_llm_requests_per_channel(self):
+    def test_capability_contract_is_scoped_to_the_current_turn_and_channel(self):
         async def scenario():
             plugin = ContactProInfo.__new__(ContactProInfo)
-            for platform_name, expected in (
-                ("", [CAPABILITY_MEMORY, CAPABILITY_CATALOG_MEMORY]),
-                ("weixin_oc", [WEIXIN_PRIVATE_CAPABILITY_MEMORY]),
-            ):
-                with self.subTest(platform=platform_name or "qq"):
-                    req = SimpleNamespace(system_prompt="base prompt")
-                    await plugin.inject_capability_memory(
-                        FakeEvent("hi", platform_name=platform_name), req
-                    )
-                    for block in expected:
-                        self.assertIn(block, req.system_prompt)
-                    if not platform_name:
-                        self.assertNotIn("【个人微信私聊通道事实】", req.system_prompt)
-                        self.assertNotIn("【公开能力事实】", WEIXIN_PRIVATE_CAPABILITY_MEMORY)
-                    # idempotent: re-injection does not duplicate
-                    await plugin.inject_capability_memory(
-                        FakeEvent("hi", platform_name=platform_name), req
-                    )
-                    self.assertEqual(req.system_prompt.count(block), 1)
+            ordinary = SimpleNamespace(system_prompt="base prompt")
+            await plugin.inject_capability_memory(FakeEvent("今天有点累"), ordinary)
+            self.assertEqual(ordinary.system_prompt, "base prompt")
+
+            task_event = FakeEvent("帮我做一份 Word 报告")
+            task = SimpleNamespace(system_prompt="base prompt")
+            await plugin.inject_capability_memory(task_event, task)
+            self.assertIn("【本轮能力契约】", task.system_prompt)
+            self.assertIn("唯一处理器=claude_code_agent", task.system_prompt)
+            self.assertNotIn("【可执行能力目录】", task.system_prompt)
+            await plugin.inject_capability_memory(task_event, task)
+            self.assertEqual(task.system_prompt.count("【本轮能力契约】"), 1)
+
+            weixin = SimpleNamespace(system_prompt="base prompt")
+            await plugin.inject_capability_memory(
+                FakeEvent("hi", platform_name="weixin_oc"), weixin
+            )
+            self.assertIn(WEIXIN_PRIVATE_CAPABILITY_MEMORY, weixin.system_prompt)
+            self.assertNotIn("【公开能力事实】", WEIXIN_PRIVATE_CAPABILITY_MEMORY)
             # QQ and WeChat blocks never cross channels
             self.assertNotIn("必须QQ交付", WEIXIN_PRIVATE_CAPABILITY_MEMORY)
 
         asyncio.run(scenario())
+
+    def test_contract_builder_never_returns_the_full_catalog(self):
+        block = capability_contract_block("帮我画一张海报")
+        self.assertIn("能力=draw", block)
+        self.assertNotIn("【可执行能力目录】", block)
 
     def test_capability_prompt_does_not_expand_one_missed_route_into_a_blanket_refusal(self):
         self.assertIn("只说明当前这一步没有执行", CAPABILITY_MEMORY)
@@ -207,7 +213,7 @@ class ContactProInfoTests(unittest.TestCase):
         self.assertIn("小柠网页工坊", USER_GUIDE)
         self.assertIn("公开HTTPS页面", CAPABILITY_MEMORY)
         self.assertIn("/早报 开启", USER_GUIDE)
-        self.assertIn("/记忆 清除", USER_GUIDE)
+        self.assertIn("/记忆 删除全部", USER_GUIDE)
         self.assertIn("/think <问题>", USER_GUIDE)
         self.assertIn("/gh <关键词>", USER_GUIDE)
         self.assertIn("/订阅动态", USER_GUIDE)

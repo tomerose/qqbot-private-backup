@@ -34,6 +34,14 @@ except ImportError:
         deliver_local_artifact,
         mirror_runtime_task_status,
     )
+try:
+    from xiaoning_core.ownership import route_allows
+except ImportError:
+    try:
+        from data.plugins.xiaoning_core.ownership import route_allows
+    except ImportError:
+        def route_allows(_event, _owner):
+            return True
 
 VIDEO_PROXY_URL = "http://127.0.0.1:3000/v1/videos/generations"
 SEARCH_PROXY_URL = "http://127.0.0.1:3000/v1/chat/completions"
@@ -227,7 +235,7 @@ def _classify_video_intent(text: str, prompt: str) -> str:
         resp = requests.post(
             SEARCH_PROXY_URL,
             json={
-                "model": "gemini-3.6-flash",
+                "model": "gemini-3.7-flash",
                 "messages": [{"role": "user", "content": classifier_prompt}],
                 "max_tokens": 10,
             },
@@ -398,7 +406,7 @@ class VideoCommand(Star):
             response = requests.post(
                 SEARCH_PROXY_URL,
                 json={
-                    "model": "gemini-3.6-flash-search",
+                    "model": "gemini-3.7-flash-search",
                     "google_search": True,
                     "max_tokens": 400,
                     "messages": [{
@@ -526,6 +534,8 @@ class VideoCommand(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=935)
     async def on_message(self, event: AstrMessageEvent):
+        if not route_allows(event, "video_command"):
+            return
         text = str(getattr(event, "get_message_str", lambda: "")() or "")
         prompt = _parse_video_command(text)
         if prompt is None or not (event.is_private_chat() or event.is_at_or_wake_command):

@@ -55,7 +55,7 @@ class ReviewEngine:
             resp = requests.post(
                 PROXY_CHAT,
                 json={
-                    "model": "gemini-3.6-flash",
+                    "model": "gemini-3.7-flash",
                     "messages": [
                         {"role": "user", "content": JUDGE_PROMPT.format(
                             script_summary=script_summary[:2000])},

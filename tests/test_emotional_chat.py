@@ -60,6 +60,7 @@ class EmotionalChatTests(unittest.TestCase):
     def test_long_talk_is_answered_as_one_contextual_reply(self):
         self.assertIn("一次说了多件事", TALK_SYSTEM)
         self.assertIn("不设固定句数", TALK_SYSTEM)
+        self.assertIn("禁止用“你说得对”“确实”“完全同意”", TALK_SYSTEM)
         self.assertIn("不要逐句机械答复", EMOTION_CONTEXT)
 
     def test_talk_model_uses_gemini_flash_for_ordinary_users(self):
@@ -69,7 +70,7 @@ class EmotionalChatTests(unittest.TestCase):
             (
                 "http://127.0.0.1:3000/v1/chat/completions",
                 "sk-gemini-vertex",
-                "gemini-3.6-flash",
+                "gemini-3.7-flash",
             ),
         )
 
@@ -99,6 +100,19 @@ class EmotionalChatTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_talk_reply_does_not_bypass_anti_sycophancy_filter(self):
+        async def scenario():
+            plugin = EmotionalChat.__new__(EmotionalChat)
+            event = FakeEvent("/talk 我肯定没错")
+            with patch(
+                "emotional_chat.main.asyncio.to_thread",
+                new=AsyncMock(return_value="你说得对，我完全同意。"),
+            ):
+                replies = await collect(plugin.on_message(event))
+            self.assertEqual(replies, ["先别急着同意，关键看依据和反例。"])
+
+        asyncio.run(scenario())
+
     def test_talk_prefix_does_not_capture_regular_chat(self):
         async def scenario():
             plugin = EmotionalChat.__new__(EmotionalChat)
@@ -122,7 +136,7 @@ class EmotionalChatTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_private_context_has_no_legacy_partner_binding(self):
+    def test_generic_private_persona_is_owned_only_by_friend_core(self):
         class Request:
             system_prompt = "人设"
 
@@ -130,8 +144,7 @@ class EmotionalChatTests(unittest.TestCase):
             plugin = EmotionalChat.__new__(EmotionalChat)
             request = Request()
             await plugin.inject_partner_context(FakeEvent("晚安", "3424575956"), request)
-            self.assertIn("【小柠·私聊基础人格】", request.system_prompt)
-            self.assertIn("普通网友", request.system_prompt)
+            self.assertEqual(request.system_prompt, "人设")
             self.assertNotIn("长期伴侣", request.system_prompt)
             self.assertNotIn("3424575956", request.system_prompt)
 

@@ -17,6 +17,14 @@ from pathlib import Path
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
+try:
+    from xiaoning_core.ownership import route_allows
+except ImportError:
+    try:
+        from data.plugins.xiaoning_core.ownership import route_allows
+    except ImportError:
+        def route_allows(_event, _owner):
+            return True
 
 from .pipeline import VideoPipeline
 
@@ -116,6 +124,8 @@ class VideoPipelinePlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=937)
     async def on_message(self, event: AstrMessageEvent):
+        if not route_allows(event, "video_pipeline"):
+            return
         text = self._msg(event)
         lowered = text.lower().strip()
 
