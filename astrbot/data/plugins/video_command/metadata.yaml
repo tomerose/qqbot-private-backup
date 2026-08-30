@@ -1,0 +1,6 @@
+name: video_command
+display_name: AI视频生成
+short_desc: /video PRO专属 Veo视频生成
+desc: PRO 用户通过 /video 命令使用 Google Veo 3.1 Lite 生成 AI 视频。支持自然语言触发。
+version: v1.0.0
+author: lemon

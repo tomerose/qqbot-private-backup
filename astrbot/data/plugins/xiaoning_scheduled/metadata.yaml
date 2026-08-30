@@ -1,0 +1,6 @@
+name: xiaoning_scheduled
+display_name: 小柠定时推送
+short_desc: GitHub趋势/早安图文/天气定时推送
+desc: 定时抓取GitHub热门仓库、生成早安励志图文、推送天气。支持 /autopost 命令手动触发和管理。
+version: v1.0.0
+author: lemon

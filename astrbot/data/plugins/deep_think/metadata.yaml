@@ -1,0 +1,6 @@
+name: deep_think
+display_name: 深度思考
+short_desc: /think 用Gemini Pro深度推理
+desc: 调用 Gemini 3.6 Flash 进行复杂推理分析
+version: v1.0.0
+author: lemon

@@ -1,0 +1,172 @@
+{
+  "github_trending_enabled": {
+    "description": "每天推送 GitHub 趋势（需同时配置目标群）",
+    "type": "bool",
+    "default": false
+  },
+  "github_trending_time": {
+    "description": "GitHub 趋势推送时间（HH:MM）",
+    "type": "string",
+    "default": "09:00"
+  },
+  "github_trending_groups": {
+    "description": "目标群号，逗号分隔；填 * 才表示全部群",
+    "type": "string",
+    "default": ""
+  },
+  "morning_post_enabled": {
+    "description": "每天推送早安图文（需同时配置目标群）",
+    "type": "bool",
+    "default": false
+  },
+  "morning_time": {
+    "description": "早安推送时间（HH:MM）",
+    "type": "string",
+    "default": "07:30"
+  },
+  "morning_groups": {
+    "description": "目标群号，逗号分隔；填 * 才表示全部群",
+    "type": "string",
+    "default": ""
+  },
+  "weather_enabled": {
+    "description": "每天推送天气（需同时配置目标群）",
+    "type": "bool",
+    "default": false
+  },
+  "weather_city": {
+    "description": "天气城市",
+    "type": "string",
+    "default": "Shanghai"
+  },
+  "weather_time": {
+    "description": "天气推送时间（HH:MM）",
+    "type": "string",
+    "default": "07:00"
+  },
+  "weather_groups": {
+    "description": "目标群号，逗号分隔；填 * 才表示全部群",
+    "type": "string",
+    "default": ""
+  },
+  "beautiful_moment_enabled": {
+    "description": "每天向指定群发送一条今日美好时刻（不是群总结）",
+    "type": "bool",
+    "default": false
+  },
+  "beautiful_moment_time": {
+    "description": "今日美好时刻发送时间（HH:MM）",
+    "type": "string",
+    "default": "23:00"
+  },
+  "beautiful_moment_groups": {
+    "description": "目标群号，逗号分隔；仅发送到明确配置的群",
+    "type": "string",
+    "default": ""
+  },
+  "report_only_mode": {
+    "description": "报表专用模式：仅运行早报、午报和晚报，忽略其他定时任务与手动触发",
+    "type": "bool",
+    "default": true
+  },
+  "ai_news_enabled": {
+    "description": "启用每日 AI 早报",
+    "type": "bool",
+    "default": true
+  },
+  "ai_news_time": {
+    "description": "AI 早报发送时间（HH:MM）",
+    "type": "string",
+    "default": "07:00"
+  },
+  "report_email_enabled": {
+    "description": "同时把早报、午报和晚报 PDF 发送到邮箱；SMTP 密码只从 XIAONING_REPORT_SMTP_PASSWORD 环境变量读取",
+    "type": "bool",
+    "default": true
+  },
+  "report_email_to": {
+    "description": "日报 PDF 收件邮箱",
+    "type": "string",
+    "default": ""
+  },
+  "report_smtp_host": {
+    "description": "SMTP 服务器",
+    "type": "string",
+    "default": "smtp.gmail.com"
+  },
+  "report_smtp_port": {
+    "description": "SMTP STARTTLS 端口",
+    "type": "int",
+    "default": 587
+  },
+  "report_smtp_username": {
+    "description": "SMTP 登录账号/发件邮箱（密码不写在这里）",
+    "type": "string",
+    "default": ""
+  },
+  "noon_report_enabled": {
+    "description": "启用每日午报",
+    "type": "bool",
+    "default": true
+  },
+  "noon_report_time": {
+    "description": "午报发送时间（HH:MM）",
+    "type": "string",
+    "default": "12:00"
+  },
+  "evening_report_enabled": {
+    "description": "启用每日晚报",
+    "type": "bool",
+    "default": true
+  },
+  "evening_report_time": {
+    "description": "晚报发送时间（HH:MM）",
+    "type": "string",
+    "default": "20:00"
+  },
+  "zhoushen_daily_enabled": {
+    "description": "旧周深日报开关（报表专用模式下始终停用）",
+    "type": "bool",
+    "default": false
+  },
+  "zhoushen_daily_time": {
+    "description": "旧周深日报时间（HH:MM）",
+    "type": "string",
+    "default": "23:00"
+  },
+  "zhoushen_daily_groups": {
+    "description": "旧周深日报目标群",
+    "type": "string",
+    "default": ""
+  },
+  "zhoushen_song_enabled": {
+    "description": "旧歌曲推送开关（报表专用模式下始终停用）",
+    "type": "bool",
+    "default": false
+  },
+  "zhoushen_song_time": {
+    "description": "旧歌曲推送时间（HH:MM）",
+    "type": "string",
+    "default": "23:01"
+  },
+  "zhoushen_song_groups": {
+    "description": "旧歌曲推送目标群",
+    "type": "string",
+    "default": ""
+  },
+  "zhoushen_meme_enabled": {
+    "description": "旧表情包推送开关（报表专用模式下始终停用）",
+    "type": "bool",
+    "default": false
+  },
+  "zhoushen_meme_time": {
+    "description": "旧表情包推送时间（HH:MM）",
+    "type": "string",
+    "default": "23:02"
+  },
+  "zhoushen_meme_groups": {
+    "description": "旧表情包推送目标群",
+    "type": "string",
+    "default": ""
+  }
+}

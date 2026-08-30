@@ -1,0 +1,6 @@
+name: emotional_chat
+display_name: 情感辅导
+short_desc: /talk 情感倾听+情绪关键词自动共情
+desc: 支持/talk命令主动倾诉，自动识别情绪关键词注入共情上下文
+version: v1.0.0
+author: lemon

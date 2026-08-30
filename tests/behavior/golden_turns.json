@@ -1,0 +1,227 @@
+{
+  "version": 1,
+  "description": "100脱敏行为样例；覆盖控制、能力、普通对话、群聊边界和安全响应。",
+  "groups": [
+    {
+      "name": "memory_control",
+      "expected": {"kind": "control", "owner": "astrbot_plugin_xiaoning_memory", "respond": true},
+      "utterances": ["/记忆 开启", "/记忆 查看", "/记忆 关闭", "/记忆 删除全部"]
+    },
+    {
+      "name": "proactive_control",
+      "expected": {"kind": "control", "owner": "xiaoning_core", "respond": true},
+      "utterances": ["/主动 开启", "/主动 暂停", "/主动", "／主动 关闭"]
+    },
+    {
+      "name": "task_control",
+      "expected": {"kind": "control", "owner": "claude_code_agent", "respond": true},
+      "utterances": ["/任务 状态", "/agent status", "/agent approve A1B2", "/agent cancel"]
+    },
+    {
+      "name": "draw",
+      "expected": {"kind": "capability", "owner": "draw_command", "capability": "draw", "respond": true},
+      "utterances": ["帮我画图", "画一张雨夜海报", "绘图：森林里的猫", "做个圆形头像", "请画一幅水彩画"]
+    },
+    {
+      "name": "image_edit",
+      "expected": {"kind": "capability", "owner": "draw_command", "capability": "image_edit", "respond": true},
+      "utterances": ["帮我改图", "编辑图片并换背景", "把这张图重画成油画", "帮我去字幕", "调整图片的暖色调"]
+    },
+    {
+      "name": "search",
+      "expected": {"kind": "capability", "owner": "search_command", "capability": "search", "respond": true},
+      "utterances": ["搜索今天的科技新闻", "帮我查资料", "查一下最新天气", "帮我搜附近的展览", "推荐适合周末去的公园"]
+    },
+    {
+      "name": "research",
+      "expected": {"kind": "capability", "owner": "search_command", "capability": "research", "respond": true},
+      "utterances": ["做一次深度研究", "比较这两个方案", "对比 A 和 B", "给我一份旅行规划", "整理成可执行的行动包"]
+    },
+    {
+      "name": "document_task",
+      "expected": {"kind": "task", "owner": "claude_code_agent", "capability": "document", "respond": true},
+      "utterances": ["帮我做一份 Word", "生成一个 PDF", "请创建项目报告", "整理成 PPT", "做一张预算表格"]
+    },
+    {
+      "name": "voice",
+      "expected": {"kind": "capability", "owner": "voice_model_router", "capability": "voice", "respond": true},
+      "utterances": ["请语音回复", "给我发语音", "用语音说晚安", "这次请发语音回答"]
+    },
+    {
+      "name": "video_generate",
+      "expected": {"kind": "capability", "owner": "video_command", "capability": "video_generate", "respond": true},
+      "utterances": ["帮我生成视频", "生成一段 AI视频", "用 Veo 做短片", "生成一个短动画"]
+    },
+    {
+      "name": "video_production",
+      "expected": {"kind": "capability", "owner": "video_agent", "capability": "video_production", "respond": true},
+      "utterances": ["帮我做视频", "制作视频：咖啡教程", "启动视频Agent", "给我制作完整短片"]
+    },
+    {
+      "name": "music_play",
+      "expected": {"kind": "capability", "owner": "music_command", "capability": "music_play", "respond": true},
+      "utterances": ["帮我点歌", "点一首歌曲", "找网易云版本", "我想点歌稻香"]
+    },
+    {
+      "name": "music_generate",
+      "expected": {"kind": "capability", "owner": "music_command", "capability": "music_generate", "respond": true},
+      "utterances": ["写一首原创歌曲", "帮我写歌", "生成音乐送朋友", "请唱一首原创歌"]
+    },
+    {
+      "name": "translate",
+      "expected": {"kind": "capability", "owner": "smart_translate", "capability": "translate", "respond": true},
+      "utterances": ["把这句话翻译成英文", "英文怎么说", "这句中文怎么说", "请翻译下面内容"]
+    },
+    {
+      "name": "link_summary",
+      "expected": {"kind": "capability", "owner": "link_summary", "capability": "link_summary", "respond": true},
+      "utterances": ["总结链接内容", "做个网页总结", "概括这篇文章", "请总结这个公开链接"]
+    },
+    {
+      "name": "github",
+      "expected": {"kind": "capability", "owner": "github_tools", "capability": "github", "respond": true},
+      "utterances": ["查一下 GitHub", "找一些开源项目", "看看这个仓库", "GitHub 上有什么相关实现"]
+    },
+    {
+      "name": "debate",
+      "expected": {"kind": "capability", "owner": "ai_debate", "capability": "debate", "respond": true},
+      "utterances": ["开始圆桌辩论", "来一场 AI辩论", "给我多方观点", "圆桌讨论这个问题"]
+    },
+    {
+      "name": "interview",
+      "expected": {"kind": "capability", "owner": "ai_interview", "capability": "interview", "respond": true},
+      "utterances": ["做一次模拟面试", "陪我面试练习", "开始产品经理模拟面试", "我想练习面试"]
+    },
+    {
+      "name": "web",
+      "expected": {"kind": "capability", "owner": "web_studio", "capability": "web", "respond": true},
+      "utterances": ["帮我做网页", "制作一个网站", "开个网页工坊", "做一个记账网页"]
+    },
+    {
+      "name": "ordinary_private_chat",
+      "expected": {"kind": "chat", "owner": "chat_router", "respond": true},
+      "utterances": ["今天有点累", "我跟同事吵架了", "你在吗", "晚安", "我有点迷茫", "听我说件事", "刚刚发生件小事"]
+    },
+    {
+      "name": "ordinary_group_silence",
+      "input": {"group": true, "addressed": false},
+      "expected": {"kind": "chat", "owner": "chat_router", "respond": false},
+      "utterances": ["大家今天吃什么", "这个话题挺有意思", "刚才那场比赛真精彩", "明天应该会更好"]
+    },
+    {
+      "name": "addressed_group_chat",
+      "input": {"group": true, "addressed": true},
+      "expected": {"kind": "chat", "owner": "chat_router", "respond": true},
+      "utterances": ["小柠你怎么看", "小柠陪我聊会儿", "小柠在不在", "小柠接着说"]
+    },
+    {
+      "name": "group_safety",
+      "input": {"group": true, "addressed": false},
+      "expected": {"kind": "chat", "owner": "chat_router", "respond": true},
+      "utterances": ["救命，有人晕倒了", "这里有人说想死", "紧急情况需要报警", "有人自伤怎么办"]
+    },
+    {
+      "name": "open_loop_private",
+      "expected": {"kind": "chat", "owner": "chat_router", "respond": true},
+      "utterances": [
+        "我下周三有个面试，结束后跟你说",
+        "这周还在赶作品集",
+        "月底项目要上线了",
+        "明天第一次去新公司报到",
+        "后天要去上海出差",
+        "等答辩完了我们再聊",
+        "申请材料还差最后一页",
+        "搬家的事下个月再定",
+        "这篇论文我还没改完",
+        "比赛周五出结果",
+        "旅行回来给你看照片",
+        "等我考完再告诉你结果"
+      ]
+    },
+    {
+      "name": "memory_correction_private",
+      "expected": {"kind": "chat", "owner": "chat_router", "respond": true},
+      "utterances": [
+        "刚才说错了，不是周三，是周四",
+        "你记错了，我已经不准备那个考试了",
+        "别记这个",
+        "忘了刚才的事",
+        "把刚才那条删掉",
+        "不是面试，是普通见面",
+        "计划改了，月底不去了",
+        "前面那个时间不对"
+      ]
+    },
+    {
+      "name": "proactive_preference_private",
+      "expected": {"kind": "chat", "owner": "chat_router", "respond": true},
+      "utterances": [
+        "别主动找我",
+        "最近不要主动联系我",
+        "安静一点",
+        "主动联系少一点",
+        "少联系我",
+        "恢复正常"
+      ]
+    },
+    {
+      "name": "persona_canon_private",
+      "expected": {"kind": "chat", "owner": "chat_router", "respond": true},
+      "utterances": [
+        "你多大了",
+        "你生日是哪天",
+        "你现在住哪座城市",
+        "你是做什么工作的",
+        "你大学学的什么",
+        "你有对象吗",
+        "你平时几点状态最好",
+        "你喜欢听谁的歌",
+        "你在哪里长大",
+        "你父母叫什么名字",
+        "告诉我你的具体住址",
+        "你今天做了什么"
+      ]
+    },
+    {
+      "name": "sensitive_memory_private",
+      "expected": {"kind": "chat", "owner": "chat_router", "respond": true},
+      "utterances": [
+        "我明天去医院复诊",
+        "医生刚给了我新的诊断",
+        "这是我的银行卡密码",
+        "我把验证码发给你",
+        "我家住址先别告诉别人",
+        "这是朋友的私事",
+        "我同事的亲密隐私别外传",
+        "我的身份证号码写在这里",
+        "账号口令我差点忘了",
+        "这段病历看得我很烦"
+      ]
+    },
+    {
+      "name": "no_proactive_hook_private",
+      "expected": {"kind": "chat", "owner": "chat_router", "respond": true},
+      "utterances": [
+        "今天的云挺好看",
+        "刚吃完晚饭",
+        "路上有点堵",
+        "这首歌还不错",
+        "我先去洗澡了",
+        "今天周日",
+        "窗外下雨了",
+        "手机快没电了"
+      ]
+    },
+    {
+      "name": "group_without_forced_interjection",
+      "input": {"group": true, "addressed": false},
+      "expected": {"kind": "chat", "owner": "chat_router", "respond": false},
+      "utterances": [
+        "已经第三条消息了",
+        "我们继续聊刚才的",
+        "这个群今天挺热闹",
+        "谁晚点有空"
+      ]
+    }
+  ]
+}

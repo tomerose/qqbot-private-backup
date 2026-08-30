@@ -1,0 +1,41 @@
+# Pro 审批与成员记录加固设计
+
+## 目标
+
+在不改变公开 Pro 权限边界的前提下，降低人工误开通和验证码投递故障的风险，并让管理员能够追溯关键状态变化。
+
+公开 Pro 仍只解锁明确标记的 Pro 内容能力（当前为作图）。本机 Agent 继续只允许 QQ `<configured-qq-id>`，不读取、不信任 Pro 成员库。
+
+## 变更范围
+
+### 1. 二次确认审批
+
+`/pro approve <APP-ID> [days]` 不再直接生成验证码，而是将申请置为 `approval_pending_confirm`，记录有效期和确认截止时间（5 分钟）。
+
+仅审核人可在截止前发送 `/pro confirm <APP-ID>`。确认成功才生成验证码并尝试私聊投递；确认超时会恢复为 `awaiting_review`，不会丢失申请。
+
+### 2. 可恢复投递与脱敏审计
+
+仅审核人可发送 `/pro resend <APP-ID>`，对处于有效 `awaiting_verify` 状态的申请生成替代验证码并私聊申请人。旧验证码立即作废；发送失败时不回退为人工审核，审核人可稍后再次补发。补发间隔为 60 秒，避免刷屏和不必要的验证码轮换。
+
+仅审核人可发送 `/pro audit <APP-ID>`。回复最多 20 条事件类型和时间，不含 QQ 号、邮箱正文、验证码、文件路径或机器信息。
+
+### 3. 成员记录完整性
+
+激活 Pro 时，为 `application_id + qq_id + state + pro_expires_at` 生成 HMAC-SHA256 签名。动态 Pro 判定先验证签名，签名缺失或不匹配即拒绝访问。验证码比较也改为常量时间比较。
+
+签名密钥优先从 `XIAONING_PRO_SIGNING_KEY` 读取；未配置时在本地插件数据目录生成并复用一个被 Git 忽略的密钥文件。它能发现数据库单独被篡改或损坏，不能防御拥有机器同等权限、可读取密钥或修改插件代码的攻击者；此类情况按主机失陷处理。
+
+## 状态与安全边界
+
+`awaiting_review -> approval_pending_confirm -> awaiting_verify -> active`
+
+确认超时：`approval_pending_confirm -> awaiting_review`；撤销、到期、三次验错等既有终态保持不变。所有审核、确认、补发和审计操作均在代码中校验审核人 QQ `<configured-qq-id>`。
+
+## 验收
+
+1. `/pro approve` 后未 `/pro confirm` 不会发验证码也不会开通；5 分钟后恢复待审核。
+2. 仅审核人能确认、补发和审计；验证码永不出现在群回复、审计或数据库明文中。
+3. 补发后旧码无效；投递失败仍可再次补发。
+4. 篡改 active 记录的受签名字段会导致动态 Pro 判定失败；公开 Pro 仍不能取得 Agent 权限。
+5. 既有 Pro、作图和 Agent 权限测试保持通过。

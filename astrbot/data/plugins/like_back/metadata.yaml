@@ -1,0 +1,6 @@
+name: like_back
+display_name: 自动回赞
+short_desc: 自动检测新点赞并回赞，通知owner
+desc: 每小时扫描get_profile_like，对新增点赞自动send_like回赞。Owner私聊通知。基于NapCat OneBot API实现。
+version: v1.0.0
+author: lemon

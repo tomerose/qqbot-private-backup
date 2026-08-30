@@ -1,0 +1,6 @@
+name: ai_interview
+display_name: AI 面试官
+short_desc: /interview 模拟面试
+desc: X/Pro 功能。模拟真实面试场景，5 轮追问 + 最终评分反馈。
+version: v1.0.0
+author: lemon

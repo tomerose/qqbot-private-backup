@@ -1,0 +1,10 @@
+xiaoning
+qqbot
+astrbot
+self-hosted
+ai-assistant
+llm
+openai-compatible
+python
+windows
+napcat

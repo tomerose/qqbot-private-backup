@@ -1,0 +1,16 @@
+[
+  "chat_router",
+  "xiaoning_core",
+  "astrbot_plugin_recall_cancel",
+  "astrbot_plugin_retry_v2",
+  "astrbot_plugin_context_aware",
+  "emotional_chat",
+  "msg_reaction",
+  "like_back",
+  "proactive_behavior",
+  "astrbot_plugin_proactive_chat",
+  "smart_translate",
+  "link_summary",
+  "github_tools",
+  "contact_pro_info"
+]

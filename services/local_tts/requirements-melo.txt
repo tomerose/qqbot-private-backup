@@ -1,0 +1,7 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy==1.26.4
+torch==2.5.1+cpu
+torchaudio==2.5.1+cpu
+fastapi==0.138.0
+uvicorn==0.49.0
+git+https://github.com/myshell-ai/MeloTTS.git@209145371cff8fc3bd60d7be902ea69cbdb7965a

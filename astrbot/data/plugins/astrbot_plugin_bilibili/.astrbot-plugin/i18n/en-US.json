@@ -1,0 +1,78 @@
+{
+  "metadata": {
+    "display_name": "Bilibili",
+    "short_desc": "Bilibili video parsing, dynamic/live subscription, bangumi recommendations",
+    "desc": "Bilibili dynamic push, video info parsing, live room status notifications, QQ mini-app parsing, and LLM-based Bangumi anime recommendations."
+  },
+  "config": {
+    "sessdata": {
+      "description": "Bilibili SESSDATA",
+      "hint": "Bilibili SESSDATA cookie for fetching dynamics and video info. See README for retrieval instructions."
+    },
+    "proxy": {
+      "description": "Proxy",
+      "hint": "Proxy address for Bilibili API requests. Example: http://127.0.0.1:7890 or socks5://127.0.0.1:1080. Leave blank for direct connection."
+    },
+    "bangumi_token": {
+      "description": "Bangumi Access Token",
+      "hint": "Optional. Bangumi (bgm.tv) access token. Required for authorized API endpoints."
+    },
+    "interval_secs": {
+      "description": "Polling Interval (seconds)",
+      "hint": "Detection interval per uploader in seconds. Default: 300s (5 minutes)."
+    },
+    "task_gap_secs": {
+      "description": "Task Gap (seconds)",
+      "hint": "Minimum interval between two consecutive uploader tasks in seconds, used to control API request rate."
+    },
+    "reconnect_silent": {
+      "description": "Reconnect Silence",
+      "hint": "When enabled, if a long time has passed since the last successful push on startup, the plugin will stay silent for a period to digest the backlog."
+    },
+    "rai": {
+      "description": "Render as Image",
+      "hint": "When enabled, dynamic and live notifications are rendered as HTML card images for better visual effect. Disable to use plain text mode."
+    },
+    "renderer_template": {
+      "description": "Renderer Template",
+      "hint": "Select the rendering style for dynamic/live push cards.",
+      "labels": ["Classic", "Bili-Pink", "Simple"]
+    },
+    "node": {
+      "description": "Forward Message Mode",
+      "hint": "When enabled, dynamics are sent as forward messages (nodes), suitable for platforms like QQ that support forwarded messages."
+    },
+    "enable_parse_miniapp": {
+      "description": "Parse QQ Mini-app",
+      "hint": "When enabled, automatically parse Bilibili QQ mini-app cards in messages and extract direct links."
+    },
+    "enable_parse_BV": {
+      "description": "Parse Bilibili Video Links",
+      "hint": "When enabled, automatically detect BV numbers and b23.tv short links in messages and reply with video detail cards."
+    },
+    "dynamic_limit": {
+      "description": "Max Dynamics Per Push",
+      "hint": "Maximum number of dynamics pushed per uploader per polling cycle, to avoid flooding."
+    },
+    "recent_dynamic_cache": {
+      "description": "Dedup Cache Size",
+      "hint": "Size of the recent_ids deduplication cache. Larger values increase dedup range but use more memory."
+    },
+    "plain_push_template": {
+      "description": "Plain Text Push Template",
+      "hint": "Message template for non-image push mode. Leave blank to use the default format. Available variables: {name} (uploader name), {uid} (UID), {action} (action text), {title} (title), {text} (body), {url} (link)."
+    },
+    "plain_push_forward_template": {
+      "description": "Plain Text Forward Template",
+      "hint": "Forward content template for non-image push mode. Leave blank to use the default format. Available variables: {name}, {uid}, {title}, {text}, {url} (sourced from the forwarded original dynamic)."
+    },
+    "enable_ai_summary": {
+      "description": "AI Summary",
+      "hint": "When enabled, an AI (LLM) summary is generated after each dynamic push. Requires a valid AI model configured."
+    },
+    "ai_summary_prompt": {
+      "description": "AI Summary Prompt",
+      "hint": "Optional. Custom prompt template for AI summaries. Use {content} to represent the assembled dynamic content. Leave blank to use the built-in default prompt."
+    }
+  }
+}

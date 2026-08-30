@@ -1,0 +1,164 @@
+{
+  "enable_blacklist":{
+    "description":"是否启用黑名单",
+    "type":"bool"
+  },
+  "enable_blacklist_log":{
+    "description":"记录黑名单拦截日志",
+    "type":"bool"
+  },
+  "enable_audit_log":{
+    "description":"记录审核日志",
+    "type":"bool"
+  },
+  "enable_output_censor":{
+    "description":"是否启用LLM输出审核",
+    "type":"bool"
+  },
+  "enable_all_input_censor":{
+    "description":"是否启用全输入审核",
+    "type":"bool"
+  },
+  "enable_input_censor":{
+    "description":"是否启用@或唤醒指令后的输入审核",
+    "type":"bool"
+  },
+  "enable_image_censor":{
+    "description":"是否启用图片审核",
+    "type":"bool"
+  },
+  "enable_private_msg_censor":{
+    "description":"是否启用私聊审核",
+    "type":"bool"
+  },
+  "enable_group_msg_censor":{
+    "description":"是否启用群管功能（审核群内所有消息）",
+    "hint":"仅aiocqhttp支持禁言与撤回",
+    "type":"bool"
+  },
+  "enable_review_new_members": {
+    "description": "是否在新成员加入后的一段时间内强制审查",
+    "type": "bool",
+    "default": false
+  },
+  "review_new_members_duration": {
+    "description": "新成员审查时长（秒）",
+    "type": "int",
+    "default": 300
+  },
+  "group_list":{
+    "description":"启用群管功能的群聊",
+    "hint":"启用群管功能的群号列表，留空则对所有群生效",
+    "obvious_hint": true,
+    "type":"list"
+  },
+  "webui": {
+    "description": "WebUI 配置",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用独立 WebUI（默认关闭，避免额外子进程）",
+        "type": "bool",
+        "default": false
+      },
+      "host": {
+        "description": "WebUI监听地址，默认仅本机",
+        "type": "string",
+        "default": "127.0.0.1"
+      },
+      "port": {
+        "description": "WebUI监听端口，默认为8192",
+        "type": "int",
+        "default": 8192
+      },
+      "secret": {
+        "description": "一个足够长又足够复杂的，不需要你记住的字符串",
+        "type": "string"
+      },
+      "password": {
+        "description": "你的WebUI密码，每次登录要用",
+        "type": "string",
+        "default": "default"
+      }
+    }
+  },
+  "aliyun": {
+    "description": "阿里云审核配置",
+    "type": "object",
+    "items": {
+      "key_id": {
+        "description": "阿里云 Key ID",
+        "type": "string"
+      },
+      "key_secret": {
+        "description": "阿里云 Key Secret",
+        "type": "string"
+      }
+    }
+  },
+  "llm": {
+    "description": "LLM 审核配置",
+    "type": "object",
+    "items": {
+      "model": {
+        "description": "LLM 模型名称",
+        "type": "string"
+      },
+      "base_url": {
+        "description": "LLM API 基础地址",
+        "type": "string"
+      },
+      "api_key": {
+        "description": "LLM API 密钥",
+        "type": "string"
+      },
+      "sys_prompt": {
+        "description": "LLM 系统提示词",
+        "type": "string",
+        "hint": "留空使用默认提示词",
+        "editor_mode": true
+      }
+    }
+  },
+  "tencent": {
+    "description": "腾讯云审核配置",
+    "type": "object",
+    "items": {
+      "secret_id": {
+        "description": "腾讯云 Secret ID",
+        "type": "string"
+      },
+      "secret_key": {
+        "description": "腾讯云 Secret Key",
+        "type": "string"
+      }
+    }
+  },
+  "text_censor_provider": {
+    "description": "文本审核提供商",
+    "type": "string",
+    "options": ["Aliyun", "LLM", "Tencent", "Local"],
+    "default": "Local"
+  },
+  "image_censor_provider": {
+    "description": "图片审核提供商",
+    "type": "string",
+    "options": ["Aliyun", "Tencent", "LLM"]
+  },
+  "forward_violation_message": {
+    "description": "违规消息转发配置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用违规消息转发",
+        "type": "bool",
+        "default": false
+      },
+      "target_umo": {
+        "description": "接收违规消息通知的会话标识 (UMO)",
+        "type": "string",
+        "hint": "请使用sid命令查看UMO"
+      }
+    }
+  }
+}

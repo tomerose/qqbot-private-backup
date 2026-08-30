@@ -1,0 +1,6 @@
+name: msg_reaction
+display_name: 消息表情反应
+short_desc: 对明确的感谢、问候等消息添加emoji反应
+desc: 仅按少量明确关键词回应，不调用模型、不干扰聊天和情侣口吻。基于NapCat set_msg_emoji_like API实现。
+version: v1.0.0
+author: lemon

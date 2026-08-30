@@ -1,0 +1,14 @@
+# 产品展示模板 — 产品介绍、评测、开箱
+name: "产品展示"
+description: "产品介绍、评测、好物分享"
+style: "clean"
+duration_range: [15, 90]
+hook_required: true
+pace: "fast"
+visual_style: "clean"
+voice_style: "male"
+subtitle_style: "dynamic"
+transitions: ["slide", "wipe"]
+motion: "ken_burns"
+aspect_ratio: "16:9"
+script_hint: "突出产品核心卖点，一句话钩子+3个亮点+行动号召"

@@ -1,0 +1,83 @@
+import sys
+import unittest
+from pathlib import Path
+
+_PROJ_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_PARENT = _PROJ_ROOT / "astrbot" / "data" / "plugins"
+sys.path.insert(0, str(PLUGIN_PARENT))
+
+from astrbot_plugin_qqadmin.core.ai_moderation_policy import (  # noqa: E402
+    ModerationDecision,
+    build_anonymous_context,
+    is_candidate,
+    matches_ai_identity_attack,
+    parse_decision,
+    resolve_action,
+    sanitize_message,
+)
+
+
+class AIModerationPolicyTests(unittest.TestCase):
+    def test_invalid_low_confidence_and_unknown_values_never_punish(self):
+        samples = [
+            "not-json",
+            '{"decision":"recall_and_mute","category":"spam","confidence":0.89,"reason_code":"repeated_spam"}',
+            '{"decision":"kick","category":"spam","confidence":1,"reason_code":"repeated_spam"}',
+            '{"decision":"recall","category":"opinion","confidence":1,"reason_code":"repeated_spam"}',
+        ]
+        for raw in samples:
+            with self.subTest(raw=raw):
+                self.assertEqual(parse_decision(raw).decision, "none")
+
+    def test_action_escalation_is_bounded(self):
+        decision = ModerationDecision(
+            "recall_and_mute", "spam", 0.99, "repeated_spam"
+        )
+        actions = [resolve_action(decision, count) for count in (0, 1, 2, 3, 99)]
+        self.assertEqual([action.mute_seconds for action in actions], [0, 60, 300, 1800, 1800])
+        self.assertTrue(all(action.recall for action in actions))
+
+    def test_context_removes_identifiers_paths_queries_and_secrets(self):
+        raw = (
+            r"QQ900000001 文件 C:\Users\test-user\private.txt "
+            "token=very-secret https://example.test/a?q=private#fragment"
+        )
+        cleaned = sanitize_message(raw)
+        for secret in ("900000001", "liu", "very-secret", "private", "fragment"):
+            self.assertNotIn(secret, cleaned)
+        self.assertIn("https://example.test/a", cleaned)
+
+    def test_anonymous_context_uses_no_ids_and_is_bounded(self):
+        context = build_anonymous_context(
+            [("123456789", "第一条"), ("987654321", "第二条")],
+            max_messages=8,
+            max_chars=3000,
+        )
+        self.assertEqual(context, "成员A：第一条\n成员B：第二条")
+        self.assertNotIn("123456789", context)
+        self.assertNotIn("987654321", context)
+
+    def test_candidate_filter_is_broad_but_skips_normal_chat(self):
+        self.assertFalse(is_candidate("今天晚上吃什么", recent_same=0))
+        self.assertTrue(is_candidate("点击链接领取返现 https://example.test", recent_same=0))
+        self.assertTrue(is_candidate("同一句话", recent_same=2))
+
+    def test_identity_term_gate_matches_every_literal_mention(self):
+        for text in (
+            "小柠就是人工智障",
+            "今天讨论人机协作",
+            "你怎么看人机关系",
+            "机器人技术发展很快",
+            "什么AI？",
+            "你才是ai",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(matches_ai_identity_attack(text))
+
+        for text in ("今天晚上吃什么",):
+            with self.subTest(text=text):
+                self.assertFalse(matches_ai_identity_attack(text))
+
+
+if __name__ == "__main__":
+    unittest.main()

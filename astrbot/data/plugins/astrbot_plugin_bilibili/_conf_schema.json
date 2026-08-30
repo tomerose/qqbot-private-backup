@@ -1,0 +1,106 @@
+{
+    "sessdata": {
+        "description": "sessdata",
+        "type": "string",
+        "hint": "sessdata 获取请查看 readme",
+        "obvious_hint": true
+    },
+    "proxy": {
+        "description": "proxy",
+        "type": "string",
+        "hint": "Bilibili API 请求代理地址。示例: http://127.0.0.1:7890 或 socks5://127.0.0.1:1080，留空则直连。",
+        "default": ""
+    },
+    "bangumi_token": {
+        "description": "bangumi_token",
+        "type": "string",
+        "hint": "可选。Bangumi Access Token。调用需要授权的接口时请填写。",
+        "invisible": true
+    },
+    "interval_secs": {
+        "description": "interval_secs",
+        "type": "int",
+        "hint": "单个UP主任务的检测周期（秒）。",
+        "obvious_hint": true,
+        "default": 300
+    },
+    "task_gap_secs": {
+        "description": "task_gap_secs",
+        "type": "int",
+        "hint": "相邻两个UP主任务的最小间隔，秒数",
+        "default": 20
+    },
+    "reconnect_silent": {
+        "description": "reconnect_silent",
+        "type": "bool",
+        "hint": "重连时静默：启动时若长时间未成功推送订阅通知，则先静默一段时间以消化积压。",
+        "default": false
+    },
+    "rai": {
+        "description": "render_as_image",
+        "type": "bool",
+        "hint": "是否以图片形式渲染动态与直播推送",
+        "default": true
+    },
+    "renderer_template": {
+        "description": "renderer_template",
+        "type": "string",
+        "hint": "渲染模板",
+        "options": ["template_1", "template_2", "simple"],
+        "default": "template_2"
+    },
+    "node": {
+        "description": "node",
+        "type": "bool",
+        "hint": "是否以转发消息形式推送动态消息",
+        "default": false
+    },
+    "enable_parse_miniapp": {
+        "description": "enable_parse_miniapp",
+        "type": "bool",
+        "hint": "是否解析小程序",
+        "default": true
+    },
+    "enable_parse_BV": {
+        "description": "enable_parse_BV",
+        "type": "bool",
+        "hint": "是否解析B站视频链接",
+        "default": true
+    },
+    "dynamic_limit": {
+        "description": "dynamic_limit",
+        "type": "int",
+        "hint": "每个UP主的单次动态推送数量限制",
+        "default": 5
+    },
+    "recent_dynamic_cache": {
+        "description": "recent_dynamic_cache",
+        "type": "int",
+        "hint": "动态缓存大小（recent_ids长度）",
+        "default": 4
+    },
+    "plain_push_template": {
+        "description": "纯文本推送消息模板",
+        "type": "text",
+        "hint": "非图片推送模式下的动态消息模板，留空使用默认格式。可用变量: {name}(UP主名称) {uid}(UID) {action}(动态动作，如\"投稿了新视频\") {title}(标题) {text}(正文) {url}(链接)。格式化后的空行会被自动移除。图片和转发内容始终自动追加在模板文本之后。",
+        "default": ""
+    },
+    "plain_push_forward_template": {
+        "description": "纯文本推送转发内容模板",
+        "type": "text",
+        "hint": "非图片推送模式下的转发内容模板，留空使用默认格式。可用变量: {name} {uid} {title} {text} {url}，数据来源为被转发的原动态。",
+        "default": ""
+    },
+    "enable_ai_summary": {
+        "description": "enable_ai_summary",
+        "type": "bool",
+        "hint": "是否在动态推送后额外调用 AI 生成摘要",
+        "default": false
+    },
+    "ai_summary_prompt": {
+        "description": "ai_summary_prompt",
+        "type": "text",
+        "hint": "可选，AI 摘要提示词模板。可使用 {content} 代表组装后的动态内容。留空使用内置默认提示词。",
+        "default": ""
+    }
+}

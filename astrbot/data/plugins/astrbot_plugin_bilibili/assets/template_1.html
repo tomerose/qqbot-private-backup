@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=700">
+<style>
+    body {
+        margin: 0;
+        padding: 0;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+        background: linear-gradient(135deg, #efb7e4 0%, #9ab9eb 100%);
+        background-repeat: no-repeat;
+        display: flex;
+        min-height: 100vh;
+        align-items: flex-start;
+        box-sizing: border-box;
+    }
+
+    .dynamic-card {
+        margin-left: 10px;
+        margin-top: 8px;
+        margin-bottom: 10px;
+        background: linear-gradient(145deg, #f8f9fc, #ffffff);
+        border-radius: 18px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+        max-width: 680px;
+        width: 100%;
+        min-height: 780px;
+        box-sizing: border-box;
+        border: 1px solid #e8f0ff;
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
+    .header-left {
+        display: flex;
+        align-items: center;
+        flex-shrink: 0;
+        max-width: calc(100% - 100px);
+        overflow: hidden;
+    }
+
+    .header-qrcode {
+        width:  96px;
+        height: 96px;
+        object-fit: contain; /* 保证二维码完整显示 */
+        display: block; /* 避免可能的底部空隙 */
+        flex-shrink: 0; /* 防止二维码被压缩 */
+    }
+
+    .card-header {
+        padding: 5px 24px;
+        background: linear-gradient(45deg, #ffeef2, #f0f8ff);
+        border-bottom: 1px solid #ffe0eb;
+        position: relative;
+        flex-shrink: 0; /* 不被压缩 */
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+    .avatar-container {
+        width:  96px; /* 与原头像大小一致 */
+        height: 96px;
+        position: relative; /* 作为绝对定位的参照物 */
+        margin-right: 16px; /* 保持与右侧信息的间距 */
+        flex-shrink: 0; /* 防止容器被压缩 */
+        display: block; /* 确保是块级元素 */
+    }
+
+    .up-avatar {
+        position: absolute; /* 绝对定位于容器 */
+        /* 宽度和高度改为100%，填满容器 */
+        width:  100%;
+        height: 100%;
+        transform: scale(0.55) translate(4px, 0px);
+        border-radius: 50%; /* 保持圆形 */
+        object-fit: cover; /* 保持图片填充方式 */
+        border: 0px solid #ffffff; /* 保持边框 */
+        box-shadow: 0 2px 8px rgba(255, 87, 155, 0.3); /* 保持阴影 */
+        display: block; /* 确保是块级元素 */
+        z-index: 1;
+    }
+
+    .up-pendant {
+        position: absolute; /* 绝对定位于容器 */
+        width: 100%; /* 完全覆盖容器 */
+        height: 100%;
+        transform: scale(0.95) translate(2px, -1px);
+        pointer-events: none;
+        z-index: 2; /* 确保在头像之上 */
+        display: block;
+    }
+
+    .up-info {
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
+    .up-name {
+        font-size: 20px;
+        font-weight: 700;
+        color: #fb7299;
+        margin-bottom: 1px;
+        text-shadow: 0 1px 1px rgba(255, 193, 7, 0.2);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .dynamic-type {
+        font-size: 13px;
+        padding: 4px 10px;
+        border-radius: 6px;
+        background: linear-gradient(45deg, #ffe0e6, #f8f9fa);
+        color: #7e57c2;
+        font-weight: 600;
+        display: inline-block;
+        width: fit-content;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-top: 2px;
+        word-break: break-word;
+        word-wrap: break-word;
+    }
+
+    .content-wrapper {
+        flex: 1; /* 填充剩余空间 */
+        display: flex;
+        flex-direction: column;
+        overflow: hidden; /* 阻止内部内容溢出 content-wrapper */
+        min-height: 0; /* 重要：允许 flex item 收缩到 0 (理论上)，避免内容把父级撑开 */
+    }
+
+    /* 内容样式 */
+    .card-content {
+        padding: 4px 8px 4px;
+        position: relative;
+        background: linear-gradient(45deg, #f5faff 25%, #faf7ff 75%);
+        overflow: hidden; /* 隐藏内部溢出的文本 */
+        flex-shrink: 0; /* 修改：让文本区优先占据其内容所需高度（受内部p限制）*/
+        z-index: 1; /* 确保在图片背景之上 */
+    }
+
+    .card-content::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 28px;
+        right: 28px;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, #e0e0e0, transparent);
+    }
+
+    /* --- Forward Content Styles --- */
+    .forward-content {
+        flex: 1; /* 占据 content-wrapper 剩余空间 */
+        display: flex; /* 使用 Flexbox 布局 */
+        flex-direction: column; /* 内部元素垂直排列 */
+        background-color: #e3dfdf; /* 淡灰色背景 */
+        /* padding: 15px 20px; */ /* 移除整体 padding，在子元素上控制 */
+        overflow: hidden; /* 隐藏内部溢出 */
+        box-sizing: border-box;
+        min-height: 0;
+        border-radius: 18px;
+        border-top: 1px solid #eee;
+    }
+    .forward-header {
+        display: flex;
+        align-items: center;
+        padding: 10px 20px 0px; /* 调整内边距 */
+        flex-shrink: 0; /* 不收缩 */
+    }
+    .forward-avatar-container {
+        width:  64px;
+        height: 64px;
+        position: relative;
+        margin-right: 12px;
+        flex-shrink: 0;
+    }
+    .forward-avatar {
+        position: absolute;
+        width: 100%;
+        height: 100%;
+        border-radius: 50%;
+        object-fit: cover;
+        transform: scale(0.6) translate(-1.5px, 0px);
+        z-index: 1;
+    }
+    .forward-pendant {
+        position: absolute;
+        width: 100%;
+        height: 100%;
+        transform: scale(1);
+        pointer-events: none;
+        z-index: 2;
+    }
+    .forward-name {
+        font-weight: 600;
+        color: #444;
+        font-size: 15px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .forward-title {
+        font-weight: bold;
+        color: #333;
+        font-size: 24px;
+        margin-top: 0px;
+        margin-bottom: 0px;
+        padding: 0 24px; /* 调整内边距 */
+        flex-shrink: 0; /* 不收缩 */
+    }
+
+    .forward-text {
+        font-size: 14px;
+        font-weight: 400;
+        line-height: 1.6;
+        color: #0b0b0b; /* 接近黑色 */
+        margin-bottom: 12px;
+        padding: 0 26px; /* 保持用户指定的内边距 */
+        word-wrap: break-word; /* 保留换行 */
+        flex-shrink: 0; /* 保持不收缩 */
+        overflow: hidden;            /* 必须：隐藏溢出的内容 */
+        text-overflow: ellipsis;     /* 尝试显示省略号（对 line-clamp 是必要的） */
+        display: -webkit-box;
+        -webkit-line-clamp: 8;
+        -webkit-box-orient: vertical;
+    }
+
+    .forward-text img {
+        display: inline-block;    /* 让图片像文字一样排列 */
+        height: 1.3em;            /* 高度与字体大小相关 (基于 14px) */
+        width: auto;              /* 宽度自适应 */
+        vertical-align: text-bottom; /* 垂直对齐 */
+        margin: 0 0.15em;         /* 左右间距 */
+    }
+    .forward-text a {
+        text-decoration: none;    /* 移除下划线 */
+        color: #178BCF;           /* 与主内容一致的链接颜色 */
+        font-weight: bold;  
+    }
+    /* --- End added styles for .forward-text children --- */
+
+    .forward-image {
+        flex: 1; /* 关键：占据所有剩余垂直空间 */
+        display: flex; /* 使用 flex 居中内部图片 */
+        justify-content: center;
+        align-items: center;
+        overflow: hidden; /* 隐藏图片溢出的部分 */
+        padding: 10px 20px 15px; /* 给图片周围留出边距 */
+        min-height: 0; /* 配合 flex:1 */
+    }
+
+    .forward-image img {
+        display: block;
+        max-width: 100%;  /* 图片最大宽度为容器宽度 */
+        max-height: 100%; /* 图片最大高度为容器高度 */
+        width: auto;      /* 宽度自适应 */
+        height: auto;     /* 高度自适应 */
+        object-fit: contain; /* 保持宽高比，完整显示图片，可能留白 */
+        border-radius: 8px; /* 图片圆角 */
+    }
+    /* --- End Forward Content Styles --- */
+
+    .rich-text-content {
+        font-size: 16px;        /* 保持文本样式 */
+        line-height: 1.6;       /* 保持文本样式 */
+        color: #2c3e50;         /* 保持文本样式 */
+        margin: 0;              /* 移除默认间距 */
+        padding: 12px 10px 5px;        /* 保持内边距 */
+        background: linear-gradient(to right, #f0f4fc 50%, #f9f7ff 50%); /* 应用背景 */
+        background-size: 200% 100%;
+        padding-left: 12px;     /* 保持左内边距 */
+        border-left: 2px solid #e8eaf6; /* 应用边框 */
+        border-radius: 18px;    /* 应用圆角 */
+
+        /* overflow: hidden;
+        max-height: calc(1.6em * 5);
+        text-overflow: ellipsis;
+        display: -webkit-box;
+        -webkit-line-clamp: 5;
+        -webkit-box-orient: vertical;
+        word-wrap: break-word; */
+    }
+
+    /* 新增：针对富文本中图片的样式 */
+    .rich-text-content img {
+        display: inline-block;    /* 让图片像文字一样排列，但可以设置宽高 */
+        height: 1.3em;            /* 关键：让图片高度接近一行文字的高度，可调整 */
+        width: auto;              /* 宽度自适应高度，保持比例 */
+        vertical-align: text-bottom; /* 关键：垂直对齐方式，text-bottom 或 middle 通常较好 */
+        margin: 0 0.15em;         /* 可选：给图片左右加一点小间距 */
+    }
+    .rich-text-content a {
+        text-decoration: none;
+        color: #178BCF;
+        font-weight: bold;
+    }
+
+    .image-gallery {
+        border-radius: 18px;
+        flex: 1;
+        display: grid;
+        gap: 10px;
+        padding: 8px 12px 10px;
+        background: linear-gradient(135deg, #cff3f9 30%, #bfd2fb 70%);
+        overflow: hidden;
+        box-sizing: border-box;
+        min-height: 0;
+        grid-auto-rows: minmax(0, 1fr);
+    }
+
+    .image-gallery.count-1 {
+        display: flex; /* 使用 flex 居中 */
+        justify-content: center;
+        align-items: center;
+        padding: 20px; /* 给单张图更多边距 */
+        grid-auto-rows: auto;
+    }
+    .image-gallery.count-1 img {
+       /* 让图片自适应容器大小，保持比例 */
+        max-width: 100%;
+        max-height: 100%;
+        width: auto; /* 宽度自适应 */
+        height: auto; /* 高度自适应 */
+        object-fit: contain;
+    }
+
+    .image-gallery img {
+        display: block;
+        width: 100%;
+        height: 100%; /* 关键：让图片尝试填满单元格 */
+        object-fit: contain; /* 保证图片完整，可能会留白 */
+        object-position: center; /* 居中显示 */
+
+        border-radius: 12px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+        transition: transform 0.3s ease;
+    }
+
+    /* 网格列数设置 */
+    .image-gallery.count-2,
+    .image-gallery.count-4 {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .image-gallery.count-3,
+    .image-gallery.count-5,
+    .image-gallery.count-6,
+    .image-gallery.count-7,
+    .image-gallery.count-8,
+    .image-gallery.count-9 {
+        grid-template-columns: repeat(3, 1fr);
+    }
+
+    /* 页脚样式 */
+    .card-footer {
+        padding: 18px 24px;
+        border-top: 1px solid #f0f0f0;
+        background: linear-gradient(90deg, #e0f2f7, #fce4ec);
+        flex-shrink: 0; /* 不被压缩 */
+        text-align: right;
+    }
+
+    .dynamic-tag {
+        font-size: 14px;
+        color: #1e88e5;
+        font-weight: 600;
+        text-decoration: none;
+        padding: 6px 12px;
+        border-radius: 8px;
+        background: linear-gradient(45deg, #e8f5e9, #f3e5f5);
+    }
+</style>
+</head>
+<body>
+
+<div class="dynamic-card">
+    <div class="card-header">
+        
+        <div class="header-left">
+            {% if avatar %}
+            <div class="avatar-container">
+                <img src="{{ avatar }}" alt="avatar" class="up-avatar">
+                {% if pendant %}
+                <img src="{{ pendant }}" alt="avatar frame" class="up-pendant">
+                {% endif %}
+            </div>
+            {% endif %}
+
+            <div class="up-info">
+                <span class="up-name">{{ name | default('AstrBot') }}</span>
+                <span class="dynamic-type">订阅更新</span>
+                {% if title %}
+                <span class="dynamic-type">{{ title }}</span>
+                {% endif %}
+            </div>
+        </div>
+
+        {% if qrcode %}
+        <img src="{{ qrcode }}" alt="QR Code" class="header-qrcode">
+        {% endif %}
+    </div>
+
+    <div class="content-wrapper">
+        <div class="card-content">
+            <div class="rich-text-content">
+                {{ text | default('动态内容为空') | safe }}
+            </div>
+        </div>
+
+        {% if forward and forward.name %}
+            <div class="forward-content">
+                <div class="forward-header">
+                    {% if forward.avatar %}
+                    <div class="forward-avatar-container">
+                        <img src="{{ forward.avatar }}" alt="forward avatar" class="forward-avatar">
+                        {% if forward.pendant %}
+                        <img src="{{ forward.pendant }}" alt="forward pendant" class="forward-pendant">
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                    <span class="forward-name">{{ forward.name }}</span>
+                </div>
+                {% if forward.title %}
+                    <div class="forward-title">{{ forward.title }}</div>
+                {% endif %}
+                {% if forward.text %}
+                    <div class="forward-text">
+                        {{ forward.text | safe }}
+                    </div>
+                {% endif %}
+
+                {% if forward.image_urls %}
+                    <div class="forward-image">
+                        {% for img_url in forward.image_urls %}
+                        <img src="{{ img_url }}" alt="forward image">
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            </div>
+
+        {% elif image_urls %}
+            <div class="image-gallery count-{{ image_urls | length }}">
+                {% for img_url in image_urls %}
+                <img src="{{ img_url }}" alt="dynamic image">
+                {% endfor %}
+            </div>
+        {% endif %}
+    </div>
+
+    <div class="card-footer">
+        <a target="_blank" class="dynamic-tag">Created By Astrbot Plugin Bilibili</a>
+    </div>
+</div>
+
+</body>
+</html>

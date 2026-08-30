@@ -1,0 +1,6 @@
+name: music_command
+display_name: 小柠音乐
+short_desc: 网易云音乐卡与 Pro 原创歌曲
+desc: /music 发送网易云音乐卡；Pro 用户使用 /sing 生成 Google Lyria 原创歌曲。
+version: v1.0.0
+author: lemon

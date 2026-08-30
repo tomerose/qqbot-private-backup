@@ -1,0 +1,6 @@
+name: github_tools
+display_name: GitHub工具
+short_desc: /gh 搜索仓库/用户/trending
+desc: GitHub搜索工具，支持查仓库、用户、趋势
+version: v1.0.0
+author: lemon

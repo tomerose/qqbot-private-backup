@@ -1,0 +1,52 @@
+{
+  "pro_user_ids": {
+    "description": "Pro QQ 白名单（逗号分隔，仅本机配置可修改）",
+    "type": "string",
+    "default": ""
+  },
+  "trusted_pro_user_ids": {
+    "description": "Trusted Pro QQ 白名单（仅本机配置，可执行本机 Agent）",
+    "type": "string",
+    "default": ""
+  },
+  "default_backend": {
+    "description": "默认 Agent 后端",
+    "type": "string",
+    "options": ["claude", "codex", "workbuddy"],
+    "default": "claude"
+  },
+  "default_work_dir": {
+    "description": "默认执行目录（仅本机配置生效）",
+    "type": "string",
+    "default": ""
+  },
+  "codex_model": {
+    "description": "QQBot 专用 Codex 模型（不修改全局 Codex 配置）",
+    "type": "string",
+    "default": "gpt-5.6-terra"
+  },
+  "timeout_seconds": {
+    "description": "单任务看门狗超时（秒）",
+    "type": "int",
+    "slider": {"min": 60, "max": 7200, "step": 60},
+    "default": 1800
+  },
+  "max_attachment_files": {
+    "description": "每次最多回传文件数",
+    "type": "int",
+    "slider": {"min": 1, "max": 20, "step": 1},
+    "default": 10
+  },
+  "max_attachment_mb": {
+    "description": "单个回传文件最大 MB",
+    "type": "int",
+    "slider": {"min": 1, "max": 100, "step": 1},
+    "default": 20
+  },
+  "max_queued_jobs": {
+    "description": "最多等待执行的自然语言 Agent 任务数",
+    "type": "int",
+    "slider": {"min": 1, "max": 5, "step": 1},
+    "default": 3
+  }
+}

@@ -1,0 +1,14 @@
+# 故事叙述模板 — vlog、故事、经历分享
+name: "故事叙述"
+description: "vlog、经历分享、故事类视频"
+style: "warm"
+duration_range: [30, 120]
+hook_required: true
+pace: "medium"
+visual_style: "real"
+voice_style: "storytelling"
+subtitle_style: "dynamic"
+transitions: ["fade", "dissolve"]
+motion: "ken_burns"
+aspect_ratio: "16:9"
+script_hint: "第一人称叙述，有情感起伏，像在跟朋友讲述一段经历"

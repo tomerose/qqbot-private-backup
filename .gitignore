@@ -1,0 +1,71 @@
+# Python and local tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+node_modules/
+
+# Logs, locks, and generated artifacts
+*.log
+*.log.*
+*.lock
+*.zip
+*.tar
+*.gz
+*.tmp
+*.bak
+*.pid
+*.db
+*.db-shm
+*.db-wal
+/_lyrics.txt
+/_song_*.wav
+/_uplifting_song.wav
+/tmp/
+/output/
+/*.pdf
+/generate_*_audit.py
+/generate_audit*.py
+
+# Credentials and local environment
+.env
+.env.*
+!.env.example
+xiaoning.local.ps1
+*.token
+*.pem
+*.key
+*.pfx
+*.p12
+astrbot/data/cmd_config.json
+astrbot/data/vertex-key.json
+data/cmd_config.json
+# AstrBot private runtime data
+astrbot/astrbot.log
+astrbot/plugin_data/
+data/plugin_data/
+astrbot/data/attachments/
+astrbot/data/backups/
+astrbot/data/config/
+astrbot/data/knowledge_base/
+astrbot/data/logs/
+astrbot/data/plugin_data/
+astrbot/data/temp/
+astrbot/data/webchat/
+
+# QQ / NapCat login sessions and runtime
+napcat/config/
+napcat-runtime/
+
+# Local agent task records and delivery artifacts
+claude_workspace/
+services/local_tts/tts_audio/
+
+# Local-only experiments that must not be published
+astrbot/data/plugins/sing_command/
+scripts/send_sing_voice.py
+tests/test_sing_command.py
+weixin-private-login-qr.png
