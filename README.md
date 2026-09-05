@@ -1,4 +1,56 @@
-# 小柠 Xiaoning
+# Xiaoning — a self-hosted QQ AI assistant for Windows
+
+> 中文速览：小柠把 QQ、NapCat、AstrBot 插件和部署者自带的模型 API 组合成可在 Windows 本机运行的 AI 助手。它优先保护账号、聊天记录和密钥：运行数据不进入 Git，服务默认只监听本机回环地址。
+
+Xiaoning is an opinionated, self-hosted assistant for QQ. It is designed around a simple constraint: automation is useful only when the account holder retains control of credentials, conversations, delivery status, and local services.
+
+## Why it is interesting
+
+- **A real messaging boundary:** NapCat/OneBot bridges QQ events into an extensible AstrBot runtime instead of exposing a model directly to the network.
+- **Behavior is composable:** routing, context, memory, proactive behavior, links, media, and optional voice are isolated plugins rather than one monolithic prompt.
+- **Delivery is evidence-aware:** downstream media work is not described as complete merely because a provider returned an HTTP success.
+- **Windows-first deployment:** bootstrap scripts and local service configuration target the environment in which the bot is actually operated.
+
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    QQ[QQ conversation] --> NC[NapCat / OneBot]
+    NC --> AB[AstrBot runtime]
+    AB --> RT[Chat router and capability plugins]
+    RT --> CTX[Context and memory plugins]
+    RT --> LLM[Deployers own OpenAI-compatible model API]
+    RT --> PR[Proactive and scheduled behavior]
+    RT --> VO[Optional local TTS service]
+    CTX --> DB[(Local conversation data)]
+    VO --> MEDIA[QQ voice delivery]
+
+    classDef local fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    class AB,RT,CTX,DB,VO local
+```
+
+**Trust boundary.** API keys, NapCat login state, attachments, logs, and local databases remain machine-local and are ignored by Git. Model access is configured by the deployer; this repository never supplies a shared key.
+
+## Verification
+
+```powershell
+py -3.12 -m pytest -q
+ruff check astrbot/data/plugins --select E9,F63,F7,F82
+```
+
+For a meaningful end-to-end check, confirm that a test account can receive and open a response in QQ. Local process health and OneBot message IDs alone do not prove recipient-visible delivery.
+
+## Related work
+
+- [DEEP Open Education Platform](https://github.com/tomerose/deep-camp-platform) — evidence-first workflows for education.
+- [SkillTrace](https://github.com/tomerose/qoderwork-skilltrace) — consent and evidence layers for AI automation.
+- [Mango Learning OS](https://github.com/tomerose/Mango-learning-os) — an AI-assisted learning product.
+
+> **Reuse note:** this repository is publicly visible but does not currently include a license grant. Never commit private QQ identifiers, credentials, or local runtime data.
+
+---
+
+# Detailed setup and capability notes
 
 [![CI](https://github.com/tomerose/qqbot-private-backup/actions/workflows/ci.yml/badge.svg)](https://github.com/tomerose/qqbot-private-backup/actions/workflows/ci.yml)
 
